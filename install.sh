@@ -1,40 +1,117 @@
 #!/usr/bin/env bash
 
-TITLE="sing-box 一键安装系统"
+CONF="/etc/sing-box/config.json"
+SERVICE="sing-box"
+
+generate() {
 
 echo "=============================="
-echo "$TITLE"
+read -p "请输入节点名称: " NODE_NAME
+read -p "请输入端口(默认21445): " PORT
+PORT=${PORT:-21445}
+
+UUID=$(cat /proc/sys/kernel/random/uuid)
+KEYS=$(sing-box generate reality-keypair)
+PRIVATE_KEY=$(echo "$KEYS" | awk '/PrivateKey/{print $2}')
+PUBLIC_KEY=$(echo "$KEYS" | awk '/PublicKey/{print $2}')
+SHORT_ID=$(openssl rand -hex 4)
+
+IP=$(curl -4s ifconfig.me)
+
+cat > $CONF <<EOF
+{
+  "log": { "level": "info" },
+
+  "dns": {
+    "servers": [
+      { "tag": "google", "address": "8.8.8.8", "detour": "direct" }
+    ],
+    "final": "google"
+  },
+
+  "inbounds": [
+    {
+      "type": "vless",
+      "listen": "::",
+      "listen_port": $PORT,
+      "users": [
+        {
+          "uuid": "$UUID",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "www.microsoft.com",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "www.microsoft.com",
+            "server_port": 443
+          },
+          "private_key": "$PRIVATE_KEY",
+          "short_id": ["$SHORT_ID"]
+        }
+      }
+    }
+  ],
+
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}
+EOF
+
+systemctl restart sing-box
+
+LINK="vless://${UUID}@${IP}:${PORT}?security=reality&encryption=none&flow=xtls-rprx-vision&sni=www.microsoft.com&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}#${NODE_NAME}"
+
+echo ""
+echo "=============================="
+echo "节点已生成"
+echo "=============================="
+echo "$LINK"
+echo "$LINK" > /root/vless.txt
+}
+
+show() {
+cat /root/vless.txt
+}
+
+change_port() {
+read -p "输入新端口: " NEWPORT
+
+OLD=$(cat /etc/sing-box/config.json | sed "s/\"listen_port\": [0-9]*/\"listen_port\": $NEWPORT/")
+
+echo "$OLD" > $CONF
+
+systemctl restart sing-box
+
+echo "端口已更新: $NEWPORT"
+}
+
+uninstall() {
+systemctl stop sing-box
+rm -rf /etc/sing-box
+rm -f /root/vless.txt
+echo "已卸载"
+}
+
+echo "=============================="
+echo "1. 安装 / 重建节点"
+echo "2. 查看链接"
+echo "3. 卸载"
+echo "4. 更换端口"
 echo "=============================="
 
-# 基础依赖
-apt update -y
-apt install -y curl jq qrencode uuid-runtime openssl
+read -p "选择: " c
 
-# 检查 sing-box
-if ! command -v sing-box &> /dev/null; then
-  echo "[1] 安装 sing-box..."
-
-  VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
-
-  curl -L -o sb.tar.gz \
-  "https://github.com/SagerNet/sing-box/releases/download/${VER}/sing-box-${VER#v}-linux-amd64.tar.gz"
-
-  tar -xzf sb.tar.gz
-  mv sing-box-*/sing-box /usr/local/bin/
-  chmod +x /usr/local/bin/sing-box
-fi
-
-# 拉取核心脚本（你原来的逻辑）
-TMP="/tmp/singbox-core.sh"
-
-curl -Ls https://raw.githubusercontent.com/yan9jx/singbox-tool/main/singbox-rebuild.sh -o $TMP
-
-if [ ! -s "$TMP" ]; then
-  echo "❌ 核心脚本下载失败（GitHub路径不对）"
-  exit 1
-fi
-
-chmod +x $TMP
-
-echo "[2] 启动核心安装..."
-bash $TMP
+case $c in
+1) generate ;;
+2) show ;;
+3) uninstall ;;
+4) change_port ;;
+esac
