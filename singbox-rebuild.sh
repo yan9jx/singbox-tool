@@ -71,6 +71,34 @@ install_singbox_core() {
   echo "sing-box 核心安装完成：$version"
 }
 
+configure_bbr() {
+  local current available bbr_file="/etc/sysctl.d/99-singbox-bbr.conf"
+  current="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")"
+
+  echo
+  echo "当前 TCP 拥塞控制算法：$current"
+  if ! confirm "是否安装 / 启用 BBR + FQ？"; then
+    echo "已跳过 BBR 设置。"
+    return
+  fi
+
+  modprobe tcp_bbr 2>/dev/null || true
+  available="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+  if ! grep -qw bbr <<<"$available"; then
+    echo "警告：当前内核不支持 BBR，已跳过，不影响 sing-box 安装。"
+    return
+  fi
+
+  cat >"$bbr_file" <<EOF
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+
+  sysctl -w net.core.default_qdisc=fq >/dev/null
+  sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null
+  echo "BBR + FQ 已启用，当前算法：$(sysctl -n net.ipv4.tcp_congestion_control)"
+}
+
 show_link() {
   if [[ ! -f "$INFO_FILE" ]]; then
     die "没有已保存的节点链接，请先选择 1 安装/重建节点。"
@@ -126,6 +154,8 @@ install_node() {
   fi
   [[ "$port" =~ ^[0-9]+$ ]] || die "端口必须是数字。"
   (( port >= 1 && port <= 65535 )) || die "端口必须在 1 到 65535 之间。"
+
+  configure_bbr
 
   local keys private_key public_key uuid short_id tmp_config backup_file=""
   echo "正在生成新的 VLESS Reality 节点..."
