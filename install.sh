@@ -6,6 +6,7 @@ set -Eeuo pipefail
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
+PUBLIC_PORT="80"
 CREDS_FILE="/root/filebrowser-credentials.txt"
 NGINX_CONF=""
 
@@ -71,11 +72,29 @@ choose_available_port() {
 check_web_port_conflicts() {
   local port=80
 
-  if ! port_is_available "$port"; then
-    if ! command -v ss >/dev/null 2>&1 || ! ss -H -ltnp "sport = :${port}" 2>/dev/null | grep -q 'nginx'; then
-      die "端口 ${port} 已被非 Nginx 服务占用。为避免影响其他脚本或网站，安装已停止。"
-    fi
+  if systemctl is-active --quiet filebrowser-nginx 2>/dev/null; then
+    warn "检测到已有 File Browser 独立 Nginx，暂时停止以重新检测端口。"
+    systemctl stop filebrowser-nginx
   fi
+
+  if port_is_available "$port"; then
+    return
+  fi
+
+  if command -v ss >/dev/null 2>&1 && ss -H -ltnp "sport = :${port}" 2>/dev/null | grep -q 'nginx'; then
+    return
+  fi
+
+  warn "公网端口 80 已被其他服务占用，正在寻找空闲访问端口..."
+  for port in $(seq 8000 8079); do
+    if [[ $port != "$FB_PORT" ]] && port_is_available "$port"; then
+      PUBLIC_PORT="$port"
+      info "将使用公网访问端口：${PUBLIC_PORT}（443 保留给 sing-box）"
+      return
+    fi
+  done
+
+  die "未能在 8000-8079 范围内找到空闲公网访问端口。"
 }
 
 detect_os() {
@@ -129,7 +148,7 @@ install_packages() {
     dnf install -y nginx curl ca-certificates
   fi
 
-  systemctl enable --now nginx
+  [[ $PUBLIC_PORT == "80" ]] && systemctl enable nginx
 }
 
 configure_security() {
@@ -140,12 +159,20 @@ configure_security() {
   fi
 
   if systemctl is-active --quiet firewalld 2>/dev/null; then
-    firewall-cmd --permanent --add-service=http
+    if [[ $PUBLIC_PORT == "80" ]]; then
+      firewall-cmd --permanent --add-service=http
+    else
+      firewall-cmd --permanent --add-port="${PUBLIC_PORT}/tcp"
+    fi
     firewall-cmd --reload
   fi
 
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "^Status: active"; then
-    ufw allow "Nginx HTTP"
+    if [[ $PUBLIC_PORT == "80" ]]; then
+      ufw allow "Nginx HTTP"
+    else
+      ufw allow "${PUBLIC_PORT}/tcp"
+    fi
   fi
 }
 
@@ -257,10 +284,12 @@ verify_login() {
 
 write_nginx_config() {
   info "配置 Nginx 反向代理与上传限制..."
-  cat > "$NGINX_CONF" <<EOF
+  if [[ $PUBLIC_PORT == "80" ]]; then
+    systemctl disable filebrowser-nginx 2>/dev/null || true
+    cat > "$NGINX_CONF" <<EOF
 server {
-    listen 80;
-    listen [::]:80;
+    listen ${PUBLIC_PORT};
+    listen [::]:${PUBLIC_PORT};
     server_name ${DOMAIN};
 
     client_max_body_size ${UPLOAD_LIMIT};
@@ -282,20 +311,78 @@ server {
 }
 EOF
 
-  if [[ $PKG_FAMILY == "debian" ]]; then
-    ln -sfn "$NGINX_CONF" /etc/nginx/sites-enabled/filebrowser
-  fi
+    if [[ $PKG_FAMILY == "debian" ]]; then
+      ln -sfn "$NGINX_CONF" /etc/nginx/sites-enabled/filebrowser
+    fi
 
-  nginx -t
-  systemctl reload nginx
+    nginx -t
+    systemctl enable --now nginx
+    systemctl reload nginx
+  else
+    NGINX_CONF="/etc/nginx/filebrowser-standalone.conf"
+    cat > "$NGINX_CONF" <<EOF
+pid /run/filebrowser-nginx.pid;
+error_log /var/log/nginx/filebrowser-error.log;
+
+events {}
+
+http {
+    include /etc/nginx/mime.types;
+    access_log /var/log/nginx/filebrowser-access.log;
+
+    server {
+        listen ${PUBLIC_PORT};
+        listen [::]:${PUBLIC_PORT};
+        server_name ${DOMAIN};
+
+        client_max_body_size ${UPLOAD_LIMIT};
+        client_body_timeout 3600s;
+
+        location / {
+            proxy_pass http://127.0.0.1:${FB_PORT};
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_request_buffering off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+    }
+}
+EOF
+    cat > /etc/systemd/system/filebrowser-nginx.service <<EOF
+[Unit]
+Description=Standalone Nginx reverse proxy for File Browser
+After=network-online.target filebrowser.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=$(command -v nginx) -t -c ${NGINX_CONF}
+ExecStart=$(command -v nginx) -c ${NGINX_CONF} -g "daemon off;"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now filebrowser-nginx
+  fi
 }
 
 save_and_show_credentials() {
   local scheme="http"
+  local public_address="${DOMAIN}"
+  [[ $PUBLIC_PORT != "80" ]] && public_address="${DOMAIN}:${PUBLIC_PORT}"
 
   umask 077
   cat > "$CREDS_FILE" <<EOF
-File Browser URL: ${scheme}://${DOMAIN}
+File Browser URL: ${scheme}://${public_address}
 Username: ${ADMIN_USER}
 Password: ${ADMIN_PASS}
 Storage directory: ${FB_ROOT}
@@ -307,7 +394,7 @@ EOF
   printf "${GREEN}============================================================${NC}\n"
   printf "${GREEN} File Browser 安装完成${NC}\n"
   printf "${GREEN}============================================================${NC}\n"
-  printf "访问地址：%s://%s\n" "$scheme" "$DOMAIN"
+  printf "访问地址：%s://%s\n" "$scheme" "$public_address"
   printf "管理员账号：%s\n" "$ADMIN_USER"
   printf "管理员密码：%s\n" "$ADMIN_PASS"
   printf "存储目录：%s\n" "$FB_ROOT"
