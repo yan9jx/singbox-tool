@@ -1,6 +1,6 @@
 # File Browser VPS 一键安装脚本
 
-在 Linux VPS 上一键安装 File Browser，并自动配置 Nginx 反向代理、上传限制和 HTTPS。
+在 Linux VPS 上一键安装 File Browser，并自动配置 Nginx HTTP 反向代理和上传限制。
 
 ## 功能
 
@@ -9,9 +9,10 @@
 - File Browser 仅监听 `127.0.0.1:8080`
 - 新安装优先使用 `127.0.0.1:8080`，若被占用则自动选择 `8081-8999` 中的空闲端口
 - 自动配置 Nginx 反向代理
-- 可选申请 Let's Encrypt HTTPS 证书
+- 仅使用 HTTP `80`，始终保留 `443` 给 sing-box 等节点服务
 - 自动配置 UFW、Firewalld 和 SELinux
-- 安装前检测 `80/443` 冲突，若被非 Nginx 服务占用则停止安装，不影响现有服务
+- 安装前仅检测 `80` 端口冲突，若被非 Nginx 服务占用则停止安装
+- 不检测、不开放、不占用 `443` 端口
 - 不删除或覆盖其他 Nginx 站点配置
 - 随机生成管理员密码，并在安装结束时显示
 - 凭据保存至仅 root 可读的 `/root/filebrowser-credentials.txt`
@@ -34,7 +35,7 @@ https://raw.githubusercontent.com/YOUR_GITHUB_NAME/filebrowser-installer/main/in
 
 ## 一键安装
 
-先将域名 A/AAAA 记录解析到 VPS，并放行 TCP `80`、`443` 端口。
+先将域名 A/AAAA 记录解析到 VPS，并放行 TCP `80` 端口。脚本不会占用 `443`。
 
 将命令中的 `YOUR_GITHUB_NAME` 替换为你的 GitHub 用户名，然后使用 root 用户运行：
 
