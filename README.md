@@ -56,8 +56,49 @@ systemctl restart filebrowser
 # 查看安装时生成的凭据
 sudo cat /root/filebrowser-credentials.txt
 
+# 登录失败时重建管理员账号（将 yangjx 和新密码按需替换）
+sudo systemctl stop filebrowser
+sudo filebrowser users rm yangjx --database /etc/filebrowser/filebrowser.db
+sudo filebrowser users add yangjx 'FbReset2026Pass' --perm.admin --database /etc/filebrowser/filebrowser.db
+sudo systemctl start filebrowser
+
+# 返回 200 表示账号密码正确
+curl -sS -o /dev/null -w 'HTTP %{http_code}\n' \
+  -H 'Content-Type: application/json' \
+  --data '{"username":"yangjx","password":"FbReset2026Pass"}' \
+  http://127.0.0.1:8080/api/login
+
 # 检查并重载 Nginx
 nginx -t && systemctl reload nginx
 ```
 
 File Browser 以 root 身份运行，以便管理所选存储目录。安装完成后请及时修改管理员密码。
+
+## 旧文件看不见时恢复根目录
+
+文件存放在磁盘目录中，不在 File Browser 数据库里。先查看当前和备份数据库记录的根目录：
+
+```bash
+sudo filebrowser config cat --database /etc/filebrowser/filebrowser.db | grep -i root
+
+for db in /etc/filebrowser/filebrowser.db.bak.*; do
+  echo "=== $db ==="
+  sudo filebrowser config cat --database "$db" | grep -i root
+done
+```
+
+如果出现 `Error: timeout`，先停止服务再读取数据库：
+
+```bash
+sudo systemctl stop filebrowser
+sudo filebrowser config cat --database /etc/filebrowser/filebrowser.db
+sudo systemctl start filebrowser
+```
+
+找到旧根目录后恢复，例如旧目录为 `/旧目录`：
+
+```bash
+sudo systemctl stop filebrowser
+sudo filebrowser config set --root /旧目录 --database /etc/filebrowser/filebrowser.db
+sudo systemctl start filebrowser
+```
