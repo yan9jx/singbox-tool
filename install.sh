@@ -310,14 +310,25 @@ EOF
 
 verify_login() {
   local http_code
+  local attempt
 
-  info "验证管理员账号密码..."
-  http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
-    -H 'Content-Type: application/json' \
-    --data "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\"}" \
-    "http://127.0.0.1:${FB_PORT}/api/login" || true)"
+  info "等待 File Browser 启动并验证管理员账号密码..."
+  for attempt in $(seq 1 30); do
+    http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+      -H 'Content-Type: application/json' \
+      --data "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\"}" \
+      "http://127.0.0.1:${FB_PORT}/api/login" 2>/dev/null || true)"
 
-  [[ $http_code == "200" ]] || die "管理员登录验证失败（HTTP ${http_code:-unknown}），安装已停止，请检查 File Browser 日志。"
+    if [[ $http_code == "200" ]]; then
+      info "管理员登录验证成功。"
+      return
+    fi
+
+    sleep 1
+  done
+
+  journalctl -u filebrowser --no-pager -n 30 >&2 || true
+  die "管理员登录验证失败（HTTP ${http_code:-unknown}），已输出 File Browser 服务日志。"
 }
 
 write_nginx_config() {
