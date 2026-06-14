@@ -3,11 +3,11 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.06.14-6"
+SCRIPT_VERSION="2026.06.14-7"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
-PUBLIC_PORT="8443"
+PUBLIC_PORT="443"
 CREDS_FILE="/root/filebrowser-credentials.txt"
 NGINX_CONF=""
 
@@ -81,16 +81,16 @@ choose_https_port() {
     return
   fi
 
-  warn "HTTPS 端口 ${PUBLIC_PORT} 已被其他服务占用，正在寻找空闲端口..."
-  for port in $(seq 8444 8499); do
+  warn "标准 HTTPS 端口 ${PUBLIC_PORT} 已被其他服务占用，正在寻找空闲备用端口..."
+  for port in $(seq 8443 8499); do
     if [[ $port != "$FB_PORT" ]] && port_is_available "$port"; then
       PUBLIC_PORT="$port"
-      info "将使用 HTTPS 端口：${PUBLIC_PORT}（443 保留给 sing-box）"
+      info "将使用备用 HTTPS 端口：${PUBLIC_PORT}"
       return
     fi
   done
 
-  die "未能在 8443-8499 范围内找到空闲 HTTPS 端口。"
+  die "443 和 8443-8499 范围内均未找到空闲 HTTPS 端口。"
 }
 
 cleanup_legacy_filebrowser_https() {
@@ -121,7 +121,7 @@ cleanup_legacy_filebrowser_https() {
 
   if [[ $cleaned == "true" ]]; then
     info "旧配置备份目录：${backup_dir}"
-    warn "Let's Encrypt 证书文件已保留，443 端口将继续留给 sing-box。"
+    warn "Let's Encrypt 证书文件已保留；File Browser 将使用标准 HTTPS 443，sing-box 的 2443 不受影响。"
 
     if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
       nginx -t
@@ -496,7 +496,8 @@ EOF
 
 save_and_show_credentials() {
   local scheme="https"
-  local public_address="${DOMAIN}:${PUBLIC_PORT}"
+  local public_address="${DOMAIN}"
+  [[ $PUBLIC_PORT != "443" ]] && public_address="${DOMAIN}:${PUBLIC_PORT}"
 
   umask 077
   cat > "$CREDS_FILE" <<EOF
