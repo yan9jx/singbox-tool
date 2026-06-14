@@ -7,9 +7,12 @@
 - 支持 Debian、Ubuntu、CentOS、Rocky Linux、AlmaLinux
 - 交互输入域名、上传限制、管理员账号和存储目录
 - File Browser 仅监听 `127.0.0.1:8080`
+- 新安装优先使用 `127.0.0.1:8080`，若被占用则自动选择 `8081-8999` 中的空闲端口
 - 自动配置 Nginx 反向代理
 - 可选申请 Let's Encrypt HTTPS 证书
 - 自动配置 UFW、Firewalld 和 SELinux
+- 安装前检测 `80/443` 冲突，若被非 Nginx 服务占用则停止安装，不影响现有服务
+- 不删除或覆盖其他 Nginx 站点配置
 - 随机生成管理员密码，并在安装结束时显示
 - 凭据保存至仅 root 可读的 `/root/filebrowser-credentials.txt`
 
