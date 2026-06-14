@@ -9,12 +9,12 @@
 - File Browser 仅监听 `127.0.0.1:8080`
 - 新安装优先使用 `127.0.0.1:8080`，若被占用则自动选择 `8081-8999` 中的空闲端口
 - 自动配置 Nginx HTTPS 反向代理
-- HTTPS 优先使用 `8443`，被占用时自动选择 `8444-8499` 中的空闲端口
-- 始终保留 `443` 给 sing-box 等节点服务
+- HTTPS 优先使用标准端口 `443`，访问时无需填写端口
+- `443` 被占用时自动选择 `8443-8499` 中的空闲备用端口
+- 不检测、不开放、不占用 sing-box 使用的 `2443` 端口
 - 复用已有 Let's Encrypt 证书；没有证书时通过 `80` 临时完成 ACME 验证
 - 自动配置 UFW、Firewalld 和 SELinux
 - 使用隔离的 File Browser Nginx，不修改系统现有 Nginx 配置
-- 不检测、不开放、不占用 `443` 端口
 - 重复安装时自动备份并禁用当前域名的旧 File Browser `443` Nginx 配置
 - 重复安装时自动备份并禁用当前域名的旧 File Browser HTTP Nginx 配置
 - 保留已有 Let's Encrypt 证书文件，不删除证书
@@ -40,7 +40,7 @@ https://raw.githubusercontent.com/YOUR_GITHUB_NAME/filebrowser-installer/main/in
 
 ## 一键安装
 
-先将域名 A/AAAA 记录解析到 VPS。放行 TCP `8443-8499`；首次申请证书时还需要放行 `80`。脚本不会占用 `443`。
+先将域名 A/AAAA 记录解析到 VPS，并放行 TCP `443`；首次申请证书时还需要放行 `80`。若 `443` 被占用，脚本会自动选择 `8443-8499`，此时也需放行实际选中的端口。脚本不会占用 `2443`。
 
 将命令中的 `YOUR_GITHUB_NAME` 替换为你的 GitHub 用户名，然后使用 root 用户运行：
 
