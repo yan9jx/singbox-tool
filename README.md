@@ -15,6 +15,7 @@
 - 复用已有 Let's Encrypt 证书；没有证书时通过 `80` 临时完成 ACME 验证
 - 自动配置 UFW、Firewalld 和 SELinux
 - 使用隔离的 File Browser Nginx，不修改系统现有 Nginx 配置
+- 使用移动端兼容的 TLS 1.2 和按需 WebSocket 转发，避免页面静态资源加载中断
 - 重复安装时自动备份并禁用当前域名的旧 File Browser `443` Nginx 配置
 - 重复安装时自动备份并禁用当前域名的旧 File Browser HTTP Nginx 配置
 - 保留已有 Let's Encrypt 证书文件，不删除证书
