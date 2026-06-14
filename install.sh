@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
+SCRIPT_VERSION="2026.06.14-5"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -324,6 +325,11 @@ verify_login() {
       return
     fi
 
+    if ! systemctl is-active --quiet filebrowser; then
+      journalctl -u filebrowser --no-pager -n 30 >&2 || true
+      die "File Browser 服务已退出，已输出服务日志。"
+    fi
+
     sleep 1
   done
 
@@ -455,6 +461,7 @@ EOF
 main() {
   require_root
   require_interactive_terminal
+  info "File Browser 安装脚本版本：${SCRIPT_VERSION}"
   detect_os
   collect_input
   cleanup_legacy_filebrowser_https
