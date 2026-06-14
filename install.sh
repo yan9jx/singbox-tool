@@ -3,11 +3,11 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.06.14-5"
+SCRIPT_VERSION="2026.06.14-6"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
-PUBLIC_PORT="80"
+PUBLIC_PORT="8443"
 CREDS_FILE="/root/filebrowser-credentials.txt"
 NGINX_CONF=""
 
@@ -70,32 +70,27 @@ choose_available_port() {
   die "未能在 8081-8999 范围内找到空闲端口。"
 }
 
-check_web_port_conflicts() {
-  local port=80
-
+choose_https_port() {
+  local port
   if systemctl is-active --quiet filebrowser-nginx 2>/dev/null; then
     warn "检测到已有 File Browser 独立 Nginx，暂时停止以重新检测端口。"
     systemctl stop filebrowser-nginx
   fi
 
-  if port_is_available "$port"; then
+  if port_is_available "$PUBLIC_PORT"; then
     return
   fi
 
-  if command -v ss >/dev/null 2>&1 && ss -H -ltnp "sport = :${port}" 2>/dev/null | grep -q 'nginx'; then
-    return
-  fi
-
-  warn "公网端口 80 已被其他服务占用，正在寻找空闲访问端口..."
-  for port in $(seq 8000 8079); do
+  warn "HTTPS 端口 ${PUBLIC_PORT} 已被其他服务占用，正在寻找空闲端口..."
+  for port in $(seq 8444 8499); do
     if [[ $port != "$FB_PORT" ]] && port_is_available "$port"; then
       PUBLIC_PORT="$port"
-      info "将使用公网访问端口：${PUBLIC_PORT}（443 保留给 sing-box）"
+      info "将使用 HTTPS 端口：${PUBLIC_PORT}（443 保留给 sing-box）"
       return
     fi
   done
 
-  die "未能在 8000-8079 范围内找到空闲公网访问端口。"
+  die "未能在 8443-8499 范围内找到空闲 HTTPS 端口。"
 }
 
 cleanup_legacy_filebrowser_https() {
@@ -132,6 +127,41 @@ cleanup_legacy_filebrowser_https() {
       nginx -t
       systemctl reload nginx
       info "Nginx 已重载，旧 File Browser 443 监听已清理。"
+    fi
+  fi
+}
+
+cleanup_legacy_filebrowser_http() {
+  local config
+  local backup_dir="/root/filebrowser-nginx-backup-$(date +%Y%m%d-%H%M%S)"
+  local cleaned="false"
+
+  info "检查旧版 File Browser HTTP/Nginx 残留..."
+  for config in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
+    [[ -f "$config" ]] || continue
+
+    if grep -Fq "server_name ${DOMAIN}" "$config" \
+      && grep -Eq 'listen[[:space:]]+(80|80[0-7][0-9])([^0-9]|$)' "$config" \
+      && grep -Eq 'proxy_pass[[:space:]]+http://127\.0\.0\.1:[0-9]+' "$config"; then
+      install -d -m 0700 "$backup_dir"
+      cp -aL "$config" "$backup_dir/$(basename "$config").conf"
+
+      if [[ -L "$config" ]]; then
+        rm -f "$config"
+      else
+        mv "$config" "${config}.disabled-filebrowser-http"
+      fi
+
+      warn "已备份并禁用旧 File Browser HTTP 配置：$config"
+      cleaned="true"
+    fi
+  done
+
+  if [[ $cleaned == "true" ]]; then
+    info "旧配置备份目录：${backup_dir}"
+    if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
+      nginx -t
+      systemctl reload nginx
     fi
   fi
 }
@@ -174,20 +204,23 @@ collect_input() {
   [[ $FB_ROOT == /* ]] || die "存储目录必须是绝对路径。"
   [[ $FB_ROOT != "/" ]] || die "不能将系统根目录作为云盘目录。"
 
+  read -r -p "请输入用于 Let's Encrypt 通知的邮箱（已有证书时可留空）: " CERT_EMAIL
+
   ADMIN_PASS="$(random_password)"
   [[ ${#ADMIN_PASS} -eq 24 ]] || die "生成随机密码失败。"
 }
 
 install_packages() {
-  info "安装 Nginx 和 curl..."
+  info "安装 Nginx、curl 和 Certbot..."
   if [[ $PKG_FAMILY == "debian" ]]; then
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y nginx curl ca-certificates
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nginx curl ca-certificates certbot
   else
-    dnf install -y nginx curl ca-certificates
+    if ! dnf install -y nginx curl ca-certificates certbot; then
+      dnf install -y epel-release
+      dnf install -y nginx curl ca-certificates certbot
+    fi
   fi
-
-  [[ $PUBLIC_PORT == "80" ]] && systemctl enable nginx
 }
 
 configure_security() {
@@ -198,21 +231,84 @@ configure_security() {
   fi
 
   if systemctl is-active --quiet firewalld 2>/dev/null; then
-    if [[ $PUBLIC_PORT == "80" ]]; then
-      firewall-cmd --permanent --add-service=http
-    else
-      firewall-cmd --permanent --add-port="${PUBLIC_PORT}/tcp"
-    fi
+    firewall-cmd --permanent --add-port="${PUBLIC_PORT}/tcp"
     firewall-cmd --reload
   fi
 
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "^Status: active"; then
-    if [[ $PUBLIC_PORT == "80" ]]; then
-      ufw allow "Nginx HTTP"
-    else
-      ufw allow "${PUBLIC_PORT}/tcp"
-    fi
+    ufw allow "${PUBLIC_PORT}/tcp"
   fi
+}
+
+ensure_certificate() {
+  local cert_dir="/etc/letsencrypt/live/${DOMAIN}"
+  local certbot_args
+  local acme_root="/var/lib/filebrowser-acme"
+  local acme_conf
+
+  if [[ -s "${cert_dir}/fullchain.pem" && -s "${cert_dir}/privkey.pem" ]]; then
+    info "检测到已有 HTTPS 证书，将直接复用。"
+    return
+  fi
+
+  certbot_args=(certonly -d "$DOMAIN" --non-interactive --agree-tos)
+  if [[ -n ${CERT_EMAIL:-} ]]; then
+    certbot_args+=(--email "$CERT_EMAIL")
+  else
+    certbot_args+=(--register-unsafely-without-email)
+  fi
+
+  if port_is_available 80; then
+    info "使用临时端口 80 申请 Let's Encrypt 证书..."
+    certbot "${certbot_args[@]}" --standalone
+    return
+  fi
+
+  if ! command -v ss >/dev/null 2>&1 || ! ss -H -ltnp "sport = :80" 2>/dev/null | grep -q 'nginx'; then
+    die "未找到已有证书，且端口 80 被非 Nginx 服务占用，无法安全完成 Let's Encrypt 验证。"
+  fi
+
+  info "通过现有 Nginx 的临时 ACME 路由申请 Let's Encrypt 证书..."
+  install -d -m 0755 "${acme_root}/.well-known/acme-challenge"
+  if [[ $PKG_FAMILY == "debian" ]]; then
+    acme_conf="/etc/nginx/sites-available/filebrowser-acme"
+  else
+    acme_conf="/etc/nginx/conf.d/filebrowser-acme.conf"
+  fi
+  cat > "$acme_conf" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+    location /.well-known/acme-challenge/ {
+        root ${acme_root};
+    }
+}
+EOF
+  [[ $PKG_FAMILY == "debian" ]] && ln -sfn "$acme_conf" /etc/nginx/sites-enabled/filebrowser-acme
+  nginx -t
+  systemctl reload nginx
+  if ! certbot "${certbot_args[@]}" --webroot -w "$acme_root"; then
+    [[ $PKG_FAMILY == "debian" ]] && rm -f /etc/nginx/sites-enabled/filebrowser-acme
+    rm -f "$acme_conf"
+    nginx -t
+    systemctl reload nginx
+    die "Let's Encrypt 证书申请失败，请确认域名解析和端口 80 可访问。"
+  fi
+  [[ $PKG_FAMILY == "debian" ]] && rm -f /etc/nginx/sites-enabled/filebrowser-acme
+  rm -f "$acme_conf"
+  nginx -t
+  systemctl reload nginx
+}
+
+configure_certificate_renewal() {
+  install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
+  cat > /etc/letsencrypt/renewal-hooks/deploy/reload-filebrowser-nginx.sh <<'EOF'
+#!/usr/bin/env bash
+systemctl restart filebrowser-nginx
+EOF
+  chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/reload-filebrowser-nginx.sh
+  systemctl enable --now certbot.timer 2>/dev/null || true
 }
 
 install_filebrowser() {
@@ -338,44 +434,9 @@ verify_login() {
 }
 
 write_nginx_config() {
-  info "配置 Nginx 反向代理与上传限制..."
-  if [[ $PUBLIC_PORT == "80" ]]; then
-    systemctl disable filebrowser-nginx 2>/dev/null || true
-    cat > "$NGINX_CONF" <<EOF
-server {
-    listen ${PUBLIC_PORT};
-    listen [::]:${PUBLIC_PORT};
-    server_name ${DOMAIN};
-
-    client_max_body_size ${UPLOAD_LIMIT};
-    client_body_timeout 3600s;
-
-    location / {
-        proxy_pass http://127.0.0.1:${FB_PORT};
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_request_buffering off;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }
-}
-EOF
-
-    if [[ $PKG_FAMILY == "debian" ]]; then
-      ln -sfn "$NGINX_CONF" /etc/nginx/sites-enabled/filebrowser
-    fi
-
-    nginx -t
-    systemctl enable --now nginx
-    systemctl reload nginx
-  else
-    NGINX_CONF="/etc/nginx/filebrowser-standalone.conf"
-    cat > "$NGINX_CONF" <<EOF
+  info "配置隔离的 Nginx HTTPS 反向代理与上传限制..."
+  NGINX_CONF="/etc/nginx/filebrowser-standalone.conf"
+  cat > "$NGINX_CONF" <<EOF
 pid /run/filebrowser-nginx.pid;
 error_log /var/log/nginx/filebrowser-error.log;
 
@@ -386,9 +447,13 @@ http {
     access_log /var/log/nginx/filebrowser-access.log;
 
     server {
-        listen ${PUBLIC_PORT};
-        listen [::]:${PUBLIC_PORT};
+        listen ${PUBLIC_PORT} ssl;
+        listen [::]:${PUBLIC_PORT} ssl;
         server_name ${DOMAIN};
+
+        ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
 
         client_max_body_size ${UPLOAD_LIMIT};
         client_body_timeout 3600s;
@@ -409,7 +474,7 @@ http {
     }
 }
 EOF
-    cat > /etc/systemd/system/filebrowser-nginx.service <<EOF
+  cat > /etc/systemd/system/filebrowser-nginx.service <<EOF
 [Unit]
 Description=Standalone Nginx reverse proxy for File Browser
 After=network-online.target filebrowser.service
@@ -425,15 +490,13 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    systemctl enable --now filebrowser-nginx
-  fi
+  systemctl daemon-reload
+  systemctl enable --now filebrowser-nginx
 }
 
 save_and_show_credentials() {
-  local scheme="http"
-  local public_address="${DOMAIN}"
-  [[ $PUBLIC_PORT != "80" ]] && public_address="${DOMAIN}:${PUBLIC_PORT}"
+  local scheme="https"
+  local public_address="${DOMAIN}:${PUBLIC_PORT}"
 
   umask 077
   cat > "$CREDS_FILE" <<EOF
@@ -465,9 +528,12 @@ main() {
   detect_os
   collect_input
   cleanup_legacy_filebrowser_https
-  check_web_port_conflicts
+  cleanup_legacy_filebrowser_http
+  choose_https_port
   install_packages
   configure_security
+  ensure_certificate
+  configure_certificate_renewal
   install_filebrowser
   write_service
   verify_login
