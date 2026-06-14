@@ -35,7 +35,8 @@ valid_size() {
 }
 
 random_password() {
-  tr -dc 'A-Za-z0-9@#%_+=' < /dev/urandom | head -c 24 || true
+  # Avoid visually ambiguous characters so credentials can be typed reliably.
+  tr -dc 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789' < /dev/urandom | head -c 24 || true
 }
 
 detect_os() {
@@ -124,6 +125,12 @@ configure_security() {
 
 install_filebrowser() {
   local admin_user_regex
+  local existing_database="false"
+
+  if systemctl is-active --quiet filebrowser 2>/dev/null; then
+    warn "检测到正在运行的 File Browser，暂时停止服务以安全修改数据库。"
+    systemctl stop filebrowser
+  fi
 
   if command -v filebrowser >/dev/null 2>&1; then
     warn "检测到已安装 File Browser，将复用现有程序。"
@@ -136,6 +143,7 @@ install_filebrowser() {
   install -d -m 0755 /etc/filebrowser "$FB_ROOT"
 
   if [[ -f $FB_DB ]]; then
+    existing_database="true"
     BACKUP="${FB_DB}.bak.$(date +%Y%m%d-%H%M%S)"
     cp -a "$FB_DB" "$BACKUP"
     warn "已有数据库已备份到：$BACKUP"
@@ -143,12 +151,21 @@ install_filebrowser() {
     filebrowser config init --database "$FB_DB"
   fi
 
-  filebrowser config set \
-    --database "$FB_DB" \
-    --address 127.0.0.1 \
-    --port "$FB_PORT" \
-    --root "$FB_ROOT" \
-    --baseurl ""
+  if [[ $existing_database == "true" ]]; then
+    warn "检测到已有数据库，将保留原云盘根目录配置。"
+    filebrowser config set \
+      --database "$FB_DB" \
+      --address 127.0.0.1 \
+      --port "$FB_PORT" \
+      --baseurl ""
+  else
+    filebrowser config set \
+      --database "$FB_DB" \
+      --address 127.0.0.1 \
+      --port "$FB_PORT" \
+      --root "$FB_ROOT" \
+      --baseurl ""
+  fi
 
   admin_user_regex="${ADMIN_USER//./\\.}"
   if filebrowser users ls --database "$FB_DB" 2>/dev/null | grep -Eq "(^|[[:space:]])${admin_user_regex}([[:space:]]|$)"; then
@@ -190,6 +207,18 @@ EOF
     journalctl -u filebrowser --no-pager -n 30 >&2
     die "File Browser 服务启动失败。"
   }
+}
+
+verify_login() {
+  local http_code
+
+  info "验证管理员账号密码..."
+  http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H 'Content-Type: application/json' \
+    --data "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\"}" \
+    "http://127.0.0.1:${FB_PORT}/api/login" || true)"
+
+  [[ $http_code == "200" ]] || die "管理员登录验证失败（HTTP ${http_code:-unknown}），安装已停止，请检查 File Browser 日志。"
 }
 
 write_nginx_config() {
@@ -282,6 +311,7 @@ main() {
   configure_security
   install_filebrowser
   write_service
+  verify_login
   write_nginx_config
   configure_https
   save_and_show_credentials
