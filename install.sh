@@ -69,15 +69,13 @@ choose_available_port() {
 }
 
 check_web_port_conflicts() {
-  local port
+  local port=80
 
-  for port in 80 443; do
-    if ! port_is_available "$port"; then
-      if ! command -v ss >/dev/null 2>&1 || ! ss -H -ltnp "sport = :${port}" 2>/dev/null | grep -q 'nginx'; then
-        die "端口 ${port} 已被非 Nginx 服务占用。为避免影响其他脚本或网站，安装已停止。"
-      fi
+  if ! port_is_available "$port"; then
+    if ! command -v ss >/dev/null 2>&1 || ! ss -H -ltnp "sport = :${port}" 2>/dev/null | grep -q 'nginx'; then
+      die "端口 ${port} 已被非 Nginx 服务占用。为避免影响其他脚本或网站，安装已停止。"
     fi
-  done
+  fi
 }
 
 detect_os() {
@@ -118,29 +116,17 @@ collect_input() {
   [[ $FB_ROOT == /* ]] || die "存储目录必须是绝对路径。"
   [[ $FB_ROOT != "/" ]] || die "不能将系统根目录作为云盘目录。"
 
-  read -r -p "是否自动申请并配置 HTTPS？[Y/n]: " ENABLE_HTTPS
-  ENABLE_HTTPS="${ENABLE_HTTPS:-Y}"
-  [[ $ENABLE_HTTPS =~ ^[YyNn]$ ]] || die "请输入 Y 或 N。"
-
-  if [[ $ENABLE_HTTPS =~ ^[Yy]$ ]]; then
-    read -r -p "请输入用于 Let's Encrypt 通知的邮箱（可留空）: " CERT_EMAIL
-  fi
-
   ADMIN_PASS="$(random_password)"
   [[ ${#ADMIN_PASS} -eq 24 ]] || die "生成随机密码失败。"
 }
 
 install_packages() {
-  info "安装 Nginx、curl 和 Certbot..."
+  info "安装 Nginx 和 curl..."
   if [[ $PKG_FAMILY == "debian" ]]; then
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y nginx curl ca-certificates certbot python3-certbot-nginx
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nginx curl ca-certificates
   else
-    if ! dnf install -y nginx curl ca-certificates certbot python3-certbot-nginx; then
-      warn "默认软件源缺少 Certbot，尝试启用 EPEL 后重试..."
-      dnf install -y epel-release
-      dnf install -y nginx curl ca-certificates certbot python3-certbot-nginx
-    fi
+    dnf install -y nginx curl ca-certificates
   fi
 
   systemctl enable --now nginx
@@ -155,12 +141,11 @@ configure_security() {
 
   if systemctl is-active --quiet firewalld 2>/dev/null; then
     firewall-cmd --permanent --add-service=http
-    firewall-cmd --permanent --add-service=https
     firewall-cmd --reload
   fi
 
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "^Status: active"; then
-    ufw allow "Nginx Full"
+    ufw allow "Nginx HTTP"
   fi
 }
 
@@ -305,27 +290,8 @@ EOF
   systemctl reload nginx
 }
 
-configure_https() {
-  [[ $ENABLE_HTTPS =~ ^[Yy]$ ]] || return 0
-
-  info "申请 Let's Encrypt HTTPS 证书..."
-  CERTBOT_ARGS=(--nginx -d "$DOMAIN" --non-interactive --agree-tos --redirect)
-  if [[ -n ${CERT_EMAIL:-} ]]; then
-    CERTBOT_ARGS+=(--email "$CERT_EMAIL")
-  else
-    CERTBOT_ARGS+=(--register-unsafely-without-email)
-  fi
-
-  if certbot "${CERTBOT_ARGS[@]}"; then
-    info "HTTPS 配置成功。"
-  else
-    warn "HTTPS 申请失败。请确认域名已解析到本机、80/443 端口已放行。HTTP 服务仍可使用。"
-  fi
-}
-
 save_and_show_credentials() {
   local scheme="http"
-  [[ $ENABLE_HTTPS =~ ^[Yy]$ && -d "/etc/letsencrypt/live/$DOMAIN" ]] && scheme="https"
 
   umask 077
   cat > "$CREDS_FILE" <<EOF
@@ -362,7 +328,6 @@ main() {
   write_service
   verify_login
   write_nginx_config
-  configure_https
   save_and_show_credentials
 }
 
