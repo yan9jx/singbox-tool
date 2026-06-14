@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.06.15-8"
+SCRIPT_VERSION="2026.06.15-9"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -445,14 +445,19 @@ events {}
 http {
     include /etc/nginx/mime.types;
     access_log /var/log/nginx/filebrowser-access.log;
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_comp_level 5;
+    gzip_types application/javascript application/json text/css text/plain image/svg+xml;
     map \$http_upgrade \$connection_upgrade {
         default upgrade;
         '' close;
     }
 
     server {
-        listen ${PUBLIC_PORT} ssl;
-        listen [::]:${PUBLIC_PORT} ssl;
+        listen ${PUBLIC_PORT} ssl http2;
+        listen [::]:${PUBLIC_PORT} ssl http2;
         server_name ${DOMAIN};
 
         ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
@@ -463,6 +468,7 @@ http {
         ssl_session_cache shared:FileBrowserSSL:10m;
         ssl_session_timeout 1d;
         ssl_session_tickets off;
+        ssl_buffer_size 4k;
 
         client_max_body_size ${UPLOAD_LIMIT};
         client_body_timeout 3600s;
