@@ -97,6 +97,44 @@ check_web_port_conflicts() {
   die "未能在 8000-8079 范围内找到空闲公网访问端口。"
 }
 
+cleanup_legacy_filebrowser_https() {
+  local config
+  local backup_dir="/root/filebrowser-nginx-backup-$(date +%Y%m%d-%H%M%S)"
+  local cleaned="false"
+
+  info "检查旧版 File Browser HTTPS/Nginx 残留..."
+  for config in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
+    [[ -f "$config" ]] || continue
+
+    if grep -Fq "server_name ${DOMAIN}" "$config" \
+      && grep -Eq 'listen[[:space:]]+443([^0-9]|$)' "$config" \
+      && grep -Eq 'proxy_pass[[:space:]]+http://127\.0\.0\.1:[0-9]+' "$config"; then
+      install -d -m 0700 "$backup_dir"
+      cp -aL "$config" "$backup_dir/$(basename "$config").conf"
+
+      if [[ -L "$config" ]]; then
+        rm -f "$config"
+      else
+        mv "$config" "${config}.disabled-filebrowser-https"
+      fi
+
+      warn "已备份并禁用旧 File Browser HTTPS 配置：$config"
+      cleaned="true"
+    fi
+  done
+
+  if [[ $cleaned == "true" ]]; then
+    info "旧配置备份目录：${backup_dir}"
+    warn "Let's Encrypt 证书文件已保留，443 端口将继续留给 sing-box。"
+
+    if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
+      nginx -t
+      systemctl reload nginx
+      info "Nginx 已重载，旧 File Browser 443 监听已清理。"
+    fi
+  fi
+}
+
 detect_os() {
   [[ -r /etc/os-release ]] || die "无法识别系统。仅支持 Debian/Ubuntu 和 RHEL 系发行版。"
   # shellcheck disable=SC1091
@@ -408,6 +446,7 @@ main() {
   require_interactive_terminal
   detect_os
   collect_input
+  cleanup_legacy_filebrowser_https
   check_web_port_conflicts
   install_packages
   configure_security
