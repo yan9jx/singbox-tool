@@ -39,6 +39,47 @@ random_password() {
   tr -dc 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789' < /dev/urandom | head -c 24 || true
 }
 
+port_is_available() {
+  local port="$1"
+
+  if command -v ss >/dev/null 2>&1; then
+    ! ss -H -ltn "sport = :${port}" 2>/dev/null | grep -q .
+  else
+    ! netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+  fi
+}
+
+choose_available_port() {
+  local port
+
+  if port_is_available "$FB_PORT"; then
+    return
+  fi
+
+  warn "端口 ${FB_PORT} 已被其他程序占用，正在寻找空闲端口..."
+  for port in $(seq 8081 8999); do
+    if port_is_available "$port"; then
+      FB_PORT="$port"
+      info "将使用空闲后端端口：${FB_PORT}"
+      return
+    fi
+  done
+
+  die "未能在 8081-8999 范围内找到空闲端口。"
+}
+
+check_web_port_conflicts() {
+  local port
+
+  for port in 80 443; do
+    if ! port_is_available "$port"; then
+      if ! command -v ss >/dev/null 2>&1 || ! ss -H -ltnp "sport = :${port}" 2>/dev/null | grep -q 'nginx'; then
+        die "端口 ${port} 已被非 Nginx 服务占用。为避免影响其他脚本或网站，安装已停止。"
+      fi
+    fi
+  done
+}
+
 detect_os() {
   [[ -r /etc/os-release ]] || die "无法识别系统。仅支持 Debian/Ubuntu 和 RHEL 系发行版。"
   # shellcheck disable=SC1091
@@ -126,6 +167,7 @@ configure_security() {
 install_filebrowser() {
   local admin_user_regex
   local existing_database="false"
+  local existing_port=""
 
   if systemctl is-active --quiet filebrowser 2>/dev/null; then
     warn "检测到正在运行的 File Browser，暂时停止服务以安全修改数据库。"
@@ -144,10 +186,17 @@ install_filebrowser() {
 
   if [[ -f $FB_DB ]]; then
     existing_database="true"
+    existing_port="$(filebrowser config cat --database "$FB_DB" 2>/dev/null | awk '/^[[:space:]]*Port:/ {print $2; exit}' || true)"
+    if [[ $existing_port =~ ^[0-9]+$ ]]; then
+      FB_PORT="$existing_port"
+      info "检测到已有 File Browser 后端端口：${FB_PORT}"
+    fi
+    choose_available_port
     BACKUP="${FB_DB}.bak.$(date +%Y%m%d-%H%M%S)"
     cp -a "$FB_DB" "$BACKUP"
     warn "已有数据库已备份到：$BACKUP"
   else
+    choose_available_port
     filebrowser config init --database "$FB_DB"
   fi
 
@@ -250,7 +299,6 @@ EOF
 
   if [[ $PKG_FAMILY == "debian" ]]; then
     ln -sfn "$NGINX_CONF" /etc/nginx/sites-enabled/filebrowser
-    rm -f /etc/nginx/sites-enabled/default
   fi
 
   nginx -t
@@ -307,6 +355,7 @@ main() {
   require_interactive_terminal
   detect_os
   collect_input
+  check_web_port_conflicts
   install_packages
   configure_security
   install_filebrowser
