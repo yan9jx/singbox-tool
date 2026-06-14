@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.06.14-7"
+SCRIPT_VERSION="2026.06.15-8"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -445,6 +445,10 @@ events {}
 http {
     include /etc/nginx/mime.types;
     access_log /var/log/nginx/filebrowser-access.log;
+    map \$http_upgrade \$connection_upgrade {
+        default upgrade;
+        '' close;
+    }
 
     server {
         listen ${PUBLIC_PORT} ssl;
@@ -453,7 +457,12 @@ http {
 
         ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
         ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
-        ssl_protocols TLSv1.2 TLSv1.3;
+        # TLS 1.2 is intentionally used for compatibility with older Nginx/OpenSSL
+        # combinations and mobile browsers that may fail on unstable TLS 1.3 links.
+        ssl_protocols TLSv1.2;
+        ssl_session_cache shared:FileBrowserSSL:10m;
+        ssl_session_timeout 1d;
+        ssl_session_tickets off;
 
         client_max_body_size ${UPLOAD_LIMIT};
         client_body_timeout 3600s;
@@ -466,7 +475,8 @@ http {
             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto \$scheme;
             proxy_set_header Upgrade \$http_upgrade;
-            proxy_set_header Connection "upgrade";
+            proxy_set_header Connection \$connection_upgrade;
+            proxy_buffering off;
             proxy_request_buffering off;
             proxy_read_timeout 3600s;
             proxy_send_timeout 3600s;
