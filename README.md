@@ -15,6 +15,8 @@
 - 检测到 `80` 被其他服务占用时自动换端口，不停止或修改占用端口的服务
 - 使用备用公网端口时启动隔离的 File Browser Nginx，不修改系统现有 Nginx 配置
 - 不检测、不开放、不占用 `443` 端口
+- 重复安装时自动备份并禁用当前域名的旧 File Browser `443` Nginx 配置
+- 保留已有 Let's Encrypt 证书文件，不删除证书
 - 不删除或覆盖其他 Nginx 站点配置
 - 随机生成管理员密码，并在安装结束时显示
 - 凭据保存至仅 root 可读的 `/root/filebrowser-credentials.txt`
