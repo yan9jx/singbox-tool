@@ -67,16 +67,16 @@ systemctl restart filebrowser
 # 查看安装时生成的凭据
 sudo cat /root/filebrowser-credentials.txt
 
-# 登录失败时重建管理员账号（将 yangjx 和新密码按需替换）
+# 登录失败时重建管理员账号（将 exampleadmin 和密码占位符按需替换）
 sudo systemctl stop filebrowser
-sudo filebrowser users rm yangjx --database /etc/filebrowser/filebrowser.db
-sudo filebrowser users add yangjx 'FbReset2026Pass' --perm.admin --database /etc/filebrowser/filebrowser.db
+sudo filebrowser users rm exampleadmin --database /etc/filebrowser/filebrowser.db
+sudo filebrowser users add exampleadmin 'REPLACE_WITH_NEW_PASSWORD' --perm.admin --database /etc/filebrowser/filebrowser.db
 sudo systemctl start filebrowser
 
 # 返回 200 表示账号密码正确
 curl -sS -o /dev/null -w 'HTTP %{http_code}\n' \
   -H 'Content-Type: application/json' \
-  --data '{"username":"yangjx","password":"FbReset2026Pass"}' \
+  --data '{"username":"exampleadmin","password":"REPLACE_WITH_NEW_PASSWORD"}' \
   http://127.0.0.1:8080/api/login
 
 # 检查并重载 Nginx
