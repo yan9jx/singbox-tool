@@ -1282,6 +1282,10 @@ EOF
   echo
   echo "gRPC node created:"
   echo "$grpc_link"
+  command -v qrencode >/dev/null || install_dependencies
+  echo
+  echo "gRPC QR code:"
+  qrencode -t ANSIUTF8 "$grpc_link"
   echo "Clash/Mihomo file: $grpc_sub_path"
   echo "Ensure TCP/${grpc_port} is open in the firewall and cloud security group."
 }
@@ -1415,9 +1419,9 @@ main() {
     8) generate_subscription_link ;;
     9) configure_swap ;;
     10) set_link_host ;;
-    11) upgrade_singbox ;;
-    12) uninstall_singbox ;;
-    13) generate_grpc_node ;;
+    11) generate_grpc_node ;;
+    12) upgrade_singbox ;;
+    13) uninstall_singbox ;;
     0) exit 0 ;;
     *) die "无效选项。" ;;
   esac
@@ -1440,9 +1444,9 @@ show_menu() {
   echo "8. 生成 / 更新 HTTP 订阅链接"
   echo "9. 管理 SWAP"
   echo "10. 设置连接域名并更新链接"
-  echo "11. 检查 / 升级官方核心"
-  echo "12. 卸载 sing-box"
-  echo "13. 生成 VLESS gRPC 节点（仅填已解析子域名）"
+  echo "11. 生成 VLESS gRPC 节点（仅填已解析子域名）"
+  echo "12. 检查 / 升级官方核心"
+  echo "13. 卸载 sing-box"
   echo "0. 退出"
   echo "================================================"
 }
