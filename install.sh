@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.06.22-10"
+SCRIPT_VERSION="2026.06.22-11"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -303,9 +303,13 @@ EOF
 
 configure_certificate_renewal() {
   install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
-  cat > /etc/letsencrypt/renewal-hooks/deploy/reload-filebrowser-nginx.sh <<'EOF'
+cat > /etc/letsencrypt/renewal-hooks/deploy/reload-filebrowser-nginx.sh <<'EOF'
 #!/usr/bin/env bash
-systemctl restart filebrowser-nginx
+if systemctl is-active --quiet nginx 2>/dev/null; then
+  systemctl reload nginx
+else
+  systemctl restart filebrowser-nginx
+fi
 EOF
   chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/reload-filebrowser-nginx.sh
   systemctl enable --now certbot.timer 2>/dev/null || true
@@ -435,6 +439,41 @@ verify_login() {
 
 write_nginx_config() {
   info "配置隔离的 Nginx HTTPS 反向代理与上传限制..."
+  if [[ "${NGINX_MODE:-standalone}" == "system" ]]; then
+    NGINX_CONF="/etc/nginx/conf.d/filebrowser-${DOMAIN}.conf"
+    cat > "$NGINX_CONF" <<EOF
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${DOMAIN};
+
+    ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size ${UPLOAD_LIMIT};
+    client_body_timeout 3600s;
+
+    location / {
+        proxy_pass http://127.0.0.1:${FB_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$http_connection;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+EOF
+    nginx -t
+    systemctl reload nginx
+    return
+  fi
+
   NGINX_CONF="/etc/nginx/filebrowser-standalone.conf"
   install -d -m 0755 /etc/nginx/filebrowser-shared
   cat > "$NGINX_CONF" <<EOF
@@ -568,9 +607,15 @@ trap 'printf "${RED}[x] 安装在第 %s 行失败，请检查上方错误信息�
 choose_https_port() {
   PUBLIC_PORT="443"
   if port_is_available "$PUBLIC_PORT"; then
+    NGINX_MODE="standalone"
     return
   fi
-  die "TCP/443 is occupied. Stop or move the conflicting service first; this installer does not fall back because gRPC and File Browser must share 443."
+  if systemctl is-active --quiet nginx 2>/dev/null; then
+    NGINX_MODE="system"
+    info "Detected system Nginx on TCP/443; File Browser will be added as a separate HTTPS virtual host."
+    return
+  fi
+  die "TCP/443 is occupied by a non-system-Nginx service. Stop or move that service first."
 }
 
 main "$@"
