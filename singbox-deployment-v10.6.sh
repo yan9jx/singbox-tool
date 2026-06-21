@@ -8,7 +8,7 @@ SERVICE_FILE="/etc/systemd/system/sing-box.service"
 DEFAULT_PORT="443"
 SERVER_NAME="www.microsoft.com"
 SCRIPT_TITLE="宇宙监察委员会sing-box部署局"
-SCRIPT_VERSION="v10.3"
+SCRIPT_VERSION="v10.8"
 
 die() {
   echo "错误：$*" >&2
@@ -293,24 +293,32 @@ show_link() {
     die "没有已保存的节点链接，请先选择 1 安装/重建节点。"
   fi
 
-  local public_ipv4 public_ipv6 ipv4_link ipv6_link
+  local public_ipv4 public_ipv6 link_host primary_link ipv6_link primary_label
   public_ipv4="$(sed -n "s/^PUBLIC_IP='\(.*\)'$/\1/p" "$INFO_FILE" | head -n1)"
   public_ipv6="$(sed -n "s/^PUBLIC_IPV6='\(.*\)'$/\1/p" "$INFO_FILE" | head -n1)"
+  link_host="$(sed -n "s/^LINK_HOST='\(.*\)'$/\1/p" "$INFO_FILE" | head -n1)"
   [[ -n "$public_ipv4" ]] || die "节点信息文件损坏，请重新安装节点。"
+  link_host="${link_host:-$public_ipv4}"
   [[ -n "$public_ipv6" ]] || public_ipv6="$(v10_get_current_public_ipv6 || true)"
 
   # Always derive links from structured fields, never from a saved VLESS_LINK.
-  ipv4_link="$(build_vless_link_from_info "$public_ipv4")"
-  [[ -n "$ipv4_link" ]] || die "节点信息文件损坏，请重新安装节点。"
+  # Keep the hostname selected by menu item 10 as the primary/QR link.
+  primary_link="$(build_vless_link_from_info "$link_host")"
+  [[ -n "$primary_link" ]] || die "节点信息文件损坏，请重新安装节点。"
   ipv6_link=""
   [[ -n "$public_ipv6" ]] && ipv6_link="$(build_vless_link_from_info "$public_ipv6")"
+  if [[ "$link_host" == "$public_ipv4" ]]; then
+    primary_label="IPv4 节点链接（二维码）："
+  else
+    primary_label="当前连接域名节点链接（二维码）："
+  fi
 
   echo
-  echo "IPv4 节点链接（左侧二维码）："
-  echo "$ipv4_link"
+  echo "$primary_label"
+  echo "$primary_link"
   if [[ -n "$ipv6_link" ]]; then
     echo
-    echo "IPv6 节点链接（右侧二维码）："
+    echo "IPv6 节点链接："
     echo "$ipv6_link"
   else
     echo
@@ -319,15 +327,8 @@ show_link() {
 
   install_dependencies
   echo
-  # ANSIUTF8 QR blocks cannot be safely combined with paste: terminal cell
-  # width/escape handling may corrupt either code. Render each QR separately.
-  echo "IPv4 节点二维码："
-  qrencode -t ANSIUTF8 "$ipv4_link"
-  if [[ -n "$ipv6_link" ]]; then
-    echo
-    echo "IPv6 节点二维码："
-    qrencode -t ANSIUTF8 "$ipv6_link"
-  fi
+  echo "节点二维码（当前连接地址）："
+  qrencode -t ANSIUTF8 "$primary_link"
 }
 
 post_install_check() {
