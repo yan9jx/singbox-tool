@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.06.15-9"
+SCRIPT_VERSION="2026.06.22-10"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -436,6 +436,7 @@ verify_login() {
 write_nginx_config() {
   info "配置隔离的 Nginx HTTPS 反向代理与上传限制..."
   NGINX_CONF="/etc/nginx/filebrowser-standalone.conf"
+  install -d -m 0755 /etc/nginx/filebrowser-shared
   cat > "$NGINX_CONF" <<EOF
 pid /run/filebrowser-nginx.pid;
 error_log /var/log/nginx/filebrowser-error.log;
@@ -454,6 +455,9 @@ http {
         default upgrade;
         '' close;
     }
+
+    # Managed extension point for services sharing public HTTPS with File Browser.
+    include /etc/nginx/filebrowser-shared/*.conf;
 
     server {
         listen ${PUBLIC_PORT} ssl http2;
@@ -559,4 +563,14 @@ main() {
 }
 
 trap 'printf "${RED}[x] 安装在第 %s 行失败，请检查上方错误信息。${NC}\n" "$LINENO" >&2' ERR
+# Public 443 is deliberately reserved for the standalone File Browser Nginx.
+# If Reality was installed first, choose a non-443 Reality port before running this installer.
+choose_https_port() {
+  PUBLIC_PORT="443"
+  if port_is_available "$PUBLIC_PORT"; then
+    return
+  fi
+  die "TCP/443 is occupied. Stop or move the conflicting service first; this installer does not fall back because gRPC and File Browser must share 443."
+}
+
 main "$@"
