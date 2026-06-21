@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.06.22-11"
+SCRIPT_VERSION="2026.06.22-12"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -199,7 +199,7 @@ collect_input() {
   ADMIN_USER="${ADMIN_USER:-admin}"
   [[ $ADMIN_USER =~ ^[A-Za-z0-9_.-]{3,32}$ ]] || die "账号仅允许 3-32 位字母、数字、下划线、点和横线。"
 
-  read -r -p "请输入云盘存储目录 [默认 /srv/filebrowser]: " INPUT_ROOT
+  read -r -p "请输入云盘存储目录 [回车使用默认目录]: " INPUT_ROOT
   FB_ROOT="${INPUT_ROOT:-$FB_ROOT}"
   [[ $FB_ROOT == /* ]] || die "存储目录必须是绝对路径。"
   [[ $FB_ROOT != "/" ]] || die "不能将系统根目录作为云盘目录。"
