@@ -182,7 +182,7 @@ install_node() {
   "inbounds": [{
     "listen": "127.0.0.1", "port": $port, "protocol": "vless",
     "settings": { "clients": [{ "id": "$uuid", "email": "xhttp" }], "decryption": "none" },
-    "streamSettings": { "network": "splithttp", "security": "none", "xhttpSettings": { "path": "$path", "mode": "auto" } }
+    "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "$path", "mode": "auto" } }
   }],
   "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
 }
