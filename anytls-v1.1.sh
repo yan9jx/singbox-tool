@@ -10,7 +10,7 @@ CONFIG_DIR="/etc/anytls"
 INFO_FILE="$CONFIG_DIR/node-info.env"
 SERVICE_FILE="/etc/systemd/system/anytls.service"
 SERVICE_NAME="anytls"
-DEFAULT_PORT=9443
+DEFAULT_PORT=443
 
 die() { echo "错误：$*" >&2; exit 1; }
 require_root() { [[ $EUID -eq 0 ]] || die "请使用 root 运行。"; }
@@ -71,14 +71,9 @@ install_anytls() {
 }
 
 choose_listen_port() {
-  local candidate
-  for candidate in "$DEFAULT_PORT" 10443 11443 12443 1443 2443 3443 4443 5443 6443 7443; do
-    if ! port_is_listening "$candidate"; then
-      printf '%s' "$candidate"
-      return 0
-    fi
-  done
-  die "常用候选端口均被占用，请在菜单中手动指定可用端口。"
+  # Keep the default visible, but let the operator choose the port explicitly.
+  # This avoids silently selecting a port used by another deployment.
+  printf '%s' "$DEFAULT_PORT"
 }
 
 write_service() {
