@@ -71,9 +71,20 @@ install_anytls() {
 }
 
 choose_listen_port() {
-  # Keep the default visible, but let the operator choose the port explicitly.
-  # This avoids silently selecting a port used by another deployment.
-  printf '%s' "$DEFAULT_PORT"
+  local candidate
+  if ! port_is_listening "$DEFAULT_PORT"; then
+    printf '%s' "$DEFAULT_PORT"
+    return 0
+  fi
+  # Public 443 is in use: default to the first available *443 port.
+  # The installer still presents this value for manual override.
+  for candidate in 1443 2443 3443 4443 5443 6443 7443 9443 10443 11443 12443; do
+    if ! port_is_listening "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  die "443 and all common *443 ports are occupied; enter a free port manually after freeing one."
 }
 
 write_service() {
