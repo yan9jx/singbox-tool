@@ -75,15 +75,14 @@ detect_singbox_port() {
 }
 
 detect_singbox_ports() {
-  ss -H -lntp 2>/dev/null | awk '/sing-box/ {
+  ss -H -lntp 2>/dev/null | awk '{
     addr=$4; port=addr; sub(/^.*:/, "", port)
     if (port !~ /^[0-9]+$/) next
-    if (addr ~ /^127\./ || addr ~ /^\[::1\]/) local_ports[port]=1
-    else public_ports[port]=1
+    if (addr ~ /^127\./ || addr ~ /^\[::1\]/ || addr ~ /^::1/) next
+    public_ports[port]=1
   }
   END {
     for (p in public_ports) print "0:" p
-    for (p in local_ports) print "1:" p
   }' | sort -t: -k1,1n -k2,2n | cut -d: -f2 | paste -sd, -
 }
 
@@ -540,48 +539,13 @@ def cpu_load_percent():
     return round(min(100.0, loadavg_1m() / cpu_cores() * 100), 1)
 
 
-def detect_service_port():
-    service = str(CFG.get("service_name", "sing-box")).strip()
-    code, out, _ = run("ss -H -lntp", timeout=3)
-    if code != 0:
-        return ""
-    for line in out.splitlines():
-        if service not in line:
-            continue
-        fields = line.split()
-        if len(fields) < 4:
-            continue
-        local = fields[3].rsplit(":", 1)[-1].rstrip("]")
-        if local.isdigit() and 1 <= int(local) <= 65535:
-            return local
-    return ""
-
-
-def refresh_local_state():
-    detected_port = detect_service_port()
-    previous_port = str(CFG.get("check_port", "")).strip()
-    changed = []
-    if detected_port and detected_port != previous_port:
-        CFG["check_port"] = detected_port
-        changed.append(f"检测端口：{previous_port or '未设置'} → {detected_port}")
-    disk_path = detect_disk_path()
-    if disk_path != str(CFG.get("disk_path", "")).strip():
-        CFG["disk_path"] = disk_path
-        changed.append(f"监控磁盘：{disk_path}")
-    if changed:
-        save_config()
-    return changed
-
-
-def detect_service_ports():
-    service = str(CFG.get("service_name", "sing-box")).strip()
-    code, out, _ = run("ss -H -lntp", timeout=3)
+def ss_listeners(tcp=True):
+    cmd = "ss -H -lntp" if tcp else "ss -H -lnup"
+    code, out, _ = run(cmd, timeout=3)
     if code != 0:
         return []
-    public_ports, local_ports = set(), set()
+    rows = []
     for line in out.splitlines():
-        if service not in line:
-            continue
         fields = line.split()
         if len(fields) < 4:
             continue
@@ -589,16 +553,36 @@ def detect_service_ports():
         port = address.rsplit(":", 1)[-1].rstrip("]")
         if not port.isdigit() or not (1 <= int(port) <= 65535):
             continue
-        if address.startswith("127.") or address.startswith("[::1]"):
-            local_ports.add(port)
-        else:
-            public_ports.add(port)
-    return sorted(public_ports, key=int) + sorted(local_ports, key=int)
+        is_loopback = address.startswith("127.") or address.startswith("[::1]") or address.startswith("::1")
+        proc = ""
+        m = re.search(r'users:\(\("([^"/]+)', line)
+        if m:
+            proc = m.group(1)
+        rows.append({"port": port, "address": address, "loopback": is_loopback, "process": proc, "line": line})
+    return rows
+
+
+def listener_ports(public_only=True):
+    ports = set()
+    for row in ss_listeners():
+        if public_only and row["loopback"]:
+            continue
+        ports.add(row["port"])
+    return sorted(ports, key=int)
+
+
+def detect_service_port():
+    ports = detect_service_ports()
+    return ports[0] if ports else ""
+
+
+def detect_service_ports():
+    return listener_ports(public_only=True)
 
 
 def configured_ports():
     raw = str(CFG.get("check_port", "")).strip()
-    return [p for p in raw.replace("，", ",").split(",") if p.strip().isdigit()]
+    return [p.strip() for p in raw.replace("\uff0c", ",").split(",") if p.strip().isdigit()]
 
 
 def grpc_port_mapping():
@@ -637,31 +621,54 @@ def inbound_protocols():
     return result
 
 
-def nginx_public_ports():
-    code, out, _ = run("ss -H -lntp", timeout=3)
-    if code != 0:
-        return set()
+def singbox_ports():
+    grpc_public, grpc_local = grpc_port_mapping()
     ports = set()
-    for line in out.splitlines():
-        if "nginx" not in line:
-            continue
-        fields = line.split()
-        if len(fields) < 4:
-            continue
-        address = fields[3]
-        port = address.rsplit(":", 1)[-1].rstrip("]")
-        if port.isdigit() and not address.startswith("127.") and not address.startswith("[::1]"):
-            ports.add(port)
-    return ports
+    for port in inbound_protocols():
+        ports.add(grpc_public if grpc_public and port == grpc_local else port)
+    if not ports:
+        service = str(CFG.get("service_name", "sing-box")).strip()
+        for row in ss_listeners():
+            if service and service in row["line"] and not row["loopback"]:
+                ports.add(row["port"])
+    return sorted(ports, key=int)
+
+
+def nginx_public_ports():
+    return {row["port"] for row in ss_listeners() if not row["loopback"] and "nginx" in row["line"]}
+
+
+def label_for_listener(row):
+    line = row["line"].lower()
+    proc = row["process"].lower()
+    if "nginx" in line:
+        return "Nginx"
+    if "anytls" in line:
+        return "AnyTLS"
+    if "sing-box" in line or "singbox" in line:
+        return inbound_protocols().get(row["port"], "sing-box")
+    if "xray" in line:
+        return "Xray"
+    if "filebrowser" in line:
+        return "\u7f51\u76d8"
+    if "hysteria" in line:
+        return "Hysteria2"
+    if "tuic" in line:
+        return "TUIC"
+    if "naive" in line:
+        return "NaiveProxy"
+    if "sshd" in line or proc == "ssh":
+        return "SSH"
+    return row["process"] or "\u76d1\u542c\u4e2d"
 
 
 def format_port_labels(port_map):
     items = []
     for port in sorted(port_map, key=lambda value: int(value)):
         labels = " / ".join(port_map[port])
-        items.append(f"{port}（{labels}）")
+        items.append(f"{port}\uff08{labels}\uff09")
     if not items:
-        return "未设置"
+        return "\u672a\u68c0\u6d4b\u5230\u516c\u5f00\u76d1\u542c\u7aef\u53e3"
     lines, pending = [], []
     for item in items:
         if len(item) > 20:
@@ -679,24 +686,47 @@ def format_port_labels(port_map):
     return "\n".join(lines)
 
 
+def anytls_info():
+    for path in (Path("/etc/anytls/node-info.env"), Path("/etc/anytls/anytls.env")):
+        values = read_env_file(path)
+        if values:
+            return values
+    return {}
+
+
+def anytls_public_port():
+    info = anytls_info()
+    for key in ("PORT", "ANYTLS_PORT", "LISTEN_PORT"):
+        value = str(info.get(key, "")).strip()
+        if value.isdigit():
+            return value
+    for row in ss_listeners():
+        if not row["loopback"] and "anytls" in row["line"].lower():
+            return row["port"]
+    return ""
+
+
 def display_ports():
-    grpc_public, grpc_local = grpc_port_mapping()
     protocols = inbound_protocols()
     port_map = {}
     def add(port, label):
-        if port and port.isdigit():
+        if port and str(port).isdigit():
+            port = str(port)
             port_map.setdefault(port, [])
-            if label not in port_map[port]:
+            if label and label not in port_map[port]:
                 port_map[port].append(label)
-    for port in nginx_public_ports():
-        add(port, "Nginx")
-    if singbox_status() not in (None, "未使用"):
-        for port in configured_ports():
-            public_port = grpc_public if grpc_public and port == grpc_local else port
-            add(public_port, protocols.get(port, "sing-box"))
+    for row in ss_listeners():
+        if row["loopback"]:
+            continue
+        add(row["port"], label_for_listener(row))
+    for port in singbox_ports():
+        add(port, protocols.get(port, "sing-box"))
     for node in xray_nodes():
-        if node["state"] == "正常":
+        if node["state"] == "\u6b63\u5e38":
             add(node["public_port"], node["protocol"])
+    port = anytls_public_port()
+    if port and anytls_status() == "\u6b63\u5e38":
+        add(port, "AnyTLS")
     return format_port_labels(port_map)
 
 
@@ -707,52 +737,58 @@ def refresh_local_state():
     changed = []
     if current != previous:
         CFG["check_port"] = current
-        changed.append(f"检测端口：{previous or '未设置'} → {display_ports()}")
+        changed.append(f"\u68c0\u6d4b\u7aef\u53e3\uff1a{previous or '\u672a\u8bbe\u7f6e'} -> {display_ports()}")
     disk_path = detect_disk_path()
     if disk_path != str(CFG.get("disk_path", "")).strip():
         CFG["disk_path"] = disk_path
-        changed.append(f"监控磁盘：{disk_path}")
+        changed.append(f"\u76d1\u63a7\u78c1\u76d8\uff1a{disk_path}")
     if changed:
         save_config()
     return changed
 
 
-def service_running():
-    service = CFG.get("service_name", "sing-box")
+def unit_exists(service):
+    code, _, _ = run(f"systemctl cat {service}", timeout=3)
+    return code == 0
+
+
+def unit_active(service):
     code, _, _ = run(f"systemctl is-active --quiet {service}", timeout=2)
     return code == 0
 
 
-def port_listening():
-    port = str(CFG.get("check_port", "")).strip()
-    if not port:
-        return True
-    code, _, _ = run(f"ss -H -lnt 2>/dev/null | awk '{{print $4}}' | grep -Eq '(:|]){port}$'", timeout=2)
-    return code == 0
+def service_running():
+    service = str(CFG.get("service_name", "sing-box")).strip() or "sing-box"
+    return unit_active(service)
 
 
-def port_listening():
-    required = set(configured_ports())
+def port_listening(required_ports=None):
+    required = set(required_ports or configured_ports())
     if not required:
         return True
-    code, out, _ = run("ss -H -lntp", timeout=3)
-    if code != 0:
-        return False
-    listening = set()
-    service = str(CFG.get("service_name", "sing-box")).strip()
-    for line in out.splitlines():
-        if service not in line:
-            continue
-        fields = line.split()
-        if len(fields) >= 4:
-            port = fields[3].rsplit(":", 1)[-1].rstrip("]")
-            if port.isdigit():
-                listening.add(port)
+    listening = set(row["port"] for row in ss_listeners())
     return required.issubset(listening)
 
 
+def managed_service_statuses():
+    statuses = []
+    singbox = singbox_status()
+    if singbox is not None:
+        statuses.append(("singbox", singbox))
+    xray, _ = xhttp_status()
+    if xray is not None:
+        statuses.append(("xray", xray))
+    anytls = anytls_status()
+    if anytls is not None:
+        statuses.append(("AnyTLS", anytls))
+    return statuses
+
+
 def node_ok():
-    return singbox_status() == "正常"
+    statuses = managed_service_statuses()
+    if not statuses:
+        return True
+    return all(state == "\u6b63\u5e38" for _, state in statuses)
 
 
 def singbox_status():
@@ -771,7 +807,8 @@ def singbox_status():
         return None
     if not service_running():
         return "断开"
-    return "正常" if port_listening() else "异常"
+    ports = singbox_ports()
+    return "正常" if port_listening(ports) else "异常"
 
 
 def filebrowser_status():
@@ -798,6 +835,18 @@ def filebrowser_status():
                             return "服务异常"
                     break
     return "正常运行"
+
+
+def anytls_status():
+    port = anytls_public_port()
+    installed = unit_exists("anytls") or Path("/etc/anytls/node-info.env").exists() or bool(port)
+    if not installed:
+        return None
+    if not unit_active("anytls"):
+        return "\u65ad\u5f00"
+    if port and not port_listening([port]):
+        return "\u5f02\u5e38"
+    return "\u6b63\u5e38"
 
 
 XRAY_NODE_SPECS = (
@@ -885,12 +934,15 @@ def status_text():
     singbox = singbox_status()
     filebrowser = filebrowser_status()
     xray, _ = xhttp_status()
+    anytls = anytls_status()
     port = display_ports()
     service_lines = ""
     if singbox is not None:
-        service_lines += f"singbox：{singbox}\n"
+        service_lines += f"singbox\uff1a{singbox}\n"
     if xray is not None:
-        service_lines += f"xray：{xray}\n"
+        service_lines += f"xray\uff1a{xray}\n"
+    if anytls is not None:
+        service_lines += f"AnyTLS\uff1a{anytls}\n"
 
     total_rx = read_int(state_path("traffic_total_rx"))
     total_tx = read_int(state_path("traffic_total_tx"))
@@ -1011,19 +1063,21 @@ def alive_check():
     if is_paused():
         return
 
-    xhttp_health_check()
-
-    singbox = singbox_status()
-    if singbox is None:
+    statuses = managed_service_statuses()
+    if not statuses:
         return
 
-    if singbox == "正常":
+    if all(state == "\u6b63\u5e38" for _, state in statuses):
         write_int(state_path("down_fail_count"), 0)
         write_text(state_path("node_state"), "up")
         return
 
+    previous = read_text(state_path("node_state"), "")
     write_int(state_path("down_fail_count"), read_int(state_path("down_fail_count"), 0) + 1)
     write_text(state_path("node_state"), "down")
+    detail = "\n".join(f"{name}\uff1a{state}" for name, state in statuses if state != "\u6b63\u5e38")
+    if previous != "down" and can_alert("node_down", CFG.get("alert_cooldown_sec", 600)):
+        send_message(f"\U0001f6a8 \u8282\u70b9\u5f02\u5e38\n[{CFG['server_name']}]\n\n{detail}\n\n\u8bf7\u68c0\u67e5\u5bf9\u5e94\u670d\u52a1\u548c\u76d1\u542c\u7aef\u53e3\u3002")
     try_restart_node(auto=True)
 
 
