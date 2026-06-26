@@ -106,6 +106,22 @@ check_domain() {
   [[ "$resolved" == "$ip" ]] || die "$domain 当前解析到 $resolved，不是本机公网 IPv4 $ip。"
 }
 
+detect_cover_domain() {
+  local xhttp_domain="$1" candidate
+  candidate="$(
+    grep -RhoE 'server_name[[:space:]]+[^;]+' \
+      /etc/nginx/conf.d /etc/nginx/sites-enabled /etc/nginx/filebrowser-standalone.conf \
+      2>/dev/null |
+      sed -E 's/server_name[[:space:]]+//' |
+      tr ' ' '\n' |
+      sed '/^$/d; /^\*/d; /^_/d' |
+      grep -E '^[A-Za-z0-9.-]+$' |
+      grep -Fvx "$xhttp_domain" |
+      head -n1 || true
+  )"
+  printf '%s' "$candidate"
+}
+
 issue_cert() {
   local domain="$1" cert_dir="/etc/letsencrypt/live/$1" acme_dir acme_conf
   [[ -s "$cert_dir/fullchain.pem" && -s "$cert_dir/privkey.pem" ]] &&
@@ -183,7 +199,7 @@ start_xray_service() {
 }
 
 write_nginx() {
-  local domain="$1" cert="$2" key="$3" port="$4" path="$5" backup=""
+  local domain="$1" cert="$2" key="$3" port="$4" path="$5" cover_domain="$6" backup=""
   mkdir -p "$(dirname "$NGINX_CONF")"
   [[ -f "$NGINX_CONF" ]] && { backup="${NGINX_CONF}.backup.$(date +%Y%m%d-%H%M%S)"; cp -a "$NGINX_CONF" "$backup"; }
   cat >"$NGINX_CONF" <<EOF
@@ -208,8 +224,26 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
     }
+EOF
 
+  if [[ -n "$cover_domain" ]]; then
+    cat >>"$NGINX_CONF" <<EOF
+    location / {
+        proxy_pass https://$cover_domain;
+        proxy_ssl_server_name on;
+        proxy_set_header Host $cover_domain;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+EOF
+  else
+    cat >>"$NGINX_CONF" <<EOF
     location / { return 404; }
+EOF
+  fi
+
+  cat >>"$NGINX_CONF" <<EOF
 }
 EOF
   if ! reload_nginx; then
@@ -225,12 +259,25 @@ install_node() {
   install_xray
   systemctl stop xray-xhttp 2>/dev/null || true
 
-  local domain ip cert key port uuid path name tmp link
+  local domain ip cert key port uuid path name tmp link cover_domain suggested_cover
   read -r -p "请输入已解析到本机的 XHTTP 域名/子域名：" domain
   domain="${domain#https://}"; domain="${domain%%/*}"; domain="${domain,,}"
   valid_domain "$domain" || die "域名格式不正确。"
   ip="$(public_ipv4)"; [[ -n "$ip" ]] || die "无法检测本机公网 IPv4。"
   check_domain "$domain" "$ip"
+  suggested_cover="$(detect_cover_domain "$domain")"
+  if [[ -n "$suggested_cover" ]]; then
+    read -r -p "检测到已有网站/云盘域名，XHTTP 根路径反代到 [$suggested_cover]（回车使用，输入 0 则返回 404）：" cover_domain
+    cover_domain="${cover_domain:-$suggested_cover}"
+  else
+    read -r -p "XHTTP 根路径反代到哪个网站/云盘域名？留空则返回 404：" cover_domain
+  fi
+  cover_domain="${cover_domain#https://}"; cover_domain="${cover_domain#http://}"; cover_domain="${cover_domain%%/*}"; cover_domain="${cover_domain,,}"
+  [[ "$cover_domain" == "0" || "$cover_domain" == "none" || "$cover_domain" == "no" ]] && cover_domain=""
+  if [[ -n "$cover_domain" ]]; then
+    valid_domain "$cover_domain" || die "根路径反代域名格式不正确。"
+    [[ "$cover_domain" != "$domain" ]] || die "根路径反代域名不能和 XHTTP 域名相同，否则会形成循环反代。"
+  fi
   issue_cert "$domain"
 
   cert="/etc/letsencrypt/live/$domain/fullchain.pem"
@@ -261,7 +308,7 @@ EOF
   install -m 600 "$tmp" "$XRAY_CONFIG"; rm -f "$tmp"
   write_xray_service
   start_xray_service "$port"
-  write_nginx "$domain" "$cert" "$key" "$port" "$path"
+  write_nginx "$domain" "$cert" "$key" "$port" "$path" "$cover_domain"
 
   link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&type=xhttp&path=${path}&mode=auto#${name}"
   cat >"$XRAY_INFO" <<EOF
@@ -271,12 +318,17 @@ LOCAL_PORT='$port'
 PATH='$path'
 UUID='$uuid'
 NGINX_CONF='$NGINX_CONF'
+COVER_DOMAIN='$cover_domain'
 LINK='$link'
 EOF
   chmod 600 "$XRAY_INFO"
   echo
   echo "XHTTP 节点已创建，公网 TCP/443 通过 Nginx 共享："
   echo "$link"
+  if [[ -n "$cover_domain" ]]; then
+    echo
+    echo "根路径已反代到：https://$cover_domain"
+  fi
   echo
   qrencode -t ANSIUTF8 "$link"
 }
