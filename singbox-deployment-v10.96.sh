@@ -88,7 +88,7 @@ install_dependencies() {
     command -v apt-get >/dev/null || die "缺少 ${missing[*]}，且当前系统不支持自动安装。"
     echo "正在安装必要组件..."
     apt-get update -y
-    DEBIAN_FRONTEND=noninteractive apt-get install -y curl openssl tar qrencode ca-certificates iproute2
+    DEBIAN_FRONTEND=noninteractive apt-get install -y curl openssl tar qrencode ca-certificates iproute2 tzdata
   fi
 }
 
@@ -177,23 +177,24 @@ EOF
 
 enable_time_sync() {
   echo
-  echo "正在开启系统自动对时..."
+  echo "正在设置中国时区并开启系统自动对时..."
   if command -v timedatectl >/dev/null; then
+    timedatectl set-timezone Asia/Shanghai 2>/dev/null || true
     timedatectl set-ntp true 2>/dev/null || true
   fi
   systemctl enable --now systemd-timesyncd 2>/dev/null || true
   systemctl enable --now chronyd 2>/dev/null || true
   systemctl enable --now chrony 2>/dev/null || true
 
-  local synchronized
+  local timezone synchronized
+  timezone="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
   synchronized="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
   if [[ "$synchronized" == "yes" ]]; then
-    echo "自动对时已开启，系统时间已同步。"
+    echo "时区=${timezone:-未知}；自动对时已开启，系统时间已同步。"
   else
-    echo "自动对时已开启；首次同步可能需要稍等片刻。"
+    echo "时区=${timezone:-未知}；自动对时已开启，首次同步可能需要稍等片刻。"
   fi
 }
-
 configure_swap() {
   local active_swap swap_mb available_bytes required_bytes swap_conf="/etc/sysctl.d/99-singbox-swap.conf"
   if ! command -v swapon >/dev/null || ! command -v mkswap >/dev/null || ! command -v free >/dev/null; then
