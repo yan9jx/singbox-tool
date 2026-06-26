@@ -737,7 +737,8 @@ def refresh_local_state():
     changed = []
     if current != previous:
         CFG["check_port"] = current
-        changed.append(f"\u68c0\u6d4b\u7aef\u53e3\uff1a{previous or '\u672a\u8bbe\u7f6e'} -> {display_ports()}")
+        previous_text = previous or "\u672a\u8bbe\u7f6e"
+        changed.append(f"\u68c0\u6d4b\u7aef\u53e3\uff1a{previous_text} -> {display_ports()}")
     disk_path = detect_disk_path()
     if disk_path != str(CFG.get("disk_path", "")).strip():
         CFG["disk_path"] = disk_path
