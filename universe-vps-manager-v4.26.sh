@@ -184,6 +184,7 @@ import shutil
 import subprocess
 import urllib.parse
 import urllib.request
+import urllib.error
 from pathlib import Path
 
 APP_DIR = Path("/opt/universe-vps-manager")
@@ -274,17 +275,38 @@ def tg_api(method, data, timeout=5):
     body = urllib.parse.urlencode(data).encode()
     try:
         with urllib.request.urlopen(url, data=body, timeout=timeout) as r:
-            return json.loads(r.read().decode())
+            resp = json.loads(r.read().decode())
+            if not resp.get("ok"):
+                log_event(f"tg_api {method} failed: {resp}")
+            return resp
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode(errors="ignore")
+        except Exception:
+            pass
+        msg = detail or str(e)
+        log_event(f"tg_api {method} http error: {msg}")
+        return {"ok": False, "error": msg}
     except Exception as e:
         log_event(f"tg_api {method} error: {e}")
         return {"ok": False, "error": str(e)}
+
+
+def tg_error_text(resp):
+    if resp and resp.get("ok"):
+        return ""
+    if not resp:
+        return "Telegram API ???"
+    desc = resp.get("description") or resp.get("error") or str(resp)
+    return str(desc)
 
 
 def send_message(text, reply_markup=None):
     data = {"chat_id": CFG["chat_id"], "text": text}
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
-    return tg_api("sendMessage", data, timeout=6)
+    return tg_api("sendMessage", data, timeout=8)
 
 
 def answer_callback(callback_id, text="已收到"):
@@ -330,8 +352,27 @@ def keyboard():
 
 
 def send_panel():
-    # /start 面板和“状态刷新”使用同一套完整状态模板。
-    send_message(status_text(), keyboard())
+    resp = send_message(status_text(), keyboard())
+    if not resp or not resp.get("ok"):
+        err = tg_error_text(resp)
+        log_event(f"send_panel failed: {err}")
+        print(f"Telegram \u53d1\u9001\u5931\u8d25\uff1a{err}")
+        return False
+    return True
+
+
+def telegram_self_test():
+    get_me = tg_api("getMe", {}, timeout=8)
+    if not get_me or not get_me.get("ok"):
+        print(f"Telegram Bot Token \u68c0\u67e5\u5931\u8d25\uff1a{tg_error_text(get_me)}")
+        return False
+    resp = send_message(f"\u2705 \u673a\u5668\u4eba\u8fde\u63a5\u6d4b\u8bd5\u6210\u529f\n[{CFG['server_name']}]", keyboard())
+    if not resp or not resp.get("ok"):
+        print(f"Telegram \u6d88\u606f\u53d1\u9001\u5931\u8d25\uff1a{tg_error_text(resp)}")
+        print("\u8bf7\u786e\u8ba4\uff1a1. \u5df2\u7ecf\u5148\u7ed9\u673a\u5668\u4eba\u53d1\u9001 /start\uff1b2. Chat ID \u6b63\u786e\uff1b3. VPS \u80fd\u8bbf\u95ee api.telegram.org\u3002")
+        return False
+    print("Telegram \u8fde\u63a5\u6d4b\u8bd5\u6210\u529f\uff0c\u6d4b\u8bd5\u6d88\u606f\u5df2\u53d1\u9001\u3002")
+    return True
 
 
 def get_iface():
@@ -1251,14 +1292,18 @@ def main():
         bot_poll()
     elif cmd == "sync-updates":
         sync_updates()
+    elif cmd == "check-telegram":
+        if not telegram_self_test():
+            sys.exit(1)
     elif cmd == "menu":
-        send_panel()
+        if not send_panel():
+            sys.exit(1)
     elif cmd == "status":
         print(status_text())
     elif cmd == "init-traffic":
         init_traffic()
     else:
-        print("usage: vps_manager.py alive|resource|report|clean|bot-loop|bot|sync-updates|menu|status|init-traffic")
+        print("usage: vps_manager.py alive|resource|report|clean|bot-loop|bot|sync-updates|check-telegram|menu|status|init-traffic")
 
 
 if __name__ == "__main__":
@@ -1361,7 +1406,18 @@ EOF
   python3 "$PY_FILE" init-traffic >/dev/null 2>&1 || true
   python3 "$PY_FILE" sync-updates >/dev/null 2>&1 || true
   systemctl restart universe-vps-manager-bot.service
-  python3 "$PY_FILE" menu || true
+  sleep 1
+  if ! systemctl is-active --quiet universe-vps-manager-bot.service; then
+    echo "???????????????????"
+    journalctl -u universe-vps-manager-bot.service -n 30 --no-pager || true
+    return 1
+  fi
+  if ! python3 "$PY_FILE" check-telegram; then
+    echo "???Telegram ???????????????"
+    echo "???????"
+    tail -n 30 "$APP_DIR/logs/events.log" 2>/dev/null || true
+    return 1
+  fi
 
   echo
   echo "✅ 安装完成"
