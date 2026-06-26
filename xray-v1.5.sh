@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
+# Standalone VLESS + XHTTP + TLS installer for Debian/Ubuntu.
+# Public TCP/443 is owned by Nginx and can be shared with File Browser or other
+# Nginx virtual hosts. Xray only listens on 127.0.0.1.
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.5"
+SCRIPT_VERSION="v1.6"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -9,157 +12,178 @@ XRAY_CONFIG="$XRAY_DIR/config.json"
 XRAY_INFO="$XRAY_DIR/node-info.env"
 XRAY_SERVICE="/etc/systemd/system/xray-xhttp.service"
 NGINX_SYSTEM_CONF="/etc/nginx/conf.d/xray-xhttp.conf"
-NGINX_STANDALONE_CONF="/etc/nginx/filebrowser-shared/xray-xhttp.conf"
+NGINX_SHARED_CONF="/etc/nginx/filebrowser-shared/xray-xhttp.conf"
 LOCAL_PORT_BASE=10001
 
-die() { echo "错误：$*" >&2; exit 1; }
-require_root() { [[ $EUID -eq 0 ]] || die "请使用 root 运行。"; }
-
-confirm_yes() {
-  local answer
-  read -r -p "$1 [Y/n]: " answer
-  [[ -z "$answer" || "$answer" =~ ^[Yy]$ ]]
-}
+die() { echo "ERROR: $*" >&2; exit 1; }
+require_root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Please run as root."; command -v systemctl >/dev/null || die "systemd is required."; }
+confirm_yes() { local answer; read -r -p "$1 [Y/n]: " answer; [[ -z "$answer" || "$answer" =~ ^[Yy]$ ]]; }
 
 valid_domain() {
   [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
 }
 
 install_deps() {
+  command -v apt-get >/dev/null 2>&1 || die "Only Debian/Ubuntu with apt-get is supported."
   local missing=() cmd
-  for cmd in curl unzip openssl qrencode nginx certbot ss; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd"); done
-  (( ${#missing[@]} == 0 )) && return
-  command -v apt-get >/dev/null 2>&1 || die "缺少组件：${missing[*]}，请先安装。"
-  apt-get update -y
-  DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip openssl qrencode nginx certbot ca-certificates iproute2 util-linux
-}
-
-old_xray_found() {
-  systemctl cat xray.service >/dev/null 2>&1 || [[ -x /usr/local/bin/xray || -x /usr/bin/xray ]] ||
-    [[ -d /etc/xray || -d /usr/local/etc/xray ]]
-}
-
-cleanup_old_xray() {
-  old_xray_found || return 0
-  echo "检测到旧 Xray 服务、二进制或配置残留。"
-  confirm_yes "是否清理旧 Xray 残留？" || return 0
-  local backup="/root/xray-cleanup-backup-$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$backup"
-  for item in /etc/xray /usr/local/etc/xray /etc/systemd/system/xray.service /etc/systemd/system/xray@.service /usr/local/bin/xray /usr/bin/xray; do
-    [[ -e "$item" ]] && cp -a "$item" "$backup/" 2>/dev/null || true
+  for cmd in curl unzip openssl qrencode nginx certbot getent ss; do
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
-  systemctl disable --now xray.service 2>/dev/null || true
-  local pid cmd
-  while read -r pid; do
-    [[ -n "$pid" && -r "/proc/$pid/cmdline" ]] || continue
-    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-    [[ "$cmd" == *"$XRAY_ROOT/xray"* ]] || kill "$pid" 2>/dev/null || true
-  done < <(pgrep -x xray 2>/dev/null || true)
-  rm -rf /etc/xray /usr/local/etc/xray
-  rm -f /etc/systemd/system/xray.service /etc/systemd/system/xray@.service /usr/local/bin/xray /usr/bin/xray
-  systemctl daemon-reload
-  echo "旧 Xray 已清理，备份位于：$backup"
-}
-
-install_xray() {
-  [[ -x "$XRAY_BIN" ]] && return
-  local machine asset latest tmp zip binary
-  machine="$(uname -m)"
-  case "$machine" in
-    x86_64|amd64) asset="Xray-linux-64.zip" ;;
-    aarch64|arm64) asset="Xray-linux-arm64-v8a.zip" ;;
-    *) die "不支持的架构：$machine" ;;
-  esac
-  latest="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
-  [[ -n "$latest" ]] || die "无法获取 Xray 最新版本。"
-  tmp="$(mktemp -d)"; zip="$tmp/xray.zip"
-  curl -fL "https://github.com/XTLS/Xray-core/releases/download/${latest}/${asset}" -o "$zip"
-  unzip -q "$zip" -d "$tmp"
-  binary="$tmp/xray"
-  [[ -x "$binary" ]] || die "Xray 安装包异常。"
-  install -d -m 755 "$XRAY_ROOT"
-  install -m 755 "$binary" "$XRAY_BIN"
-  rm -rf "$tmp"
-  echo "已安装 Xray：$latest"
+  (( ${#missing[@]} == 0 )) && return
+  apt-get update -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip openssl qrencode nginx certbot ca-certificates iproute2 libc-bin
 }
 
 public_ipv4() { curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || true; }
 
-check_domain() {
-  local domain="$1" ip="$2" resolved
-  resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | head -n1 || true)"
-  [[ -n "$resolved" ]] || die "未检测到 ${domain} 的 A 记录。"
-  [[ "$resolved" == "$ip" ]] || die "${domain} 当前解析为 ${resolved}，不是本机公网 IP ${ip}。"
+install_xray() {
+  local machine asset latest tmp zip binary
+  [[ -x "$XRAY_BIN" ]] && return
+  machine="$(uname -m)"
+  case "$machine" in
+    x86_64|amd64) asset="Xray-linux-64.zip" ;;
+    aarch64|arm64) asset="Xray-linux-arm64-v8a.zip" ;;
+    *) die "Unsupported CPU architecture: $machine" ;;
+  esac
+  latest="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
+  [[ -n "$latest" ]] || die "Could not fetch latest Xray version."
+  tmp="$(mktemp -d)"; zip="$tmp/xray.zip"
+  curl -fL "https://github.com/XTLS/Xray-core/releases/download/${latest}/${asset}" -o "$zip"
+  unzip -q "$zip" -d "$tmp"
+  binary="$tmp/xray"
+  [[ -x "$binary" ]] || die "Xray archive is incomplete."
+  install -d -m 755 "$XRAY_ROOT"
+  install -m 755 "$binary" "$XRAY_BIN"
+  rm -rf "$tmp"
+  echo "Installed Xray: $latest"
 }
 
-select_nginx_mode() {
-  if systemctl is-active --quiet nginx 2>/dev/null; then
-    NGINX_MODE="system"; NGINX_CONF="$NGINX_SYSTEM_CONF"; NGINX_TEST=()
-  elif [[ -f /etc/nginx/filebrowser-standalone.conf ]] && systemctl is-active --quiet filebrowser-nginx 2>/dev/null; then
-    NGINX_MODE="standalone"; NGINX_CONF="$NGINX_STANDALONE_CONF"; NGINX_TEST=(-c /etc/nginx/filebrowser-standalone.conf)
-    grep -qF 'include /etc/nginx/filebrowser-shared/*.conf;' /etc/nginx/filebrowser-standalone.conf || die "云盘 Nginx 未启用共享配置目录，请先更新云盘脚本。"
-  else
-    die "未检测到正在运行的云盘 Nginx。请先安装并启动云盘。"
+detect_nginx_mode() {
+  NGINX_MODE="system"
+  NGINX_CONF="$NGINX_SYSTEM_CONF"
+  NGINX_TEST_ARGS=()
+  if [[ -f /etc/nginx/filebrowser-standalone.conf ]] && systemctl is-active --quiet filebrowser-nginx 2>/dev/null; then
+    grep -qF 'include /etc/nginx/filebrowser-shared/*.conf;' /etc/nginx/filebrowser-standalone.conf ||
+      die "filebrowser-nginx is running but shared config include is missing. Reinstall/update the File Browser script first."
+    NGINX_MODE="filebrowser-standalone"
+    NGINX_CONF="$NGINX_SHARED_CONF"
+    NGINX_TEST_ARGS=(-c /etc/nginx/filebrowser-standalone.conf)
   fi
 }
 
+ensure_nginx_ready() {
+  detect_nginx_mode
+  if [[ "$NGINX_MODE" == "filebrowser-standalone" ]]; then
+    return
+  fi
+
+  if systemctl is-active --quiet nginx 2>/dev/null; then
+    return
+  fi
+
+  if ss -H -lntp 'sport = :443' 2>/dev/null | grep -q .; then
+    ss -H -lntp 'sport = :443' >&2 || true
+    die "TCP/443 is already occupied by a non-Nginx service. I will not steal the cloud disk or reverse-proxy port."
+  fi
+
+  systemctl enable --now nginx
+  systemctl is-active --quiet nginx || die "Nginx failed to start."
+}
+
 reload_nginx() {
-  nginx -t "${NGINX_TEST[@]}" || return 1
-  if [[ "$NGINX_MODE" == "system" ]]; then systemctl reload nginx; else systemctl restart filebrowser-nginx; fi
+  nginx -t "${NGINX_TEST_ARGS[@]}" || return 1
+  if [[ "$NGINX_MODE" == "filebrowser-standalone" ]]; then
+    systemctl restart filebrowser-nginx
+  else
+    systemctl reload nginx
+  fi
+}
+
+check_domain() {
+  local domain="$1" ip="$2" resolved
+  resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | head -n1 || true)"
+  [[ -n "$resolved" ]] || die "No A record found for $domain."
+  [[ "$resolved" == "$ip" ]] || die "$domain resolves to $resolved, not this VPS public IPv4 $ip."
 }
 
 issue_cert() {
   local domain="$1" cert_dir="/etc/letsencrypt/live/$1" acme_dir acme_conf
-  [[ -s "$cert_dir/fullchain.pem" && -s "$cert_dir/privkey.pem" ]] && openssl x509 -checkend 0 -noout -in "$cert_dir/fullchain.pem" >/dev/null 2>&1 && return
-  if [[ "$NGINX_MODE" == "system" ]]; then
-    acme_dir="/var/lib/xray-xhttp-acme"; acme_conf="/etc/nginx/conf.d/xray-xhttp-acme.conf"
-    mkdir -p "$acme_dir/.well-known/acme-challenge"
-    cat >"$acme_conf" <<EOF
-server { listen 80; listen [::]:80; server_name $domain;
-  location ^~ /.well-known/acme-challenge/ { root $acme_dir; default_type text/plain; }
-  location / { return 404; }
+  [[ -s "$cert_dir/fullchain.pem" && -s "$cert_dir/privkey.pem" ]] &&
+    openssl x509 -checkend 0 -noout -in "$cert_dir/fullchain.pem" >/dev/null 2>&1 && return
+
+  if [[ "$NGINX_MODE" == "filebrowser-standalone" ]]; then
+    ss -H -lnt 'sport = :80' 2>/dev/null | grep -q . && die "TCP/80 is occupied; obtain the certificate first, then rerun this script."
+    certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email -d "$domain" ||
+      die "Certificate request failed."
+    return
+  fi
+
+  acme_dir="/var/lib/xray-xhttp-acme"
+  acme_conf="/etc/nginx/conf.d/xray-xhttp-acme.conf"
+  mkdir -p "$acme_dir/.well-known/acme-challenge"
+  cat >"$acme_conf" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $domain;
+    location ^~ /.well-known/acme-challenge/ { root $acme_dir; default_type text/plain; }
+    location / { return 404; }
 }
 EOF
-    nginx -t && systemctl reload nginx || { rm -f "$acme_conf"; die "无法启用 ACME 验证站点。"; }
-    certbot certonly --webroot -w "$acme_dir" --non-interactive --agree-tos --register-unsafely-without-email -d "$domain" || { rm -f "$acme_conf"; systemctl reload nginx || true; die "证书申请失败。"; }
-    rm -f "$acme_conf"; systemctl reload nginx || true
-  else
-    ss -H -lnt 'sport = :80' 2>/dev/null | grep -q . && die "TCP/80 被占用，无法申请证书。"
-    certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email -d "$domain" || die "证书申请失败。"
-  fi
+  nginx -t && systemctl reload nginx || { rm -f "$acme_conf"; die "Could not enable ACME challenge site."; }
+  certbot certonly --webroot -w "$acme_dir" --non-interactive --agree-tos --register-unsafely-without-email -d "$domain" ||
+    { rm -f "$acme_conf"; systemctl reload nginx || true; die "Certificate request failed."; }
+  rm -f "$acme_conf"
+  systemctl reload nginx || true
 }
 
 local_port() {
   local p
-  for p in $(seq "$LOCAL_PORT_BASE" $((LOCAL_PORT_BASE + 30))); do
+  for p in $(seq "$LOCAL_PORT_BASE" $((LOCAL_PORT_BASE + 99))); do
     ss -H -lnt "sport = :$p" 2>/dev/null | grep -q . || { printf '%s' "$p"; return; }
   done
-  die "找不到可用的本机 Xray 端口。"
+  die "No free loopback port found for Xray."
 }
 
 wait_for_xray_listener() {
   local port="$1" n
   for n in $(seq 1 10); do
-    if ss -H -lnt "sport = :$port" 2>/dev/null | grep -qE "127\\.0\\.0\\.1:$port"; then
-      return 0
-    fi
+    ss -H -lnt "sport = :$port" 2>/dev/null | grep -qE "127\\.0\\.0\\.1:$port" && return 0
     sleep 1
   done
-  echo "Xray 未监听 127.0.0.1:$port，服务日志如下：" >&2
   journalctl -u xray-xhttp -n 50 --no-pager >&2 || true
   return 1
+}
+
+write_xray_service() {
+  cat >"$XRAY_SERVICE" <<EOF
+[Unit]
+Description=Xray XHTTP Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$XRAY_BIN run -c $XRAY_CONFIG
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 start_xray_service() {
   local port="$1"
   systemctl daemon-reload
-  systemctl enable --now xray-xhttp || die "Xray 启动命令失败。"
-  systemctl is-active --quiet xray-xhttp || { journalctl -u xray-xhttp -n 50 --no-pager >&2 || true; die "Xray 服务未运行。"; }
-  wait_for_xray_listener "$port" || die "Xray 启动后未监听本机端口。"
+  systemctl enable --now xray-xhttp || die "Failed to start Xray."
+  systemctl is-active --quiet xray-xhttp || die "Xray service is not running."
+  wait_for_xray_listener "$port" || die "Xray did not listen on 127.0.0.1:$port."
 }
 
 write_nginx() {
-  local domain="$1" cert="$2" key="$3" local_port="$4" path="$5" backup=""
+  local domain="$1" cert="$2" key="$3" port="$4" path="$5" backup=""
   mkdir -p "$(dirname "$NGINX_CONF")"
   [[ -f "$NGINX_CONF" ]] && { backup="${NGINX_CONF}.backup.$(date +%Y%m%d-%H%M%S)"; cp -a "$NGINX_CONF" "$backup"; }
   cat >"$NGINX_CONF" <<EOF
@@ -167,11 +191,13 @@ server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name $domain;
+
     ssl_certificate $cert;
     ssl_certificate_key $key;
     ssl_protocols TLSv1.2 TLSv1.3;
+
     location ^~ $path {
-        proxy_pass http://127.0.0.1:$local_port;
+        proxy_pass http://127.0.0.1:$port;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -182,92 +208,132 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
     }
+
     location / { return 404; }
 }
 EOF
   if ! reload_nginx; then
     [[ -n "$backup" ]] && cp -a "$backup" "$NGINX_CONF" || rm -f "$NGINX_CONF"
     reload_nginx || true
-    die "Nginx 校验失败，已恢复原配置。"
+    die "Nginx validation failed; previous config was restored."
   fi
 }
 
 install_node() {
-  install_deps; select_nginx_mode
+  install_deps
+  ensure_nginx_ready
+  install_xray
   systemctl stop xray-xhttp 2>/dev/null || true
-  cleanup_old_xray; install_xray
-  local domain ip cert key port uuid path name tmp
-  read -r -p "请输入 XHTTP 子域名（已解析到本机）：" domain
+
+  local domain ip cert key port uuid path name tmp link
+  read -r -p "XHTTP domain/subdomain resolved to this VPS: " domain
   domain="${domain#https://}"; domain="${domain%%/*}"; domain="${domain,,}"
-  valid_domain "$domain" || die "域名格式错误。"
-  ip="$(public_ipv4)"; [[ -n "$ip" ]] || die "无法获取本机公网 IPv4。"
-  check_domain "$domain" "$ip"; issue_cert "$domain"
-  cert="/etc/letsencrypt/live/$domain/fullchain.pem"; key="/etc/letsencrypt/live/$domain/privkey.pem"
-  [[ -s "$cert" && -s "$key" ]] || die "证书文件不存在。"
-  port="$(local_port)"; uuid="$(cat /proc/sys/kernel/random/uuid)"; path="/$(openssl rand -hex 8)"
-  read -r -p "节点名称 [XHTTP]: " name; name="${name:-XHTTP}"; name="${name// /-}"
+  valid_domain "$domain" || die "Invalid domain."
+  ip="$(public_ipv4)"; [[ -n "$ip" ]] || die "Could not detect public IPv4."
+  check_domain "$domain" "$ip"
+  issue_cert "$domain"
+
+  cert="/etc/letsencrypt/live/$domain/fullchain.pem"
+  key="/etc/letsencrypt/live/$domain/privkey.pem"
+  [[ -s "$cert" && -s "$key" ]] || die "Certificate files are missing."
+
+  port="$(local_port)"
+  uuid="$(cat /proc/sys/kernel/random/uuid)"
+  path="/$(openssl rand -hex 8)"
+  read -r -p "Node name [XHTTP]: " name
+  name="${name:-XHTTP}"; name="${name// /-}"
+
   mkdir -p "$XRAY_DIR"; tmp="$(mktemp)"
   cat >"$tmp" <<EOF
 {
   "log": { "loglevel": "warning" },
   "inbounds": [{
-    "listen": "127.0.0.1", "port": $port, "protocol": "vless",
+    "listen": "127.0.0.1",
+    "port": $port,
+    "protocol": "vless",
     "settings": { "clients": [{ "id": "$uuid", "email": "xhttp" }], "decryption": "none" },
     "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "$path", "mode": "auto" } }
   }],
   "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
 }
 EOF
-  local check_output
-  if ! check_output="$("$XRAY_BIN" run -test -format json -c "$tmp" 2>&1)"; then
-    echo "Xray 配置校验输出：" >&2
-    printf '%s\n' "$check_output" >&2
-    rm -f "$tmp"
-    die "Xray 配置校验失败。"
-  fi
+  "$XRAY_BIN" run -test -format json -c "$tmp" >/dev/null || { rm -f "$tmp"; die "Generated Xray config did not pass validation."; }
   install -m 600 "$tmp" "$XRAY_CONFIG"; rm -f "$tmp"
-  cat >"$XRAY_SERVICE" <<EOF
-[Unit]
-Description=Xray XHTTP Node
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=simple
-ExecStart=$XRAY_BIN run -c $XRAY_CONFIG
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=1048576
-[Install]
-WantedBy=multi-user.target
-EOF
+  write_xray_service
   start_xray_service "$port"
   write_nginx "$domain" "$cert" "$key" "$port" "$path"
-  local link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&type=xhttp&path=${path}&mode=auto#${name}"
+
+  link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&type=xhttp&path=${path}&mode=auto#${name}"
   cat >"$XRAY_INFO" <<EOF
 NODE_NAME='$name'
 DOMAIN='$domain'
 LOCAL_PORT='$port'
-UUID='$uuid'
 PATH='$path'
+UUID='$uuid'
+NGINX_CONF='$NGINX_CONF'
 LINK='$link'
 EOF
   chmod 600 "$XRAY_INFO"
-  echo; echo "XHTTP 节点已创建（与云盘/gRPC 共用 TCP/443）："; echo "$link"; echo
+  echo
+  echo "XHTTP node created. Public TCP/443 is shared through Nginx:"
+  echo "$link"
+  echo
   qrencode -t ANSIUTF8 "$link"
 }
 
-show_link() { [[ -f "$XRAY_INFO" ]] || die "未找到 XHTTP 节点。"; sed -n "s/^LINK='\(.*\)'$/\1/p" "$XRAY_INFO"; }
-show_status() { systemctl is-active xray-xhttp 2>/dev/null || true; "$XRAY_BIN" version 2>/dev/null | head -n1 || true; [[ -f "$XRAY_INFO" ]] && sed -n "s/^LOCAL_PORT='\(.*\)'$/监听端口：\1/p" "$XRAY_INFO"; }
-show_logs() { journalctl -u xray-xhttp -n 80 --no-pager; }
-restart_xray() { [[ -f "$XRAY_INFO" ]] || die "未找到 XHTTP 节点。"; local port; port="$(sed -n "s/^LOCAL_PORT='\(.*\)'$/\1/p" "$XRAY_INFO")"; [[ -n "$port" ]] || die "未读取到本机端口。"; systemctl restart xray-xhttp; wait_for_xray_listener "$port" || die "Xray 重启后未监听本机端口。"; echo "Xray 已重启并监听 127.0.0.1:$port。"; }
-uninstall_node() { confirm_yes "是否卸载本脚本创建的 XHTTP 节点？" || return; systemctl disable --now xray-xhttp 2>/dev/null || true; rm -f "$XRAY_SERVICE" "$XRAY_CONFIG" "$XRAY_INFO" "$NGINX_SYSTEM_CONF" "$NGINX_STANDALONE_CONF"; systemctl daemon-reload; select_nginx_mode && reload_nginx || true; echo "已卸载 XHTTP 节点。"; }
+info_value() { sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$XRAY_INFO"; }
+require_node_files() { [[ -f "$XRAY_INFO" && -f "$XRAY_CONFIG" ]] || die "XHTTP node not found. Install it first."; }
+show_link() { require_node_files; info_value LINK; }
+show_status() { systemctl status xray-xhttp --no-pager; }
+show_logs() { journalctl -u xray-xhttp -n 100 --no-pager; }
+restart_xray() { require_node_files; local port; port="$(info_value LOCAL_PORT)"; systemctl restart xray-xhttp; wait_for_xray_listener "$port" || die "Xray did not restart cleanly."; echo "Xray restarted."; }
+
+uninstall_node() {
+  confirm_yes "Uninstall the XHTTP node created by this script?" || return
+  local conf=""
+  [[ -f "$XRAY_INFO" ]] && conf="$(info_value NGINX_CONF || true)"
+  systemctl disable --now xray-xhttp 2>/dev/null || true
+  rm -f "$XRAY_SERVICE" "$XRAY_CONFIG" "$XRAY_INFO"
+  [[ -n "$conf" ]] && rm -f "$conf"
+  systemctl daemon-reload
+  ensure_nginx_ready && reload_nginx || true
+  echo "XHTTP node removed. Xray binary is kept at $XRAY_ROOT."
+}
 
 menu() {
-  echo "========================================"; echo " Xray XHTTP 节点脚本 $SCRIPT_VERSION"; echo "========================================"
-  echo "1. 安装 / 重建 XHTTP 节点"; echo "2. 查看节点链接和二维码"; echo "3. 查看状态"; echo "4. 查看日志"; echo "5. 重启 Xray"; echo "6. 卸载 XHTTP 节点"; echo "0. 退出"
-  read -r -p "请选择：" choice
-  case "$choice" in 1) install_node;; 2) show_link | tee /dev/tty | qrencode -t ANSIUTF8;; 3) show_status;; 4) show_logs;; 5) restart_xray;; 6) uninstall_node;; 0) exit 0;; *) die "无效选项。";; esac
+  cat <<EOF
+========================================
+ Xray XHTTP TLS Node Script $SCRIPT_VERSION
+========================================
+1. Install / rebuild XHTTP node
+2. Show node link and QR code
+3. Show status
+4. Show logs
+5. Restart Xray
+6. Uninstall XHTTP node
+0. Exit
+EOF
+  local choice
+  read -r -p "Choose: " choice
+  case "$choice" in
+    1) install_node ;;
+    2) show_link | tee /dev/tty | qrencode -t ANSIUTF8 ;;
+    3) show_status ;;
+    4) show_logs ;;
+    5) restart_xray ;;
+    6) uninstall_node ;;
+    0) exit 0 ;;
+    *) die "Invalid option." ;;
+  esac
 }
 
 require_root
-case "${1:-}" in install) install_node;; link) show_link;; status) show_status;; logs) show_logs;; restart) restart_xray;; uninstall) uninstall_node;; *) menu;; esac
+case "${1:-}" in
+  install) install_node ;;
+  link) show_link ;;
+  status) show_status ;;
+  logs) show_logs ;;
+  restart) restart_xray ;;
+  uninstall) uninstall_node ;;
+  *) menu ;;
+esac
