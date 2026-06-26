@@ -27,10 +27,27 @@ install_deps() {
   (( ${#missing[@]} == 0 )) && return
   command -v apt-get >/dev/null 2>&1 || die "仅支持 Debian/Ubuntu（apt-get）。"
   apt-get update -y
-  DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip openssl qrencode ca-certificates iproute2
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip openssl qrencode ca-certificates iproute2 tzdata
 }
 
 public_ipv4() { curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || true; }
+
+configure_china_time() {
+  echo
+  echo "正在设置中国时区并开启自动对时..."
+  if command -v timedatectl >/dev/null 2>&1; then
+    timedatectl set-timezone Asia/Shanghai 2>/dev/null || true
+    timedatectl set-ntp true 2>/dev/null || true
+  fi
+  systemctl enable --now systemd-timesyncd 2>/dev/null || true
+  systemctl enable --now chronyd 2>/dev/null || true
+  systemctl enable --now chrony 2>/dev/null || true
+
+  local timezone synchronized
+  timezone="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  synchronized="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
+  echo "当前时区：${timezone:-未知}；自动对时：${synchronized:-未知}"
+}
 
 urlencode() {
   local string="$1" encoded="" character i
@@ -135,6 +152,7 @@ start_service() {
 
 install_node() {
   install_deps
+  configure_china_time
   install_anytls
   systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
