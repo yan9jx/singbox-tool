@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Standalone VLESS + XHTTP + REALITY installer for Debian/Ubuntu.
-# This is a direct Xray listener. It never stops Nginx/File Browser/reverse proxy
-# services. If TCP/443 is already occupied, it chooses a free *443 fallback port.
+# VLESS + XHTTP + REALITY 独立安装脚本，适用于 Debian/Ubuntu。
+# 这是 Xray 直连监听脚本。不会停止 Nginx、云盘/File Browser 或反代服务。
+# 如果 TCP/443 已被占用，会自动选择可用的 *443 备用端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.9"
+SCRIPT_VERSION="v1.8"
 XRAY_ROOT="/opt/reality-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/reality-xhttp"
@@ -14,8 +14,8 @@ XRAY_SERVICE="/etc/systemd/system/reality-xhttp.service"
 SERVICE_NAME="reality-xhttp"
 DEFAULT_PORT=443
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-require_root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Please run as root."; command -v systemctl >/dev/null || die "systemd is required."; }
+die() { echo "错误：$*" >&2; exit 1; }
+require_root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || die "请使用 root 运行。"; command -v systemctl >/dev/null || die "当前系统需要支持 systemd。"; }
 confirm_yes() { local answer; read -r -p "$1 [Y/n]: " answer; [[ -z "$answer" || "$answer" =~ ^[Yy]$ ]]; }
 validate_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
 port_is_listening() { ss -H -lnt "sport = :$1" 2>/dev/null | grep -q .; }
@@ -26,7 +26,7 @@ install_deps() {
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   (( ${#missing[@]} == 0 )) && return
-  command -v apt-get >/dev/null 2>&1 || die "Only Debian/Ubuntu with apt-get is supported."
+  command -v apt-get >/dev/null 2>&1 || die "仅支持 Debian/Ubuntu（apt-get）。"
   apt-get update -y
   DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip openssl qrencode ca-certificates iproute2
 }
@@ -39,19 +39,19 @@ install_xray() {
   case "$machine" in
     x86_64|amd64) asset="Xray-linux-64.zip" ;;
     aarch64|arm64) asset="Xray-linux-arm64-v8a.zip" ;;
-    *) die "Unsupported CPU architecture: $machine" ;;
+    *) die "不支持的 CPU 架构：$machine" ;;
   esac
   latest="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
-  [[ -n "$latest" ]] || die "Could not fetch latest Xray version."
+  [[ -n "$latest" ]] || die "无法获取 Xray 最新版本。"
   tmp="$(mktemp -d)"; zip="$tmp/xray.zip"
   curl -fL "https://github.com/XTLS/Xray-core/releases/download/${latest}/${asset}" -o "$zip"
   unzip -q "$zip" -d "$tmp"
   binary="$tmp/xray"
-  [[ -x "$binary" ]] || die "Xray archive is incomplete."
+  [[ -x "$binary" ]] || die "Xray 安装包不完整。"
   install -d -m 755 "$XRAY_ROOT"
   install -m 755 "$binary" "$XRAY_BIN"
   rm -rf "$tmp"
-  echo "Installed Xray: $latest"
+  echo "已安装 Xray：$latest"
 }
 
 choose_listen_port() {
@@ -60,22 +60,22 @@ choose_listen_port() {
     printf '%s' "$DEFAULT_PORT"
     return
   fi
-  echo "TCP/443 is occupied. Keeping the existing cloud disk/reverse proxy service untouched." >&2
+  echo "TCP/443 已被占用，将保留现有云盘/反代服务并自动选择备用端口。" >&2
   for candidate in 1443 2443 3443 4443 5443 6443 7443 8443 9443 10443 11443 12443; do
     if ! port_is_listening "$candidate"; then
       printf '%s' "$candidate"
       return
     fi
   done
-  die "TCP/443 and common *443 fallback ports are all occupied."
+  die "TCP/443 和常见 *443 备用端口均已被占用。"
 }
 
 generate_reality_keys() {
   local output
-  output="$("$XRAY_BIN" x25519 2>&1)" || die "Could not generate REALITY keys: $output"
+  output="$("$XRAY_BIN" x25519 2>&1)" || die "无法生成 REALITY 密钥：$output"
   PRIVATE_KEY="$(printf '%s\n' "$output" | awk -F': *' 'tolower($1) ~ /^private[[:space:]]*key$/ { gsub(/\r/, "", $2); print $2; exit }')"
   PUBLIC_KEY="$(printf '%s\n' "$output" | awk -F': *' 'tolower($1) ~ /^(public[[:space:]]*key|password \(publickey\))$/ { gsub(/\r/, "", $2); print $2; exit }')"
-  [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]] || { printf '%s\n' "$output" >&2; die "Could not parse REALITY key output."; }
+  [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]] || { printf '%s\n' "$output" >&2; die "无法解析 REALITY 密钥输出。"; }
 }
 
 write_config() {
@@ -116,14 +116,14 @@ test_config() {
   local output
   if ! output="$("$XRAY_BIN" run -test -format json -c "$XRAY_CONFIG" 2>&1)"; then
     printf '%s\n' "$output" >&2
-    die "Xray config validation failed."
+    die "Xray 配置校验失败。"
   fi
 }
 
 write_service() {
   cat >"$XRAY_SERVICE" <<EOF
 [Unit]
-Description=VLESS XHTTP REALITY Node
+Description=VLESS XHTTP REALITY 节点
 After=network-online.target
 Wants=network-online.target
 
@@ -143,7 +143,7 @@ EOF
 start_service() {
   systemctl daemon-reload
   systemctl enable --now "$SERVICE_NAME"
-  systemctl is-active --quiet "$SERVICE_NAME" || { journalctl -u "$SERVICE_NAME" -n 50 --no-pager >&2 || true; die "Xray did not start."; }
+  systemctl is-active --quiet "$SERVICE_NAME" || { journalctl -u "$SERVICE_NAME" -n 50 --no-pager >&2 || true; die "Xray 未能启动。"; }
 }
 
 make_link() {
@@ -177,25 +177,25 @@ install_node() {
 
   local port input host name uuid destination default_sni server_name short_id path link public_ip
   port="$(choose_listen_port)"
-  read -r -p "Listen TCP port [$port]: " input
+  read -r -p "监听 TCP 端口 [$port]: " input
   port="${input:-$port}"
-  validate_port "$port" || die "Port must be 1-65535."
-  port_is_listening "$port" && die "TCP/$port is occupied."
+  validate_port "$port" || die "端口必须在 1-65535 之间。"
+  port_is_listening "$port" && die "TCP/$port 已被占用。"
 
-  read -r -p "REALITY target domain:port [www.yahoo.co.jp:443]: " destination
+  read -r -p "REALITY 伪装目标（域名:端口）[www.yahoo.co.jp:443]: " destination
   destination="${destination:-www.yahoo.co.jp:443}"
-  [[ "$destination" =~ ^[A-Za-z0-9.-]+:[0-9]+$ ]] || die "Target must be domain:port."
+  [[ "$destination" =~ ^[A-Za-z0-9.-]+:[0-9]+$ ]] || die "伪装目标必须是 域名:端口。"
   default_sni="${destination%:*}"
   read -r -p "REALITY SNI [$default_sni]: " server_name
   server_name="${server_name:-$default_sni}"
-  [[ "$server_name" =~ ^[A-Za-z0-9.-]+$ ]] || die "Invalid SNI."
+  [[ "$server_name" =~ ^[A-Za-z0-9.-]+$ ]] || die "SNI 格式不正确。"
 
   public_ip="$(public_ipv4)"
-  read -r -p "Node address, IP or resolved domain [${public_ip:-manual required}]: " host
+  read -r -p "节点连接地址（IP 或已解析域名）[${public_ip:-请手动输入}]: " host
   host="${host:-$public_ip}"
-  [[ -n "$host" && "$host" != *[[:space:]]* ]] || die "Node address cannot be empty or contain spaces."
+  [[ -n "$host" && "$host" != *[[:space:]]* ]] || die "节点地址不能为空或包含空格。"
 
-  read -r -p "Node name [Reality-XHTTP]: " name
+  read -r -p "节点名称 [Reality-XHTTP]: " name
   name="${name:-Reality-XHTTP}"; name="${name// /-}"
   uuid="$(cat /proc/sys/kernel/random/uuid)"
   short_id="$(openssl rand -hex 8)"
@@ -208,19 +208,19 @@ install_node() {
   link="$(make_link "$uuid" "$host" "$port" "$server_name" "$PUBLIC_KEY" "$short_id" "$path" "$name")"
   write_info "$name" "$host" "$port" "$uuid" "$server_name" "$destination" "$PRIVATE_KEY" "$PUBLIC_KEY" "$short_id" "$path" "$link"
   echo
-  echo "REALITY + XHTTP node created:"
+  echo "REALITY + XHTTP 节点已创建："
   echo "$link"
   echo
   qrencode -t ANSIUTF8 "$link"
 }
 
 info_value() { sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$XRAY_INFO"; }
-require_node_files() { [[ -f "$XRAY_INFO" && -f "$XRAY_CONFIG" ]] || die "Node not found. Install it first."; }
+require_node_files() { [[ -f "$XRAY_INFO" && -f "$XRAY_CONFIG" ]] || die "未找到节点，请先安装。"; }
 show_link() { require_node_files; info_value LINK; }
 print_link_qr() { echo "$1"; echo; qrencode -t ANSIUTF8 "$1"; }
 show_status() { [[ -x "$XRAY_BIN" ]] && "$XRAY_BIN" version | head -n1 || true; systemctl status "$SERVICE_NAME" --no-pager; }
 show_logs() { journalctl -u "$SERVICE_NAME" -n 100 --no-pager; }
-restart_node() { systemctl restart "$SERVICE_NAME"; systemctl is-active --quiet "$SERVICE_NAME" || die "Restart failed."; echo "Restarted."; }
+restart_node() { systemctl restart "$SERVICE_NAME"; systemctl is-active --quiet "$SERVICE_NAME" || die "重启失败。"; echo "已重启。"; }
 
 change_port() {
   require_node_files
@@ -228,15 +228,15 @@ change_port() {
   old_port="$(info_value PORT)"; name="$(info_value NODE_NAME)"; host="$(info_value SERVER_ADDRESS)"; uuid="$(info_value UUID)"
   server_name="$(info_value SNI)"; destination="$(info_value DESTINATION)"; private_key="$(info_value PRIVATE_KEY)"
   public_key="$(info_value PUBLIC_KEY)"; short_id="$(info_value SHORT_ID)"; path="$(info_value PATH)"
-  read -r -p "New listen TCP port [$old_port]: " new_port
+  read -r -p "新的监听 TCP 端口 [$old_port]: " new_port
   new_port="${new_port:-$old_port}"
-  validate_port "$new_port" || die "Port must be 1-65535."
-  [[ "$new_port" == "$old_port" ]] && { echo "Port unchanged."; return; }
-  port_is_listening "$new_port" && die "TCP/$new_port is occupied."
+  validate_port "$new_port" || die "端口必须在 1-65535 之间。"
+  [[ "$new_port" == "$old_port" ]] && { echo "端口未改变。"; return; }
+  port_is_listening "$new_port" && die "TCP/$new_port 已被占用。"
   write_config "$uuid" "$new_port" "$server_name" "$destination" "$private_key" "$short_id" "$path"
   test_config
   systemctl restart "$SERVICE_NAME"
-  systemctl is-active --quiet "$SERVICE_NAME" || die "Service failed after port change."
+  systemctl is-active --quiet "$SERVICE_NAME" || die "修改端口后服务启动失败。"
   link="$(make_link "$uuid" "$host" "$new_port" "$server_name" "$public_key" "$short_id" "$path" "$name")"
   write_info "$name" "$host" "$new_port" "$uuid" "$server_name" "$destination" "$private_key" "$public_key" "$short_id" "$path" "$link"
   print_link_qr "$link"
@@ -248,9 +248,9 @@ change_link_host() {
   old_host="$(info_value SERVER_ADDRESS)"; port="$(info_value PORT)"; name="$(info_value NODE_NAME)"; uuid="$(info_value UUID)"
   server_name="$(info_value SNI)"; public_key="$(info_value PUBLIC_KEY)"; short_id="$(info_value SHORT_ID)"; path="$(info_value PATH)"
   destination="$(info_value DESTINATION)"; private_key="$(info_value PRIVATE_KEY)"
-  read -r -p "Node address, IP or resolved domain [$old_host]: " host
+  read -r -p "节点连接地址（IP 或已解析域名）[$old_host]: " host
   host="${host:-$old_host}"
-  [[ -n "$host" && "$host" != *[[:space:]]* ]] || die "Node address cannot be empty or contain spaces."
+  [[ -n "$host" && "$host" != *[[:space:]]* ]] || die "节点地址不能为空或包含空格。"
   link="$(make_link "$uuid" "$host" "$port" "$server_name" "$public_key" "$short_id" "$path" "$name")"
   write_info "$name" "$host" "$port" "$uuid" "$server_name" "$destination" "$private_key" "$public_key" "$short_id" "$path" "$link"
   print_link_qr "$link"
@@ -259,32 +259,32 @@ change_link_host() {
 upgrade_xray() { install_xray; restart_node; }
 
 uninstall_node() {
-  confirm_yes "Uninstall the REALITY + XHTTP node?" || return
+  confirm_yes "是否卸载 REALITY + XHTTP 节点？" || return
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
   rm -f "$XRAY_SERVICE" "$XRAY_CONFIG" "$XRAY_INFO"
   rmdir "$XRAY_DIR" 2>/dev/null || true
   systemctl daemon-reload
-  echo "Node removed. Xray binary is kept at $XRAY_ROOT."
+  echo "节点已卸载；Xray 二进制保留在 $XRAY_ROOT。"
 }
 
 menu() {
   cat <<EOF
 ========================================
- REALITY + XHTTP Node Script $SCRIPT_VERSION
+ REALITY + XHTTP 节点脚本 $SCRIPT_VERSION
 ========================================
-1. Install / rebuild node
-2. Show node link and QR code
-3. Show status
-4. Show logs
-5. Restart Xray
-6. Change listen port
-7. Set node address
-8. Check / update Xray-core
-9. Uninstall node
-0. Exit
+1. 安装 / 重建节点
+2. 查看节点链接和二维码
+3. 查看状态
+4. 查看日志
+5. 重启 Xray
+6. 更换监听端口
+7. 设置节点连接地址
+8. 检查 / 更新 Xray-core
+9. 卸载节点
+0. 退出
 EOF
   local choice
-  read -r -p "Choose: " choice
+  read -r -p "请选择：" choice
   case "$choice" in
     1) install_node ;;
     2) print_link_qr "$(show_link)" ;;
@@ -296,7 +296,7 @@ EOF
     8) upgrade_xray ;;
     9) uninstall_node ;;
     0) exit 0 ;;
-    *) die "Invalid option." ;;
+    *) die "无效选项。" ;;
   esac
 }
 
