@@ -51,6 +51,21 @@ export default {
         return mutateGlobalReminder(request, env, "toggle");
       }
 
+      if (url.pathname === "/api/v1/dashboard-settings" && request.method === "GET") {
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        return statusStore(env).fetch(new Request("https://store/dashboard-settings"));
+      }
+
+      if (url.pathname === "/api/v1/dashboard-settings" && request.method === "POST") {
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        return saveDashboardSettings(request, env);
+      }
+
+      if (url.pathname === "/api/v1/nodes/delete" && request.method === "POST") {
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        return deleteOfflineNode(request, env);
+      }
+
       if (url.pathname === "/api/v1/telegram/test" && request.method === "POST") {
         if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         if (!telegramConfigured(env)) return json({ ok: false, error: "Telegram 尚未配置" }, 400);
@@ -167,7 +182,7 @@ async function saveGlobalReminder(request, env) {
   }
 
   const scheduleType = String(input?.schedule_type || "");
-  const allowedTypes = ["once", "daily", "weekly", "monthly", "yearly"];
+  const allowedTypes = ["once", "daily", "weekly", "monthly", "yearly", "interval_months"];
   const reminder = {
     id: /^[a-zA-Z0-9_-]{1,64}$/.test(input?.id || "") ? input.id : crypto.randomUUID(),
     title: cleanText(input?.title, 100),
@@ -178,14 +193,15 @@ async function saveGlobalReminder(request, env) {
     weekday: Number(input?.weekday || 0),
     schedule_month: Number(input?.schedule_month || 1),
     monthday: Number(input?.monthday || 1),
+    interval_months: Number(input?.interval_months || 1),
     enabled: input?.enabled !== false,
   };
   if (!reminder.title) return json({ ok: false, error: "提醒名称不能为空" }, 400);
   if (!allowedTypes.includes(scheduleType)) return json({ ok: false, error: "提醒类型错误" }, 400);
-  if (scheduleType === "once" && (!Number.isInteger(reminder.schedule_at) || reminder.schedule_at < 1)) {
-    return json({ ok: false, error: "单次提醒时间错误" }, 400);
+  if (["once", "interval_months"].includes(scheduleType) && (!Number.isInteger(reminder.schedule_at) || reminder.schedule_at < 1)) {
+    return json({ ok: false, error: "首次提醒时间错误" }, 400);
   }
-  if (scheduleType !== "once" && !/^([01]\d|2[0-3]):[0-5]\d$/.test(reminder.schedule_time)) {
+  if (!["once", "interval_months"].includes(scheduleType) && !/^([01]\d|2[0-3]):[0-5]\d$/.test(reminder.schedule_time)) {
     return json({ ok: false, error: "循环提醒时间错误" }, 400);
   }
   if (scheduleType === "weekly" && (!Number.isInteger(reminder.weekday) || reminder.weekday < 0 || reminder.weekday > 6)) {
@@ -196,6 +212,9 @@ async function saveGlobalReminder(request, env) {
   }
   if (scheduleType === "yearly" && (!Number.isInteger(reminder.schedule_month) || reminder.schedule_month < 1 || reminder.schedule_month > 12)) {
     return json({ ok: false, error: "每年月份设置错误" }, 400);
+  }
+  if (scheduleType === "interval_months" && (!Number.isInteger(reminder.interval_months) || reminder.interval_months < 1 || reminder.interval_months > 60)) {
+    return json({ ok: false, error: "间隔月数错误" }, 400);
   }
   return statusStore(env).fetch(new Request("https://store/global-reminder/save", {
     method: "POST",
@@ -217,6 +236,30 @@ async function mutateGlobalReminder(request, env, action) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ id, enabled: input?.enabled !== false }),
+  }));
+}
+
+async function saveDashboardSettings(request, env) {
+  let input;
+  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON 格式错误" }, 400); }
+  const days = Number(input?.auto_delete_offline_days || 0);
+  if (![0, 7, 30, 90].includes(days)) return json({ ok: false, error: "自动清理周期错误" }, 400);
+  return statusStore(env).fetch(new Request("https://store/dashboard-settings", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ auto_delete_offline_days: days }),
+  }));
+}
+
+async function deleteOfflineNode(request, env) {
+  let input;
+  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON 格式错误" }, 400); }
+  const nodeId = String(input?.node_id || "");
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
+  return statusStore(env).fetch(new Request("https://store/node/delete", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ node_id: nodeId }),
   }));
 }
 
@@ -305,6 +348,30 @@ export class VpsStatusStore {
       return json({ ok: true, reminder: publicGlobalReminder(record) });
     }
 
+    if (url.pathname === "/dashboard-settings" && request.method === "GET") {
+      const settings = await this.ctx.storage.get("dashboard:settings") || { auto_delete_offline_days: 0 };
+      return json({ ok: true, settings });
+    }
+
+    if (url.pathname === "/dashboard-settings" && request.method === "POST") {
+      const settings = await request.json();
+      await this.ctx.storage.put("dashboard:settings", settings);
+      return json({ ok: true, settings });
+    }
+
+    if (url.pathname === "/node/delete" && request.method === "POST") {
+      const input = await request.json();
+      const key = `node:${input.node_id}`;
+      const record = await this.ctx.storage.get(key);
+      if (!record) return json({ ok: false, error: "节点不存在" }, 404);
+      const now = Math.floor(Date.now() / 1000);
+      const offlineAfter = clampNumber(this.env.OFFLINE_AFTER_SECONDS, 30, 3600, 150);
+      const offline = record.agent_state === "shutdown" || now - record.last_seen > offlineAfter;
+      if (!offline) return json({ ok: false, error: "在线节点不能删除" }, 409);
+      await this.ctx.storage.delete(key);
+      return json({ ok: true });
+    }
+
     if (url.pathname === "/nodes" && request.method === "GET") {
       const records = await this.ctx.storage.list({ prefix: "node:" });
       const now = Math.floor(Date.now() / 1000);
@@ -347,8 +414,20 @@ export class VpsStatusStore {
   }
 
   async runReminders(now) {
-    if (!telegramConfigured(this.env)) return json({ ok: true, configured: false, sent: 0 });
     const records = await this.ctx.storage.list({ prefix: "node:" });
+    const dashboardSettings = await this.ctx.storage.get("dashboard:settings") || { auto_delete_offline_days: 0 };
+    let deleted = 0;
+    if (dashboardSettings.auto_delete_offline_days > 0) {
+      const cutoff = now - dashboardSettings.auto_delete_offline_days * 86400;
+      for (const [key, record] of records.entries()) {
+        if (record.last_seen < cutoff) {
+          await this.ctx.storage.delete(key);
+          records.delete(key);
+          deleted += 1;
+        }
+      }
+    }
+    if (!telegramConfigured(this.env)) return json({ ok: true, configured: false, sent: 0, deleted });
     let sent = 0;
     const errors = [];
 
@@ -429,7 +508,7 @@ export class VpsStatusStore {
       }
     }
 
-    return json({ ok: errors.length === 0, configured: true, sent, errors });
+    return json({ ok: errors.length === 0, configured: true, sent, deleted, errors });
   }
 }
 
@@ -444,6 +523,7 @@ function publicGlobalReminder(reminder) {
     weekday: Number(reminder.weekday) || 0,
     schedule_month: Number(reminder.schedule_month) || 1,
     monthday: Number(reminder.monthday) || 1,
+    interval_months: Number(reminder.interval_months) || 1,
     enabled: Boolean(reminder.enabled),
     completed: Boolean(reminder.completed),
     created_at: reminder.created_at,
@@ -452,7 +532,7 @@ function publicGlobalReminder(reminder) {
 }
 
 function reminderSignature(reminder) {
-  return [reminder.schedule_type, reminder.schedule_at, reminder.schedule_time, reminder.weekday, reminder.schedule_month, reminder.monthday].join("|");
+  return [reminder.schedule_type, reminder.schedule_at, reminder.schedule_time, reminder.weekday, reminder.schedule_month, reminder.monthday, reminder.interval_months].join("|");
 }
 
 function globalReminderFireKey(reminder, now) {
@@ -463,6 +543,29 @@ function globalReminderFireKey(reminder, now) {
   const dateKey = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
   if (reminder.schedule_type === "once") {
     return reminder.schedule_at <= now ? `once:${reminder.schedule_at}` : "";
+  }
+  if (reminder.schedule_type === "interval_months") {
+    const anchor = new Date((reminder.schedule_at + 8 * 3600) * 1000);
+    const anchorMonthIndex = anchor.getUTCFullYear() * 12 + anchor.getUTCMonth();
+    const currentMonthIndex = year * 12 + (month - 1);
+    let occurrence = Math.floor((currentMonthIndex - anchorMonthIndex) / reminder.interval_months);
+    if (occurrence < 0) return "";
+    const targetMonthIndex = anchorMonthIndex + occurrence * reminder.interval_months;
+    const targetYear = Math.floor(targetMonthIndex / 12);
+    const targetMonth = targetMonthIndex % 12;
+    const daysInTargetMonth = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+    const targetDay = Math.min(anchor.getUTCDate(), daysInTargetMonth);
+    let targetUtc = Date.UTC(targetYear, targetMonth, targetDay, anchor.getUTCHours(), anchor.getUTCMinutes()) / 1000 - 8 * 3600;
+    if (targetUtc > now) {
+      occurrence -= 1;
+      if (occurrence < 0) return "";
+      const previousIndex = anchorMonthIndex + occurrence * reminder.interval_months;
+      const previousYear = Math.floor(previousIndex / 12);
+      const previousMonth = previousIndex % 12;
+      const previousDays = new Date(Date.UTC(previousYear, previousMonth + 1, 0)).getUTCDate();
+      targetUtc = Date.UTC(previousYear, previousMonth, Math.min(anchor.getUTCDate(), previousDays), anchor.getUTCHours(), anchor.getUTCMinutes()) / 1000 - 8 * 3600;
+    }
+    return `interval:${targetUtc}`;
   }
   const [hour, minute] = reminder.schedule_time.split(":").map(Number);
   if (china.getUTCHours() * 60 + china.getUTCMinutes() < hour * 60 + minute) return "";
@@ -485,6 +588,9 @@ function globalReminderFireKey(reminder, now) {
 function globalReminderScheduleLabel(reminder) {
   if (reminder.schedule_type === "once") {
     return new Date(reminder.schedule_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
+  }
+  if (reminder.schedule_type === "interval_months") {
+    return `每 ${reminder.interval_months} 个月，自 ${new Date(reminder.schedule_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`;
   }
   if (reminder.schedule_type === "daily") return `每天 ${reminder.schedule_time}`;
   if (reminder.schedule_type === "weekly") return `每周${"日一二三四五六"[reminder.weekday]} ${reminder.schedule_time}`;
