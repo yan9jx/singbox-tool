@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.06.27-6"
+APP_VERSION="2026.06.27-7"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -189,6 +189,7 @@ write_manager() {
   cat > "$PY_FILE" <<'PYEOF'
 #!/usr/bin/env python3
 import json
+import html
 import re
 import os
 import sys
@@ -316,10 +317,12 @@ def tg_error_text(resp):
     return str(desc)
 
 
-def send_message(text, reply_markup=None):
+def send_message(text, reply_markup=None, parse_mode=None):
     data = {"chat_id": CFG["chat_id"], "text": text}
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    if parse_mode:
+        data["parse_mode"] = parse_mode
     return tg_api("sendMessage", data, timeout=8)
 
 
@@ -366,7 +369,7 @@ def keyboard():
 
 
 def send_panel():
-    resp = send_message(status_text(), keyboard())
+    resp = send_status(keyboard())
     if not resp or not resp.get("ok"):
         err = tg_error_text(resp)
         log_event(f"send_panel failed: {err}")
@@ -772,6 +775,15 @@ def singbox_service_name():
     candidates = ["sing-box", "singbox"]
     if "singbox" in configured.lower().replace("-", ""):
         candidates.insert(0, configured)
+    for command in (
+        "systemctl list-units --type=service --all --no-legend 2>/dev/null",
+        "systemctl list-unit-files --type=service --no-legend 2>/dev/null",
+    ):
+        _, output, _ = run(command, timeout=4)
+        for line in output.splitlines():
+            unit = line.split(None, 1)[0].removesuffix(".service")
+            if "singbox" in unit.lower().replace("-", ""):
+                candidates.append(unit)
     seen = set()
     for service in candidates:
         if not service or service in seen:
@@ -784,7 +796,8 @@ def singbox_service_name():
 
 
 def singbox_process_running():
-    return any(
+    code, _, _ = run("pgrep -x sing-box >/dev/null 2>&1 || pgrep -x singbox >/dev/null 2>&1", timeout=3)
+    return code == 0 or any(
         "sing-box" in row["line"].lower() or "singbox" in row["line"].lower()
         for row in ss_listeners()
     )
@@ -861,7 +874,7 @@ def visual_width(text):
 
 def width_spaces(width):
     width = max(0, int(width))
-    return "\u3000" * (width // 2) + " " * (width % 2)
+    return " " * width
 
 
 def two_sided_row(left, right, total_width=44):
@@ -1006,8 +1019,9 @@ def singbox_status():
     service = singbox_service_name()
     config = singbox_config_path()
     process_running = singbox_process_running()
+    anytls_state = anytls_status()
     if not service and config is None and not process_running:
-        return None
+        return anytls_state
     if config is not None:
         try:
             inbounds = json.loads(config.read_text(errors="ignore")).get("inbounds", [])
@@ -1016,7 +1030,7 @@ def singbox_status():
         if not inbounds and not process_running:
             return "未使用"
     if not service_running():
-        return "断开"
+        return "正常" if anytls_state == "正常" else "断开"
     ports = singbox_ports()
     return "正常" if not ports or port_listening(ports) else "异常"
 
@@ -1133,7 +1147,7 @@ def alert_status_text():
     return "开启"
 
 
-def status_text():
+def status_text(html_mode=False):
     refresh_local_state()
     update_traffic()
 
@@ -1158,7 +1172,7 @@ def status_text():
     total_rx = read_int(state_path("traffic_total_rx"))
     total_tx = read_int(state_path("traffic_total_tx"))
 
-    return (
+    header = (
         f"🌌 宇宙监察委员会VPS管理局\n"
         f"━━━━━━━━━━━━━━\n"
         f"[{CFG['server_name']}]\n"
@@ -1169,12 +1183,29 @@ def status_text():
         f"SWAP: {mem['swap_pct']}% ({mem['swap_used_mb']}/{mem['swap_total_mb']}MB)\n"
         f"磁盘: {disk['pct']}% ({disk['used_gb']:.1f}/{disk['total_gb']:.1f}GB)\n\n"
         f"磁盘 I/O: 读 {format_rate(io_read)} / 写 {format_rate(io_write)}\n\n"
-        f"{service_lines}"
-        f"端口:\n{port}\n\n"
+    )
+    footer = (
+        f"\n\n"
         f"总入站: {bytes_to_gb(total_rx):.2f} GB\n"
         f"总出站: {bytes_to_gb(total_tx):.2f} GB\n"
         f"总计: {bytes_to_gb(total_rx + total_tx):.2f} GB"
     )
+    if html_mode:
+        return (
+            html.escape(header)
+            + f"<pre>{html.escape(service_lines.rstrip())}</pre>\n"
+            + html.escape("端口:\n")
+            + f"<pre>{html.escape(port)}</pre>"
+            + html.escape(footer)
+        )
+    return header + service_lines + f"端口:\n{port}" + footer
+
+
+def send_status(reply_markup=None, prefix=""):
+    text = status_text(html_mode=True)
+    if prefix:
+        text = html.escape(prefix) + "\n\n" + text
+    return send_message(text, reply_markup, parse_mode="HTML")
 
 
 def can_alert(name, cooldown=None):
@@ -1327,7 +1358,7 @@ def resource_check():
 
 
 def report():
-    send_message(status_text(), keyboard())
+    send_status(keyboard())
 
 
 def sync_updates():
@@ -1348,11 +1379,11 @@ def handle_callback(cb):
     answer_callback(cid, "已收到")
 
     if data == "status":
-        send_message(status_text(), keyboard())
+        send_status(keyboard())
     elif data == "refresh_local":
         changes = refresh_local_state()
         detail = "\n".join(changes) if changes else "配置已是本机最新状态。"
-        send_message(f"🔍 本机状态已刷新\n[{CFG['server_name']}]\n\n{detail}\n\n" + status_text(), keyboard())
+        send_status(keyboard(), f"🔍 本机状态已刷新\n[{CFG['server_name']}]\n\n{detail}")
     elif data == "restart_node":
         send_message(f"🔄 正在重启节点...\n[{CFG['server_name']}]")
         try_restart_node(auto=False)
@@ -1377,7 +1408,7 @@ def handle_text(text):
     if text in ("/start", "/menu", "菜单"):
         send_panel()
     elif text in ("/status", "状态", "状态刷新"):
-        send_message(status_text(), keyboard())
+        send_status(keyboard())
     elif text in ("/clean", "清理", "清理缓存"):
         clean_cache(manual=True)
     elif text in ("/pause10", "暂停"):
