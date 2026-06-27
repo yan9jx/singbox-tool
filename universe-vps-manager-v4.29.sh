@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.06.27-1"
+APP_VERSION="2026.06.27-2"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -1096,13 +1096,16 @@ def status_text():
     xray, _ = xhttp_status()
     anytls = anytls_status()
     port = display_ports()
-    service_lines = ""
-    if singbox is not None:
-        service_lines += f"singbox\uff1a{singbox}\n"
-    if xray is not None:
-        service_lines += f"xray\uff1a{xray}\n"
-    if anytls is not None and singbox is None:
-        service_lines += f"singbox\uff1a{anytls}\n"
+
+    def status_column(label, value, width=20):
+        text = f"{label}\uff1a{value or '未安装'}"
+        visual_width = sum(1 if ord(char) < 128 else 2 for char in text)
+        return text + "\u3000" * max(1, (width - visual_width + 1) // 2)
+
+    service_lines = (
+        f"{status_column('xray', xray)}│ singbox\uff1a{singbox or '未安装'}\n"
+        f"{status_column('网盘', filebrowser)}│ AnyTLS\uff1a{anytls or '未安装'}\n"
+    )
 
     total_rx = read_int(state_path("traffic_total_rx"))
     total_tx = read_int(state_path("traffic_total_tx"))
