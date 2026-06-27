@@ -105,7 +105,7 @@ function render(data) {
   document.querySelector("#countDegraded").textContent = data.summary.degraded;
   document.querySelector("#countOffline").textContent = data.summary.offline + data.summary.shutdown;
   elements.updatedAt.textContent = `更新于 ${formatClock(data.server_time)}`;
-  elements.drive.href = data.cloud_drive_url || "https://disk.ejectors.net";
+  elements.drive.href = data.cloud_drive_url || "https://disk.example.com";
 
   elements.grid.replaceChildren();
   if (!data.nodes.length) {
@@ -195,7 +195,7 @@ function setSync(message, className) {
 
 function apiFetch(path, options = {}, token = state.viewToken) {
   const headers = new Headers(options.headers || {});
-  if (token) headers.set("x-view-token", token);
+  if (token) headers.set("x-view-token", encodeURIComponent(token));
   return fetch(path, { ...options, headers, cache: "no-store" });
 }
 

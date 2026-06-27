@@ -28,12 +28,12 @@
   ],
   "vars": {
     "OFFLINE_AFTER_SECONDS": "150",
-    "CLOUD_DRIVE_URL": "https://disk.ejectors.net"
+    "CLOUD_DRIVE_URL": "https://disk.example.com"
   },
   "routes": [
     {
-      "pattern": "home.ejectors.net/*",
-      "zone_name": "ejectors.net"
+      "pattern": "status.example.com/*",
+      "zone_name": "example.com"
     }
   ]
 }

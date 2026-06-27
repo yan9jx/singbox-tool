@@ -1,6 +1,6 @@
 # Ejectors VPS 状态面板
 
-部署在 Cloudflare Worker + Durable Objects 的私人 VPS 状态首页，页面域名为 `home.ejectors.net`，云盘入口为 `disk.ejectors.net`。
+部署在 Cloudflare Worker + Durable Objects 的私人 VPS 状态首页。域名、云盘入口和两组密钥均由部署者自行配置。
 
 ## 状态规则
 
@@ -13,7 +13,7 @@
 ## VPS 安装
 
 ```bash
-curl -fsSL https://home.ejectors.net/agent.sh -o /tmp/ejectors-agent.sh
+curl -fsSL https://status.example.com/agent.sh -o /tmp/ejectors-agent.sh
 sudo bash /tmp/ejectors-agent.sh
 ```
 

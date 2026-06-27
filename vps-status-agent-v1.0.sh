@@ -36,12 +36,17 @@ command -v python3 >/dev/null 2>&1 || {
   exit 1
 }
 
-default_url="${DASHBOARD_URL:-https://home.ejectors.net}"
+default_url="${DASHBOARD_URL:-}"
 default_id="$(hostname | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-' | cut -c1-64)"
 
-read -rp "面板地址 [$default_url]: " input_url
-dashboard_url="${input_url:-$default_url}"
+if [[ -n "$default_url" ]]; then
+  read -rp "面板地址 [$default_url]: " input_url
+  dashboard_url="${input_url:-$default_url}"
+else
+  read -rp "面板地址（例如 https://status.example.com）: " dashboard_url
+fi
 dashboard_url="${dashboard_url%/}"
+[[ "$dashboard_url" =~ ^https?://[^[:space:]]+$ ]] || { echo "面板地址格式错误。"; exit 1; }
 
 if [[ -n "${INGEST_TOKEN:-}" ]]; then
   ingest_token="$INGEST_TOKEN"
