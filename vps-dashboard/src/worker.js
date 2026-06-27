@@ -31,6 +31,11 @@ export default {
         return updateNodeSettings(request, env);
       }
 
+      if (url.pathname === "/api/v1/node-profile" && request.method === "POST") {
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        return updateNodeProfile(request, env);
+      }
+
       if (url.pathname === "/api/v1/reminders" && request.method === "GET") {
         if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return statusStore(env).fetch(new Request("https://store/global-reminders"));
@@ -177,32 +182,47 @@ async function updateNodeSettings(request, env) {
   const expiryDate = String(input?.expiry_date || "");
   const memo = cleanText(input?.memo, 500);
   const reminderAt = Number(input?.reminder_at || 0);
-  const maintenanceUntil = Number(input?.maintenance_until || 0);
   if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
   if (expiryDate && !isValidDate(expiryDate)) return json({ ok: false, error: "到期日期格式错误" }, 400);
   if (!Number.isInteger(reminderAt) || reminderAt < 0 || reminderAt > 4102444800) {
     return json({ ok: false, error: "提醒时间格式错误" }, 400);
   }
-  if (!Number.isInteger(maintenanceUntil) || maintenanceUntil < 0 || maintenanceUntil > 4102444800) {
-    return json({ ok: false, error: "维护结束时间格式错误" }, 400);
-  }
-
   const settings = {
     expiry_date: expiryDate,
     memo,
     reminder_at: reminderAt,
     telegram_enabled: input?.telegram_enabled !== false,
-    display_name: cleanText(input?.display_name, 80),
-    display_provider: cleanText(input?.display_provider, 40),
-    display_location: cleanText(input?.display_location, 40),
-    purpose: cleanText(input?.purpose, 80),
-    group: cleanText(input?.group, 40),
-    maintenance_until: maintenanceUntil,
   };
   return statusStore(env).fetch(new Request("https://store/settings", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ node_id: nodeId, settings }),
+  }));
+}
+
+async function updateNodeProfile(request, env) {
+  let input;
+  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON 格式错误" }, 400); }
+  const nodeId = String(input?.node_id || "");
+  const maintenanceUntil = Number(input?.maintenance_until || 0);
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
+  if (!Number.isInteger(maintenanceUntil) || maintenanceUntil < 0 || maintenanceUntil > 4102444800) {
+    return json({ ok: false, error: "维护结束时间格式错误" }, 400);
+  }
+  return statusStore(env).fetch(new Request("https://store/settings", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      node_id: nodeId,
+      settings: {
+        display_name: cleanText(input?.display_name, 80),
+        display_provider: cleanText(input?.display_provider, 40),
+        display_location: cleanText(input?.display_location, 40),
+        purpose: cleanText(input?.purpose, 80),
+        group: cleanText(input?.group, 40),
+        maintenance_until: maintenanceUntil,
+      },
+    }),
   }));
 }
 
