@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.06.27-7"
+APP_VERSION="2026.06.27-8"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -317,12 +317,10 @@ def tg_error_text(resp):
     return str(desc)
 
 
-def send_message(text, reply_markup=None, parse_mode=None):
+def send_message(text, reply_markup=None):
     data = {"chat_id": CFG["chat_id"], "text": text}
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
-    if parse_mode:
-        data["parse_mode"] = parse_mode
     return tg_api("sendMessage", data, timeout=8)
 
 
@@ -1147,7 +1145,12 @@ def alert_status_text():
     return "开启"
 
 
-def status_text(html_mode=False):
+def rich_paragraph(text):
+    escaped = html.escape(str(text)).replace("\n", "<br/>")
+    return f"<p>{escaped}</p>"
+
+
+def status_text(rich_mode=False):
     refresh_local_state()
     update_traffic()
 
@@ -1162,11 +1165,12 @@ def status_text(html_mode=False):
 
     xray_text = f"xray\uff1a{xray}" if xray is not None else ""
     singbox_text = f"singbox\uff1a{singbox}" if singbox is not None else ""
+    filebrowser_text = f"网盘\uff1a{filebrowser}"
     if xray_text and singbox_text:
         service_rows = [two_sided_row(xray_text, singbox_text)]
     else:
         service_rows = [text for text in (xray_text, singbox_text) if text]
-    service_rows.append(f"网盘\uff1a{filebrowser}")
+    service_rows.append(filebrowser_text)
     service_lines = "\n".join(service_rows) + ("\n" if service_rows else "")
 
     total_rx = read_int(state_path("traffic_total_rx"))
@@ -1190,22 +1194,72 @@ def status_text(html_mode=False):
         f"总出站: {bytes_to_gb(total_tx):.2f} GB\n"
         f"总计: {bytes_to_gb(total_rx + total_tx):.2f} GB"
     )
-    if html_mode:
+    if rich_mode:
+        service_cells = []
+        if xray_text and singbox_text:
+            service_cells.append(
+                f'<tr><td align="left">{html.escape(xray_text)}</td>'
+                f'<td align="right">{html.escape(singbox_text)}</td></tr>'
+            )
+        elif xray_text or singbox_text:
+            service_cells.append(
+                f'<tr><td colspan="2" align="left">{html.escape(xray_text or singbox_text)}</td></tr>'
+            )
+        service_cells.append(
+            f'<tr><td colspan="2" align="left">{html.escape(filebrowser_text)}</td></tr>'
+        )
+
+        port_cells = []
+        for line in port.splitlines():
+            columns = re.split(r" {2,}", line, maxsplit=1)
+            if len(columns) == 2:
+                port_cells.append(
+                    f'<tr><td align="left">{html.escape(columns[0])}</td>'
+                    f'<td align="right">{html.escape(columns[1])}</td></tr>'
+                )
+            else:
+                port_cells.append(
+                    f'<tr><td colspan="2" align="left">{html.escape(line)}</td></tr>'
+                )
+
+        header_html = "".join(rich_paragraph(section) for section in header.strip().split("\n\n"))
+        footer_html = "".join(rich_paragraph(section) for section in footer.strip().split("\n\n"))
         return (
-            html.escape(header)
-            + f"<pre>{html.escape(service_lines.rstrip())}</pre>\n"
-            + html.escape("端口:\n")
-            + f"<pre>{html.escape(port)}</pre>"
-            + html.escape(footer)
+            header_html
+            + "<table>"
+            + "".join(service_cells)
+            + "</table>"
+            + rich_paragraph("端口：")
+            + "<table>"
+            + "".join(port_cells)
+            + "</table>"
+            + footer_html
         )
     return header + service_lines + f"端口:\n{port}" + footer
 
 
 def send_status(reply_markup=None, prefix=""):
-    text = status_text(html_mode=True)
+    rich_html = status_text(rich_mode=True)
     if prefix:
-        text = html.escape(prefix) + "\n\n" + text
-    return send_message(text, reply_markup, parse_mode="HTML")
+        rich_html = rich_paragraph(prefix) + rich_html
+    data = {
+        "chat_id": CFG["chat_id"],
+        "rich_message": json.dumps(
+            {"html": rich_html, "skip_entity_detection": True},
+            ensure_ascii=False,
+        ),
+    }
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    response = tg_api("sendRichMessage", data, timeout=8)
+    if response and response.get("ok"):
+        return response
+
+    log_event("sendRichMessage unavailable; falling back to plain status text")
+    fallback = status_text()
+    if prefix:
+        fallback = prefix + "\n\n" + fallback
+    return send_message(fallback, reply_markup)
 
 
 def can_alert(name, cooldown=None):
