@@ -103,6 +103,26 @@ h1 span { color: var(--muted); }
 .summary-card small { color: var(--muted); font-size: 11px; }
 .summary-card strong { display: block; margin-top: 3px; font-size: 23px; letter-spacing: -.03em; }
 
+.reminder-section { padding: 60px 0 0; }
+.add-reminder-button {
+  min-height: 40px; padding: 0 15px; border: 1px solid rgba(86,215,255,.24); border-radius: 11px;
+  color: var(--cyan); background: rgba(86,215,255,.07); cursor: pointer;
+}
+.reminder-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.reminder-empty { grid-column: 1 / -1; padding: 28px; text-align: center; border: 1px dashed var(--line); border-radius: 16px; color: var(--muted); font-size: 11px; }
+.reminder-card { padding: 17px; border: 1px solid var(--line); border-radius: 17px; background: rgba(17,25,40,.58); }
+.reminder-card.disabled { opacity: .55; }
+.reminder-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.reminder-card h3 { margin: 0; font-size: 14px; }
+.reminder-schedule { display: block; margin-top: 6px; color: var(--cyan); font-size: 9px; }
+.reminder-content { min-height: 32px; margin: 13px 0; color: var(--muted); font-size: 10px; line-height: 1.6; white-space: pre-wrap; }
+.reminder-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line); padding-top: 11px; }
+.reminder-card-actions > div { display: flex; gap: 6px; }
+.mini-button { min-height: 29px; padding: 0 9px; border: 1px solid var(--line); border-radius: 8px; color: #8996aa; background: transparent; cursor: pointer; font-size: 9px; }
+.mini-button.delete:hover { color: var(--red); border-color: rgba(255,102,126,.28); }
+.reminder-toggle { color: var(--green); font-size: 9px; cursor: pointer; }
+.reminder-card.disabled .reminder-toggle { color: var(--muted); }
+
 .node-section { padding: 68px 0 40px; }
 .section-title { display: flex; align-items: end; justify-content: space-between; margin-bottom: 22px; }
 .section-title h2 { margin: 0; font-size: 24px; letter-spacing: -.03em; }
@@ -206,10 +226,12 @@ footer { display: flex; justify-content: space-between; padding: 24px 0 38px; bo
 .dialog-close { width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: transparent; cursor: pointer; font-size: 20px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .settings-dialog label > span:first-child { display: block; margin-bottom: 8px; color: #b4becd; font-size: 10px; }
-.settings-dialog input[type="date"], .settings-dialog input[type="datetime-local"], .settings-dialog textarea {
+.settings-dialog input[type="text"], .settings-dialog input[type="date"], .settings-dialog input[type="datetime-local"],
+.settings-dialog input[type="time"], .settings-dialog input[type="number"], .settings-dialog select, .settings-dialog textarea {
   width: 100%; outline: none; border: 1px solid var(--line); border-radius: 12px; color: var(--text); background: rgba(3,8,15,.45);
 }
-.settings-dialog input[type="date"], .settings-dialog input[type="datetime-local"] { height: 44px; padding: 0 12px; }
+.settings-dialog input[type="text"], .settings-dialog input[type="date"], .settings-dialog input[type="datetime-local"],
+.settings-dialog input[type="time"], .settings-dialog input[type="number"], .settings-dialog select { height: 44px; padding: 0 12px; }
 .settings-dialog textarea { padding: 12px; resize: vertical; line-height: 1.55; }
 .settings-dialog input:focus, .settings-dialog textarea:focus { border-color: rgba(86,215,255,.55); box-shadow: 0 0 0 3px rgba(86,215,255,.07); }
 .settings-dialog label > small { display: block; margin-top: 7px; color: #647086; font-size: 8px; line-height: 1.5; }
@@ -231,6 +253,9 @@ footer { display: flex; justify-content: space-between; padding: 24px 0 38px; bo
 .dialog-actions { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; }
 .dialog-actions .primary-button { width: auto; min-width: 140px; padding: 0 22px; }
 .settings-dialog .form-error { margin: 10px 0 0; }
+.reminder-dialog > form > label:first-of-type { display: block; }
+.reminder-schedule-grid { margin-top: 16px; }
+.reminder-enabled-label { margin-top: 18px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -239,6 +264,7 @@ footer { display: flex; justify-content: space-between; padding: 24px 0 38px; bo
   .drive-card { max-width: 430px; }
   .summary-grid { grid-template-columns: 1fr 1fr; }
   .node-grid { grid-template-columns: 1fr; }
+  .reminder-grid { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 580px) {
   .shell { width: min(100% - 24px, 1220px); }
@@ -261,4 +287,7 @@ footer { display: flex; justify-content: space-between; padding: 24px 0 38px; bo
   .telegram-row { align-items: flex-start; flex-direction: column; }
   .dialog-actions { flex-direction: column-reverse; }
   .dialog-actions .primary-button, .dialog-actions .secondary-button { width: 100%; }
+}
+@media (max-width: 580px) {
+  .reminder-grid { grid-template-columns: 1fr; }
 }
