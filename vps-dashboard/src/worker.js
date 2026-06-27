@@ -66,6 +66,29 @@ export default {
         return deleteOfflineNode(request, env);
       }
 
+      if (url.pathname === "/api/v1/nodes/order" && request.method === "POST") {
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        return statusStore(env).fetch(new Request("https://store/nodes/order", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: await request.text(),
+        }));
+      }
+
+      if (url.pathname === "/api/v1/config/export" && request.method === "GET") {
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        return statusStore(env).fetch(new Request("https://store/config/export"));
+      }
+
+      if (url.pathname === "/api/v1/config/import" && request.method === "POST") {
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        return statusStore(env).fetch(new Request("https://store/config/import", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: await request.text(),
+        }));
+      }
+
       if (url.pathname === "/api/v1/telegram/test" && request.method === "POST") {
         if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         if (!telegramConfigured(env)) return json({ ok: false, error: "Telegram 尚未配置" }, 400);
@@ -154,10 +177,14 @@ async function updateNodeSettings(request, env) {
   const expiryDate = String(input?.expiry_date || "");
   const memo = cleanText(input?.memo, 500);
   const reminderAt = Number(input?.reminder_at || 0);
+  const maintenanceUntil = Number(input?.maintenance_until || 0);
   if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
   if (expiryDate && !isValidDate(expiryDate)) return json({ ok: false, error: "到期日期格式错误" }, 400);
   if (!Number.isInteger(reminderAt) || reminderAt < 0 || reminderAt > 4102444800) {
     return json({ ok: false, error: "提醒时间格式错误" }, 400);
+  }
+  if (!Number.isInteger(maintenanceUntil) || maintenanceUntil < 0 || maintenanceUntil > 4102444800) {
+    return json({ ok: false, error: "维护结束时间格式错误" }, 400);
   }
 
   const settings = {
@@ -165,6 +192,12 @@ async function updateNodeSettings(request, env) {
     memo,
     reminder_at: reminderAt,
     telegram_enabled: input?.telegram_enabled !== false,
+    display_name: cleanText(input?.display_name, 80),
+    display_provider: cleanText(input?.display_provider, 40),
+    display_location: cleanText(input?.display_location, 40),
+    purpose: cleanText(input?.purpose, 80),
+    group: cleanText(input?.group, 40),
+    maintenance_until: maintenanceUntil,
   };
   return statusStore(env).fetch(new Request("https://store/settings", {
     method: "POST",
@@ -372,6 +405,69 @@ export class VpsStatusStore {
       return json({ ok: true });
     }
 
+    if (url.pathname === "/nodes/order" && request.method === "POST") {
+      const input = await request.json();
+      if (!Array.isArray(input.node_ids) || input.node_ids.length > 500) return json({ ok: false, error: "排序数据错误" }, 400);
+      let updated = 0;
+      for (let index = 0; index < input.node_ids.length; index += 1) {
+        const nodeId = String(input.node_ids[index] || "");
+        if (!NODE_ID_PATTERN.test(nodeId)) continue;
+        const key = `node:${nodeId}`;
+        const record = await this.ctx.storage.get(key);
+        if (!record) continue;
+        record.settings = { ...(record.settings || defaultSettings()), sort_order: index };
+        await this.ctx.storage.put(key, record);
+        updated += 1;
+      }
+      return json({ ok: true, updated });
+    }
+
+    if (url.pathname === "/config/export" && request.method === "GET") {
+      const nodeRecords = await this.ctx.storage.list({ prefix: "node:" });
+      const reminderRecords = await this.ctx.storage.list({ prefix: "global-reminder:" });
+      const dashboardSettings = await this.ctx.storage.get("dashboard:settings") || { auto_delete_offline_days: 0 };
+      const nodes = {};
+      for (const record of nodeRecords.values()) nodes[record.payload.node_id] = publicSettings(record.settings || defaultSettings());
+      return json({
+        format: "ejectors-dashboard-config",
+        version: 1,
+        exported_at: Math.floor(Date.now() / 1000),
+        dashboard_settings: dashboardSettings,
+        nodes,
+        reminders: [...reminderRecords.values()].map(publicGlobalReminder),
+      });
+    }
+
+    if (url.pathname === "/config/import" && request.method === "POST") {
+      const input = await request.json();
+      if (input?.format !== "ejectors-dashboard-config" || input?.version !== 1) return json({ ok: false, error: "备份文件格式错误" }, 400);
+      let nodes = 0;
+      let skipped = 0;
+      for (const [nodeId, imported] of Object.entries(input.nodes || {}).slice(0, 500)) {
+        if (!NODE_ID_PATTERN.test(nodeId)) { skipped += 1; continue; }
+        const key = `node:${nodeId}`;
+        const record = await this.ctx.storage.get(key);
+        if (!record) { skipped += 1; continue; }
+        record.settings = sanitizeImportedSettings(imported, record.settings || defaultSettings());
+        await this.ctx.storage.put(key, record);
+        nodes += 1;
+      }
+      let reminders = 0;
+      for (const imported of Array.isArray(input.reminders) ? input.reminders.slice(0, 500) : []) {
+        if (!/^[a-zA-Z0-9_-]{1,64}$/.test(imported?.id || "")) continue;
+        await this.ctx.storage.put(`global-reminder:${imported.id}`, {
+          ...imported,
+          title: cleanText(imported.title, 100),
+          content: cleanText(imported.content, 1000),
+          updated_at: Math.floor(Date.now() / 1000),
+        });
+        reminders += 1;
+      }
+      const days = Number(input.dashboard_settings?.auto_delete_offline_days || 0);
+      await this.ctx.storage.put("dashboard:settings", { auto_delete_offline_days: [0, 7, 30, 90].includes(days) ? days : 0 });
+      return json({ ok: true, imported: { nodes, reminders }, skipped_nodes: skipped });
+    }
+
     if (url.pathname === "/nodes" && request.method === "GET") {
       const records = await this.ctx.storage.list({ prefix: "node:" });
       const now = Math.floor(Date.now() / 1000);
@@ -379,24 +475,33 @@ export class VpsStatusStore {
       const nodes = [...records.values()].map((record) => {
         const age = Math.max(0, now - record.last_seen);
         let status = "online";
-        if (record.agent_state === "shutdown") status = "shutdown";
+        const settings = publicSettings(record.settings || defaultSettings());
+        if (settings.maintenance_until > now) status = "maintenance";
+        else if (record.agent_state === "shutdown") status = "shutdown";
         else if (age > offlineAfter) status = "offline";
         else if (record.payload.health === "degraded" || (record.payload.alerts || []).length > 0) status = "degraded";
         return {
           ...record.payload,
+          name: settings.display_name || record.payload.name,
+          provider: settings.display_provider || record.payload.provider,
+          location: settings.display_location || record.payload.location,
+          purpose: settings.purpose,
           status,
           last_seen: record.last_seen,
           last_seen_age: age,
           shutdown_at: record.shutdown_at,
-          settings: publicSettings(record.settings || defaultSettings()),
+          settings,
         };
-      }).sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+      }).sort((a, b) => {
+        const groupOrder = (a.settings.group || "未分组").localeCompare(b.settings.group || "未分组", "zh-CN");
+        return groupOrder || (a.settings.sort_order - b.settings.sort_order) || a.name.localeCompare(b.name, "zh-CN");
+      });
 
       const summary = nodes.reduce((acc, node) => {
         acc.total += 1;
         acc[node.status] = (acc[node.status] || 0) + 1;
         return acc;
-      }, { total: 0, online: 0, degraded: 0, offline: 0, shutdown: 0 });
+      }, { total: 0, online: 0, degraded: 0, offline: 0, shutdown: 0, maintenance: 0 });
 
       return json({
         ok: true,
@@ -434,6 +539,7 @@ export class VpsStatusStore {
     for (const [key, record] of records.entries()) {
       const settings = record.settings || defaultSettings();
       if (!settings.telegram_enabled) continue;
+      if (settings.maintenance_until > now) continue;
       let changed = false;
 
       if (settings.reminder_at > 0 && settings.reminder_at <= now && !settings.reminder_sent_at) {
@@ -606,6 +712,13 @@ function defaultSettings() {
     telegram_enabled: true,
     reminder_sent_at: 0,
     expiry_notifications: [],
+    display_name: "",
+    display_provider: "",
+    display_location: "",
+    purpose: "",
+    group: "",
+    sort_order: 999999,
+    maintenance_until: 0,
   };
 }
 
@@ -616,6 +729,31 @@ function publicSettings(settings) {
     reminder_at: Number(settings.reminder_at) || 0,
     telegram_enabled: settings.telegram_enabled !== false,
     reminder_sent: Boolean(settings.reminder_sent_at),
+    display_name: settings.display_name || "",
+    display_provider: settings.display_provider || "",
+    display_location: settings.display_location || "",
+    purpose: settings.purpose || "",
+    group: settings.group || "",
+    sort_order: Number.isFinite(Number(settings.sort_order)) ? Number(settings.sort_order) : 999999,
+    maintenance_until: Number(settings.maintenance_until) || 0,
+  };
+}
+
+function sanitizeImportedSettings(input, previous) {
+  const expiryDate = String(input?.expiry_date || "");
+  return {
+    ...previous,
+    expiry_date: expiryDate && isValidDate(expiryDate) ? expiryDate : "",
+    memo: cleanText(input?.memo, 500),
+    reminder_at: clampNumber(input?.reminder_at, 0, 4102444800, 0),
+    telegram_enabled: input?.telegram_enabled !== false,
+    display_name: cleanText(input?.display_name, 80),
+    display_provider: cleanText(input?.display_provider, 40),
+    display_location: cleanText(input?.display_location, 40),
+    purpose: cleanText(input?.purpose, 80),
+    group: cleanText(input?.group, 40),
+    sort_order: clampNumber(input?.sort_order, 0, 1000000, 999999),
+    maintenance_until: clampNumber(input?.maintenance_until, 0, 4102444800, 0),
   };
 }
 
