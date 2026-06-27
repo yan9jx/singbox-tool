@@ -60,6 +60,7 @@ const elements = {
   intervalMonthsField: document.querySelector("#intervalMonthsField"),
   reminderIntervalMonths: document.querySelector("#reminderIntervalMonths"),
   globalTelegramStatus: document.querySelector("#globalTelegramStatus"),
+  telegramCoverage: document.querySelector("#telegramCoverage"),
   globalTelegramTest: document.querySelector("#globalTelegramTest"),
   autoDeleteDays: document.querySelector("#autoDeleteDays"),
 };
@@ -181,6 +182,21 @@ async function refreshReminders() {
   const data = await response.json();
   state.reminders = new Map(data.reminders.map((item) => [item.id, item]));
   renderReminders(data.reminders);
+  updateTelegramCoverage();
+}
+
+function updateTelegramCoverage() {
+  const nodeItems = [...state.nodes.values()];
+  const reminderItems = [...state.reminders.values()];
+  const total = nodeItems.length + reminderItems.length;
+  const enabled = state.telegramConfigured
+    ? nodeItems.filter((node) => node.settings?.telegram_enabled !== false).length
+      + reminderItems.filter((reminder) => reminder.enabled).length
+    : 0;
+  elements.telegramCoverage.textContent = state.telegramConfigured
+    ? `Telegram 通知服务已开启：${enabled}/${total}`
+    : `Telegram 通知服务未配置：0/${total}`;
+  elements.telegramCoverage.classList.toggle("configured", state.telegramConfigured);
 }
 
 async function refreshDashboardSettings() {
@@ -365,6 +381,7 @@ function render(data) {
   elements.globalTelegramStatus.classList.toggle("configured", state.telegramConfigured);
   elements.globalTelegramTest.disabled = !state.telegramConfigured;
   state.nodes = new Map(data.nodes.map((node) => [node.node_id, node]));
+  updateTelegramCoverage();
   document.querySelector("#countTotal").textContent = data.summary.total;
   document.querySelector("#countOnline").textContent = data.summary.online;
   document.querySelector("#countDegraded").textContent = data.summary.degraded;
