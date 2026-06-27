@@ -67,6 +67,19 @@
       </article>
     </section>
 
+    <section class="reminder-section">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">GLOBAL REMINDERS</p>
+          <h2>全局备忘</h2>
+        </div>
+        <button class="add-reminder-button" id="addReminderButton" type="button">＋ 新建提醒</button>
+      </div>
+      <div class="reminder-grid" id="reminderGrid">
+        <div class="reminder-empty">暂无全局提醒</div>
+      </div>
+    </section>
+
     <section class="node-section">
       <div class="section-title">
         <div>
@@ -220,6 +233,81 @@
       <div class="dialog-actions">
         <button type="button" class="secondary-button" id="clearReminder">清除单次提醒</button>
         <button type="submit" class="primary-button">保存设置</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="settings-dialog reminder-dialog" id="reminderDialog">
+    <form id="reminderForm">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">GLOBAL REMINDER</p>
+          <h2 id="reminderDialogTitle">新建提醒</h2>
+        </div>
+        <button type="button" class="dialog-close" id="reminderClose" aria-label="关闭">×</button>
+      </div>
+      <input type="hidden" id="reminderId">
+
+      <label>
+        <span>提醒事项名称</span>
+        <input id="reminderTitle" type="text" maxlength="100" required placeholder="例如：域名续费">
+      </label>
+      <label class="memo-label">
+        <span>提醒内容</span>
+        <textarea id="reminderContent" maxlength="1000" rows="4" placeholder="填写需要处理的事项……"></textarea>
+      </label>
+
+      <div class="form-grid reminder-schedule-grid">
+        <label>
+          <span>提醒类型</span>
+          <select id="reminderType">
+            <option value="once">单次</option>
+            <option value="daily">每天</option>
+            <option value="weekly">每周</option>
+            <option value="monthly">每月</option>
+            <option value="yearly">每年</option>
+          </select>
+        </label>
+        <label id="onceTimeField">
+          <span>提醒时间</span>
+          <input id="reminderOnceAt" type="datetime-local">
+        </label>
+        <label id="repeatTimeField" hidden>
+          <span>每天时间</span>
+          <input id="reminderRepeatTime" type="time" value="09:00">
+        </label>
+        <label id="weekdayField" hidden>
+          <span>星期</span>
+          <select id="reminderWeekday">
+            <option value="1">星期一</option><option value="2">星期二</option><option value="3">星期三</option>
+            <option value="4">星期四</option><option value="5">星期五</option><option value="6">星期六</option>
+            <option value="0">星期日</option>
+          </select>
+        </label>
+        <label id="monthField" hidden>
+          <span>月份</span>
+          <select id="reminderMonth">
+            <option value="1">1 月</option><option value="2">2 月</option><option value="3">3 月</option>
+            <option value="4">4 月</option><option value="5">5 月</option><option value="6">6 月</option>
+            <option value="7">7 月</option><option value="8">8 月</option><option value="9">9 月</option>
+            <option value="10">10 月</option><option value="11">11 月</option><option value="12">12 月</option>
+          </select>
+        </label>
+        <label id="monthdayField" hidden>
+          <span>日期</span>
+          <input id="reminderMonthday" type="number" min="1" max="31" value="1">
+        </label>
+      </div>
+
+      <label class="toggle-label reminder-enabled-label">
+        <input id="reminderEnabled" type="checkbox" checked>
+        <span class="toggle"></span>
+        <span>启用 Telegram 提醒</span>
+      </label>
+      <p class="form-error" id="reminderError" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="secondary-button" id="reminderCancel">取消</button>
+        <button type="submit" class="primary-button">保存提醒</button>
       </div>
     </form>
   </dialog>
