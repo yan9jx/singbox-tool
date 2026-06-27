@@ -72,6 +72,12 @@ const elements = {
   nodePurpose: document.querySelector("#nodePurpose"),
   nodeGroup: document.querySelector("#nodeGroup"),
   maintenanceUntil: document.querySelector("#maintenanceUntil"),
+  profileDialog: document.querySelector("#profileDialog"),
+  profileForm: document.querySelector("#profileForm"),
+  profileClose: document.querySelector("#profileClose"),
+  profileNodeId: document.querySelector("#profileNodeId"),
+  profileNodeName: document.querySelector("#profileNodeName"),
+  profileError: document.querySelector("#profileError"),
 };
 
 const CURRENT_AGENT_VERSION = "1.0.0";
@@ -130,6 +136,11 @@ function bindEvents() {
       deleteOfflineNode(deleteButton.dataset.nodeId);
       return;
     }
+    const editButton = event.target.closest(".node-edit-button");
+    if (editButton) {
+      openNodeProfile(editButton.dataset.nodeId);
+      return;
+    }
     const button = event.target.closest(".node-settings-button");
     if (button) openNodeSettings(button.dataset.nodeId);
   });
@@ -145,6 +156,11 @@ function bindEvents() {
   });
   elements.telegramTest.addEventListener("click", testTelegram);
   elements.settingsForm.addEventListener("submit", saveNodeSettings);
+  elements.profileClose.addEventListener("click", () => elements.profileDialog.close());
+  elements.profileDialog.addEventListener("click", (event) => {
+    if (event.target === elements.profileDialog) elements.profileDialog.close();
+  });
+  elements.profileForm.addEventListener("submit", saveNodeProfile);
   elements.addReminder.addEventListener("click", () => openReminderDialog());
   elements.reminderClose.addEventListener("click", () => elements.reminderDialog.close());
   elements.reminderCancel.addEventListener("click", () => elements.reminderDialog.close());
@@ -443,6 +459,7 @@ function renderNode(node, serverTime) {
   deleteButton.dataset.nodeId = node.node_id;
   deleteButton.hidden = !["offline", "shutdown"].includes(node.status);
   text(fragment, ".node-name", node.name || node.node_id);
+  fragment.querySelector(".node-edit-button").dataset.nodeId = node.node_id;
   text(fragment, ".node-location", [node.provider, node.location, node.purpose].filter(Boolean).join(" · ") || node.hostname || "未设置位置");
   text(fragment, ".status-pill", STATUS_LABELS[node.status] || node.status);
   text(fragment, ".public-ip", node.public_ip || "未获取");
@@ -521,12 +538,6 @@ function openNodeSettings(nodeId) {
   const settings = node.settings || {};
   elements.settingsNodeId.value = node.node_id;
   elements.settingsNodeName.textContent = node.name || node.node_id;
-  elements.displayName.value = settings.display_name || "";
-  elements.displayProvider.value = settings.display_provider || "";
-  elements.displayLocation.value = settings.display_location || "";
-  elements.nodePurpose.value = settings.purpose || "";
-  elements.nodeGroup.value = settings.group || "";
-  elements.maintenanceUntil.value = settings.maintenance_until ? toDateTimeLocal(settings.maintenance_until) : "";
   elements.expiryDate.value = settings.expiry_date || "";
   elements.reminderAt.value = settings.reminder_at ? toDateTimeLocal(settings.reminder_at) : "";
   elements.nodeMemo.value = settings.memo || "";
@@ -545,9 +556,6 @@ async function saveNodeSettings(event) {
   const reminderAt = elements.reminderAt.value
     ? Math.floor(new Date(elements.reminderAt.value).getTime() / 1000)
     : 0;
-  const maintenanceUntil = elements.maintenanceUntil.value
-    ? Math.floor(new Date(elements.maintenanceUntil.value).getTime() / 1000)
-    : 0;
   submit.disabled = true;
   submit.textContent = "保存中…";
   elements.settingsError.textContent = "";
@@ -562,12 +570,6 @@ async function saveNodeSettings(event) {
         memo: elements.nodeMemo.value.trim(),
         reminder_at: reminderAt,
         telegram_enabled: elements.telegramEnabled.checked,
-        display_name: elements.displayName.value.trim(),
-        display_provider: elements.displayProvider.value.trim(),
-        display_location: elements.displayLocation.value.trim(),
-        purpose: elements.nodePurpose.value.trim(),
-        group: elements.nodeGroup.value.trim(),
-        maintenance_until: maintenanceUntil,
       }),
     });
     const result = await response.json();
@@ -579,6 +581,58 @@ async function saveNodeSettings(event) {
   } finally {
     submit.disabled = false;
     submit.textContent = "保存设置";
+  }
+}
+
+function openNodeProfile(nodeId) {
+  const node = state.nodes.get(nodeId);
+  if (!node) return;
+  const settings = node.settings || {};
+  elements.profileNodeId.value = node.node_id;
+  elements.profileNodeName.textContent = node.name || node.node_id;
+  elements.displayName.value = settings.display_name || "";
+  elements.displayProvider.value = settings.display_provider || "";
+  elements.displayLocation.value = settings.display_location || "";
+  elements.nodePurpose.value = settings.purpose || "";
+  elements.nodeGroup.value = settings.group || "";
+  elements.maintenanceUntil.value = settings.maintenance_until ? toDateTimeLocal(settings.maintenance_until) : "";
+  elements.profileError.textContent = "";
+  elements.profileDialog.showModal();
+  setTimeout(() => elements.displayName.focus(), 50);
+}
+
+async function saveNodeProfile(event) {
+  event.preventDefault();
+  const submit = elements.profileForm.querySelector('button[type="submit"]');
+  const maintenanceUntil = elements.maintenanceUntil.value
+    ? Math.floor(new Date(elements.maintenanceUntil.value).getTime() / 1000)
+    : 0;
+  submit.disabled = true;
+  submit.textContent = "保存中…";
+  elements.profileError.textContent = "";
+  try {
+    const response = await apiFetch("/api/v1/node-profile", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        node_id: elements.profileNodeId.value,
+        display_name: elements.displayName.value.trim(),
+        display_provider: elements.displayProvider.value.trim(),
+        display_location: elements.displayLocation.value.trim(),
+        purpose: elements.nodePurpose.value.trim(),
+        group: elements.nodeGroup.value.trim(),
+        maintenance_until: maintenanceUntil,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "保存失败");
+    elements.profileDialog.close();
+    await refreshNodes();
+  } catch (error) {
+    elements.profileError.textContent = error.message || "保存失败";
+  } finally {
+    submit.disabled = false;
+    submit.textContent = "保存节点信息";
   }
 }
 
