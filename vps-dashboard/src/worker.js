@@ -26,6 +26,18 @@ export default {
         return statusStore(env).fetch(new Request("https://store/nodes"));
       }
 
+      if (url.pathname === "/api/v1/node-settings" && request.method === "POST") {
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        return updateNodeSettings(request, env);
+      }
+
+      if (url.pathname === "/api/v1/telegram/test" && request.method === "POST") {
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!telegramConfigured(env)) return json({ ok: false, error: "Telegram 尚未配置" }, 400);
+        await sendTelegram(env, "✅ VPS 状态面板 Telegram 提醒连接成功");
+        return json({ ok: true });
+      }
+
       if (url.pathname === "/api/v1/heartbeat" && request.method === "POST") {
         if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
         return receiveHeartbeat(request, env, "online");
@@ -45,6 +57,12 @@ export default {
       console.error(error);
       return json({ ok: false, error: "服务器内部错误" }, 500);
     }
+  },
+
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(statusStore(env).fetch(new Request(`https://store/run-reminders?now=${Math.floor(controller.scheduledTime / 1000)}`, {
+      method: "POST",
+    })));
   },
 };
 
@@ -89,6 +107,37 @@ function statusStore(env) {
   return env.STATUS_STORE.getByName("global");
 }
 
+async function updateNodeSettings(request, env) {
+  let input;
+  try {
+    input = await request.json();
+  } catch {
+    return json({ ok: false, error: "JSON 格式错误" }, 400);
+  }
+
+  const nodeId = String(input?.node_id || "");
+  const expiryDate = String(input?.expiry_date || "");
+  const memo = cleanText(input?.memo, 500);
+  const reminderAt = Number(input?.reminder_at || 0);
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
+  if (expiryDate && !isValidDate(expiryDate)) return json({ ok: false, error: "到期日期格式错误" }, 400);
+  if (!Number.isInteger(reminderAt) || reminderAt < 0 || reminderAt > 4102444800) {
+    return json({ ok: false, error: "提醒时间格式错误" }, 400);
+  }
+
+  const settings = {
+    expiry_date: expiryDate,
+    memo,
+    reminder_at: reminderAt,
+    telegram_enabled: input?.telegram_enabled !== false,
+  };
+  return statusStore(env).fetch(new Request("https://store/settings", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ node_id: nodeId, settings }),
+  }));
+}
+
 export class VpsStatusStore {
   constructor(ctx, env) {
     this.ctx = ctx;
@@ -102,8 +151,33 @@ export class VpsStatusStore {
       const record = await request.json();
       const nodeId = record?.payload?.node_id;
       if (!NODE_ID_PATTERN.test(nodeId || "")) return json({ ok: false, error: "node_id 格式错误" }, 400);
+      const existing = await this.ctx.storage.get(`node:${nodeId}`);
+      record.settings = existing?.settings || defaultSettings();
       await this.ctx.storage.put(`node:${nodeId}`, record);
       return json({ ok: true, node_id: nodeId, state: record.agent_state, server_time: record.last_seen });
+    }
+
+    if (url.pathname === "/settings" && request.method === "POST") {
+      const input = await request.json();
+      const key = `node:${input.node_id}`;
+      const record = await this.ctx.storage.get(key);
+      if (!record) return json({ ok: false, error: "节点不存在" }, 404);
+      const previous = record.settings || defaultSettings();
+      const next = {
+        ...previous,
+        ...input.settings,
+        updated_at: Math.floor(Date.now() / 1000),
+      };
+      if (previous.expiry_date !== next.expiry_date) next.expiry_notifications = [];
+      if (previous.reminder_at !== next.reminder_at || previous.memo !== next.memo) next.reminder_sent_at = 0;
+      record.settings = next;
+      await this.ctx.storage.put(key, record);
+      return json({ ok: true, node_id: input.node_id, settings: publicSettings(next) });
+    }
+
+    if (url.pathname === "/run-reminders" && request.method === "POST") {
+      const now = clampNumber(url.searchParams.get("now"), 0, Number.MAX_SAFE_INTEGER, Math.floor(Date.now() / 1000));
+      return this.runReminders(now);
     }
 
     if (url.pathname === "/nodes" && request.method === "GET") {
@@ -122,6 +196,7 @@ export class VpsStatusStore {
           last_seen: record.last_seen,
           last_seen_age: age,
           shutdown_at: record.shutdown_at,
+          settings: publicSettings(record.settings || defaultSettings()),
         };
       }).sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
 
@@ -137,6 +212,7 @@ export class VpsStatusStore {
         refresh_seconds: 15,
         offline_after_seconds: offlineAfter,
         cloud_drive_url: this.env.CLOUD_DRIVE_URL || "https://disk.example.com",
+        telegram_configured: telegramConfigured(this.env),
         summary,
         nodes,
       });
@@ -144,6 +220,121 @@ export class VpsStatusStore {
 
     return json({ ok: false, error: "存储接口不存在" }, 404);
   }
+
+  async runReminders(now) {
+    if (!telegramConfigured(this.env)) return json({ ok: true, configured: false, sent: 0 });
+    const records = await this.ctx.storage.list({ prefix: "node:" });
+    let sent = 0;
+    const errors = [];
+
+    for (const [key, record] of records.entries()) {
+      const settings = record.settings || defaultSettings();
+      if (!settings.telegram_enabled) continue;
+      let changed = false;
+
+      if (settings.reminder_at > 0 && settings.reminder_at <= now && !settings.reminder_sent_at) {
+        const message = [
+          "⏰ VPS 备忘提醒",
+          `节点：${record.payload.name}`,
+          settings.memo ? `备忘：${settings.memo}` : "备忘：请查看 VPS 状态面板",
+        ].join("\n");
+        try {
+          await sendTelegram(this.env, message);
+          settings.reminder_sent_at = now;
+          changed = true;
+          sent += 1;
+        } catch (error) {
+          errors.push(`${record.payload.node_id}: ${error.message}`);
+        }
+      }
+
+      if (settings.expiry_date) {
+        const daysLeft = daysUntil(settings.expiry_date, now);
+        const notificationKey = `${settings.expiry_date}:${daysLeft}`;
+        const sentKeys = Array.isArray(settings.expiry_notifications) ? settings.expiry_notifications : [];
+        if ([30, 7, 3, 1, 0].includes(daysLeft) && !sentKeys.includes(notificationKey)) {
+          const countdown = daysLeft === 0 ? "今天到期" : `剩余 ${daysLeft} 天`;
+          const message = [
+            "📅 VPS 到期提醒",
+            `节点：${record.payload.name}`,
+            `到期日期：${settings.expiry_date}`,
+            `状态：${countdown}`,
+            settings.memo ? `备忘：${settings.memo}` : "",
+          ].filter(Boolean).join("\n");
+          try {
+            await sendTelegram(this.env, message);
+            settings.expiry_notifications = [...sentKeys, notificationKey].slice(-20);
+            changed = true;
+            sent += 1;
+          } catch (error) {
+            errors.push(`${record.payload.node_id}: ${error.message}`);
+          }
+        }
+      }
+
+      if (changed) {
+        record.settings = settings;
+        await this.ctx.storage.put(key, record);
+      }
+    }
+
+    return json({ ok: errors.length === 0, configured: true, sent, errors });
+  }
+}
+
+function defaultSettings() {
+  return {
+    expiry_date: "",
+    memo: "",
+    reminder_at: 0,
+    telegram_enabled: true,
+    reminder_sent_at: 0,
+    expiry_notifications: [],
+  };
+}
+
+function publicSettings(settings) {
+  return {
+    expiry_date: settings.expiry_date || "",
+    memo: settings.memo || "",
+    reminder_at: Number(settings.reminder_at) || 0,
+    telegram_enabled: settings.telegram_enabled !== false,
+    reminder_sent: Boolean(settings.reminder_sent_at),
+  };
+}
+
+function isValidDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function daysUntil(expiryDate, nowSeconds) {
+  const [year, month, day] = expiryDate.split("-").map(Number);
+  const expiry = Date.UTC(year, month - 1, day);
+  const china = new Date((nowSeconds + 8 * 3600) * 1000);
+  const today = Date.UTC(china.getUTCFullYear(), china.getUTCMonth(), china.getUTCDate());
+  return Math.round((expiry - today) / 86400000);
+}
+
+function telegramConfigured(env) {
+  return Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID);
+}
+
+async function sendTelegram(env, text) {
+  const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      chat_id: env.TELEGRAM_CHAT_ID,
+      text: String(text).slice(0, 4000),
+      disable_web_page_preview: true,
+    }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.ok) throw new Error(result.description || `Telegram HTTP ${response.status}`);
+  return result;
 }
 
 function sanitizePayload(input, nodeId, name) {

@@ -30,6 +30,11 @@
     "OFFLINE_AFTER_SECONDS": "150",
     "CLOUD_DRIVE_URL": "https://disk.example.com"
   },
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  },
   "routes": [
     {
       "pattern": "status.example.com/*",

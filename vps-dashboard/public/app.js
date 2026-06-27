@@ -2,6 +2,9 @@ const state = {
   viewToken: sessionStorage.getItem("ejectors_view_token") || "",
   timer: null,
   loading: false,
+  nodes: new Map(),
+  serverTime: 0,
+  telegramConfigured: false,
 };
 
 const elements = {
@@ -16,6 +19,20 @@ const elements = {
   template: document.querySelector("#nodeTemplate"),
   updatedAt: document.querySelector("#updatedAt"),
   drive: document.querySelector("#driveLink"),
+  settingsDialog: document.querySelector("#settingsDialog"),
+  settingsForm: document.querySelector("#settingsForm"),
+  settingsClose: document.querySelector("#settingsClose"),
+  settingsNodeId: document.querySelector("#settingsNodeId"),
+  settingsNodeName: document.querySelector("#settingsNodeName"),
+  expiryDate: document.querySelector("#expiryDate"),
+  reminderAt: document.querySelector("#reminderAt"),
+  nodeMemo: document.querySelector("#nodeMemo"),
+  memoCount: document.querySelector("#memoCount"),
+  telegramEnabled: document.querySelector("#telegramEnabled"),
+  telegramStatus: document.querySelector("#telegramStatus"),
+  telegramTest: document.querySelector("#telegramTest"),
+  clearReminder: document.querySelector("#clearReminder"),
+  settingsError: document.querySelector("#settingsError"),
 };
 
 const STATUS_LABELS = {
@@ -65,6 +82,22 @@ function bindEvents() {
     openLogin();
   });
   elements.refresh.addEventListener("click", refreshNodes);
+  elements.grid.addEventListener("click", (event) => {
+    const button = event.target.closest(".node-settings-button");
+    if (button) openNodeSettings(button.dataset.nodeId);
+  });
+  elements.settingsClose.addEventListener("click", () => elements.settingsDialog.close());
+  elements.settingsDialog.addEventListener("click", (event) => {
+    if (event.target === elements.settingsDialog) elements.settingsDialog.close();
+  });
+  elements.nodeMemo.addEventListener("input", () => {
+    elements.memoCount.textContent = elements.nodeMemo.value.length;
+  });
+  elements.clearReminder.addEventListener("click", () => {
+    elements.reminderAt.value = "";
+  });
+  elements.telegramTest.addEventListener("click", testTelegram);
+  elements.settingsForm.addEventListener("submit", saveNodeSettings);
 }
 
 function openLogin() {
@@ -100,6 +133,9 @@ async function refreshNodes() {
 }
 
 function render(data) {
+  state.serverTime = data.server_time;
+  state.telegramConfigured = Boolean(data.telegram_configured);
+  state.nodes = new Map(data.nodes.map((node) => [node.node_id, node]));
   document.querySelector("#countTotal").textContent = data.summary.total;
   document.querySelector("#countOnline").textContent = data.summary.online;
   document.querySelector("#countDegraded").textContent = data.summary.degraded;
@@ -167,7 +203,84 @@ function renderNode(node, serverTime) {
   }
   if (!ports.length) portList.innerHTML = '<span class="service-empty">未获取到监听端口</span>';
 
+  const lifecycle = fragment.querySelector(".node-settings-button");
+  lifecycle.dataset.nodeId = node.node_id;
+  const expiry = expiryState(node.settings?.expiry_date, state.serverTime);
+  lifecycle.dataset.expiry = expiry.level;
+  text(fragment, ".expiry-countdown", expiry.label);
+  text(fragment, ".memo-preview", node.settings?.memo || (node.settings?.reminder_at ? `提醒：${formatDateTime(node.settings.reminder_at)}` : "可添加续费信息和提醒"));
+
   return fragment;
+}
+
+function openNodeSettings(nodeId) {
+  const node = state.nodes.get(nodeId);
+  if (!node) return;
+  const settings = node.settings || {};
+  elements.settingsNodeId.value = node.node_id;
+  elements.settingsNodeName.textContent = node.name || node.node_id;
+  elements.expiryDate.value = settings.expiry_date || "";
+  elements.reminderAt.value = settings.reminder_at ? toDateTimeLocal(settings.reminder_at) : "";
+  elements.nodeMemo.value = settings.memo || "";
+  elements.memoCount.textContent = elements.nodeMemo.value.length;
+  elements.telegramEnabled.checked = settings.telegram_enabled !== false;
+  elements.telegramStatus.textContent = state.telegramConfigured ? "已连接" : "未配置";
+  elements.telegramStatus.classList.toggle("configured", state.telegramConfigured);
+  elements.telegramTest.disabled = !state.telegramConfigured;
+  elements.settingsError.textContent = "";
+  elements.settingsDialog.showModal();
+}
+
+async function saveNodeSettings(event) {
+  event.preventDefault();
+  const submit = elements.settingsForm.querySelector('button[type="submit"]');
+  const reminderAt = elements.reminderAt.value
+    ? Math.floor(new Date(elements.reminderAt.value).getTime() / 1000)
+    : 0;
+  submit.disabled = true;
+  submit.textContent = "保存中…";
+  elements.settingsError.textContent = "";
+
+  try {
+    const response = await apiFetch("/api/v1/node-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        node_id: elements.settingsNodeId.value,
+        expiry_date: elements.expiryDate.value,
+        memo: elements.nodeMemo.value.trim(),
+        reminder_at: reminderAt,
+        telegram_enabled: elements.telegramEnabled.checked,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "保存失败");
+    elements.settingsDialog.close();
+    await refreshNodes();
+  } catch (error) {
+    elements.settingsError.textContent = error.message || "保存失败";
+  } finally {
+    submit.disabled = false;
+    submit.textContent = "保存设置";
+  }
+}
+
+async function testTelegram() {
+  elements.telegramTest.disabled = true;
+  elements.telegramTest.textContent = "发送中…";
+  elements.settingsError.textContent = "";
+  try {
+    const response = await apiFetch("/api/v1/telegram/test", { method: "POST" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "发送失败");
+    elements.telegramStatus.textContent = "测试成功";
+    elements.telegramStatus.classList.add("configured");
+  } catch (error) {
+    elements.settingsError.textContent = error.message || "Telegram 测试失败";
+  } finally {
+    elements.telegramTest.disabled = !state.telegramConfigured;
+    elements.telegramTest.textContent = "发送测试";
+  }
 }
 
 function setMetric(root, name, percentage, value, detail) {
@@ -238,6 +351,35 @@ function formatClock(timestamp) {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
+    hour12: false,
+  }).format(new Date(timestamp * 1000));
+}
+
+function expiryState(expiryDate, serverTime) {
+  if (!expiryDate) return { level: "none", label: "点击设置到期日期" };
+  const [year, month, day] = expiryDate.split("-").map(Number);
+  const now = new Date(((serverTime || Date.now() / 1000) + 8 * 3600) * 1000);
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const expiry = Date.UTC(year, month - 1, day);
+  const days = Math.round((expiry - today) / 86400000);
+  if (days < 0) return { level: "expired", label: `已过期 ${Math.abs(days)} 天 · ${expiryDate}` };
+  if (days === 0) return { level: "expired", label: `今天到期 · ${expiryDate}` };
+  if (days <= 30) return { level: "soon", label: `剩余 ${days} 天 · ${expiryDate}` };
+  return { level: "normal", label: `剩余 ${days} 天 · ${expiryDate}` };
+}
+
+function toDateTimeLocal(timestamp) {
+  const date = new Date(timestamp * 1000);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+function formatDateTime(timestamp) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
     hour12: false,
   }).format(new Date(timestamp * 1000));
 }

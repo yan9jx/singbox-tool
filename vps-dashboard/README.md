@@ -10,6 +10,21 @@
 - 已关机：systemd 在正常关机/重启时主动上报；重新开机并收到心跳后恢复正常。
 - IP/端口被墙：单台 VPS 无法从服务器内部准确判断，当前显示为待外部探针；后续可接入中国大陆探针。
 
+## 到期与备忘提醒
+
+- 在节点卡片点击“到期与备忘”，可设置到期日期、备忘录和一次性提醒时间。
+- 到期倒计时会直接显示在节点卡片。
+- 启用 Telegram 后，会在到期前 30、7、3、1 天以及到期当天通知；单次备忘到点通知一次。
+- Telegram 凭据必须配置为 Worker Secret，不能写入代码或上传 GitHub：
+
+```bash
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put TELEGRAM_CHAT_ID
+```
+
+- Windows 可直接运行 `.\setup-secrets.ps1`，安装过程中会依次询问 Cloudflare Token、Account ID、网页密码、上报密钥、Bot Token 和 Chat ID；所有敏感输入均不回显、无默认值，也不会保存到脚本。
+- 定时检查使用 Cloudflare Cron Trigger，每 5 分钟执行一次；整个项目只使用 Workers Free 可用能力。
+
 ## VPS 安装
 
 ```bash

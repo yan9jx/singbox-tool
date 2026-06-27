@@ -1,2 +1,4 @@
 INGEST_TOKEN=replace-with-a-long-random-token
 VIEW_TOKEN=replace-with-a-different-long-random-token
+TELEGRAM_BOT_TOKEN=configure-as-a-worker-secret
+TELEGRAM_CHAT_ID=configure-as-a-worker-secret

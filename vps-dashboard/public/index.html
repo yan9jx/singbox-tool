@@ -152,6 +152,16 @@
         <div><small>累计流量</small><strong class="network-total"></strong></div>
       </div>
 
+      <button class="lifecycle-card node-settings-button" type="button">
+        <span class="lifecycle-icon">⌁</span>
+        <span class="lifecycle-copy">
+          <small>到期与备忘</small>
+          <strong class="expiry-countdown">点击设置到期日期</strong>
+          <span class="memo-preview"></span>
+        </span>
+        <span class="lifecycle-edit">编辑</span>
+      </button>
+
       <div class="detail-block services-block">
         <div class="detail-heading"><span>服务</span><small class="last-seen"></small></div>
         <div class="service-list"></div>
@@ -163,6 +173,56 @@
       </details>
     </article>
   </template>
+
+  <dialog class="settings-dialog" id="settingsDialog">
+    <form id="settingsForm">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">NODE REMINDER</p>
+          <h2 id="settingsNodeName">节点设置</h2>
+        </div>
+        <button type="button" class="dialog-close" id="settingsClose" aria-label="关闭">×</button>
+      </div>
+      <input type="hidden" id="settingsNodeId">
+
+      <div class="form-grid">
+        <label>
+          <span>VPS 到期日期</span>
+          <input id="expiryDate" type="date">
+          <small>自动显示剩余天数，并在 30/7/3/1/0 天提醒。</small>
+        </label>
+        <label>
+          <span>单次提醒时间</span>
+          <input id="reminderAt" type="datetime-local">
+          <small>到点发送一次 Telegram，修改时间后可重新提醒。</small>
+        </label>
+      </div>
+
+      <label class="memo-label">
+        <span>备忘录</span>
+        <textarea id="nodeMemo" maxlength="500" rows="4" placeholder="例如：续费链接、套餐、用途、维护事项……"></textarea>
+        <small><span id="memoCount">0</span>/500</small>
+      </label>
+
+      <div class="telegram-row">
+        <label class="toggle-label">
+          <input id="telegramEnabled" type="checkbox" checked>
+          <span class="toggle"></span>
+          <span>启用 Telegram 提醒</span>
+        </label>
+        <div class="telegram-actions">
+          <span class="telegram-status" id="telegramStatus">未配置</span>
+          <button type="button" class="secondary-button" id="telegramTest">发送测试</button>
+        </div>
+      </div>
+
+      <p class="form-error" id="settingsError" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="secondary-button" id="clearReminder">清除单次提醒</button>
+        <button type="submit" class="primary-button">保存设置</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="/app.js" defer></script>
 </body>
