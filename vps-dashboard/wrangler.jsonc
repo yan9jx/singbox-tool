@@ -32,8 +32,8 @@
   },
   "routes": [
     {
-      "pattern": "home.ejectors.net",
-      "custom_domain": true
+      "pattern": "home.ejectors.net/*",
+      "zone_name": "ejectors.net"
     }
   ]
 }
