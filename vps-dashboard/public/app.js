@@ -3,6 +3,7 @@ const state = {
   timer: null,
   loading: false,
   nodes: new Map(),
+  reminders: new Map(),
   serverTime: 0,
   telegramConfigured: false,
 };
@@ -33,6 +34,29 @@ const elements = {
   telegramTest: document.querySelector("#telegramTest"),
   clearReminder: document.querySelector("#clearReminder"),
   settingsError: document.querySelector("#settingsError"),
+  reminderGrid: document.querySelector("#reminderGrid"),
+  addReminder: document.querySelector("#addReminderButton"),
+  reminderDialog: document.querySelector("#reminderDialog"),
+  reminderForm: document.querySelector("#reminderForm"),
+  reminderClose: document.querySelector("#reminderClose"),
+  reminderCancel: document.querySelector("#reminderCancel"),
+  reminderId: document.querySelector("#reminderId"),
+  reminderDialogTitle: document.querySelector("#reminderDialogTitle"),
+  reminderTitle: document.querySelector("#reminderTitle"),
+  reminderContent: document.querySelector("#reminderContent"),
+  reminderType: document.querySelector("#reminderType"),
+  reminderOnceAt: document.querySelector("#reminderOnceAt"),
+  reminderRepeatTime: document.querySelector("#reminderRepeatTime"),
+  reminderWeekday: document.querySelector("#reminderWeekday"),
+  reminderMonth: document.querySelector("#reminderMonth"),
+  reminderMonthday: document.querySelector("#reminderMonthday"),
+  reminderEnabled: document.querySelector("#reminderEnabled"),
+  reminderError: document.querySelector("#reminderError"),
+  onceTimeField: document.querySelector("#onceTimeField"),
+  repeatTimeField: document.querySelector("#repeatTimeField"),
+  weekdayField: document.querySelector("#weekdayField"),
+  monthField: document.querySelector("#monthField"),
+  monthdayField: document.querySelector("#monthdayField"),
 };
 
 const STATUS_LABELS = {
@@ -98,6 +122,12 @@ function bindEvents() {
   });
   elements.telegramTest.addEventListener("click", testTelegram);
   elements.settingsForm.addEventListener("submit", saveNodeSettings);
+  elements.addReminder.addEventListener("click", () => openReminderDialog());
+  elements.reminderClose.addEventListener("click", () => elements.reminderDialog.close());
+  elements.reminderCancel.addEventListener("click", () => elements.reminderDialog.close());
+  elements.reminderType.addEventListener("change", updateReminderFields);
+  elements.reminderForm.addEventListener("submit", saveReminder);
+  elements.reminderGrid.addEventListener("click", handleReminderAction);
 }
 
 function openLogin() {
@@ -122,6 +152,7 @@ async function refreshNodes() {
     if (!response.ok) throw new Error("状态接口暂时不可用");
     const data = await response.json();
     render(data);
+    await refreshReminders();
     setSync("实时连接", "ok");
     scheduleRefresh((data.refresh_seconds || 15) * 1000);
   } catch (error) {
@@ -130,6 +161,158 @@ async function refreshNodes() {
     state.loading = false;
     elements.refresh.classList.remove("spinning");
   }
+}
+
+async function refreshReminders() {
+  const response = await apiFetch("/api/v1/reminders");
+  if (!response.ok) throw new Error("备忘接口暂时不可用");
+  const data = await response.json();
+  state.reminders = new Map(data.reminders.map((item) => [item.id, item]));
+  renderReminders(data.reminders);
+}
+
+function renderReminders(reminders) {
+  elements.reminderGrid.replaceChildren();
+  if (!reminders.length) {
+    const empty = document.createElement("div");
+    empty.className = "reminder-empty";
+    empty.textContent = "暂无全局提醒，点击“新建提醒”添加";
+    elements.reminderGrid.appendChild(empty);
+    return;
+  }
+  for (const reminder of reminders) {
+    const card = document.createElement("article");
+    card.className = `reminder-card ${reminder.enabled ? "" : "disabled"}`;
+    card.dataset.id = reminder.id;
+    const head = document.createElement("div");
+    head.className = "reminder-card-head";
+    const titleWrap = document.createElement("div");
+    const title = document.createElement("h3");
+    title.textContent = reminder.title;
+    const schedule = document.createElement("span");
+    schedule.className = "reminder-schedule";
+    schedule.textContent = reminderScheduleLabel(reminder);
+    titleWrap.append(title, schedule);
+    const stateText = document.createElement("span");
+    stateText.className = "reminder-toggle";
+    stateText.textContent = reminder.enabled ? "已启用" : reminder.completed ? "已完成" : "已暂停";
+    head.append(titleWrap, stateText);
+    const content = document.createElement("p");
+    content.className = "reminder-content";
+    content.textContent = reminder.content || "无备注内容";
+    const actions = document.createElement("div");
+    actions.className = "reminder-card-actions";
+    const toggle = document.createElement("button");
+    toggle.className = "mini-button";
+    toggle.dataset.action = "toggle";
+    toggle.textContent = reminder.enabled ? "暂停" : "启用";
+    const buttons = document.createElement("div");
+    const edit = document.createElement("button");
+    edit.className = "mini-button";
+    edit.dataset.action = "edit";
+    edit.textContent = "编辑";
+    const remove = document.createElement("button");
+    remove.className = "mini-button delete";
+    remove.dataset.action = "delete";
+    remove.textContent = "删除";
+    buttons.append(edit, remove);
+    actions.append(toggle, buttons);
+    card.append(head, content, actions);
+    elements.reminderGrid.appendChild(card);
+  }
+}
+
+function openReminderDialog(id = "") {
+  const reminder = id ? state.reminders.get(id) : null;
+  elements.reminderId.value = reminder?.id || "";
+  elements.reminderDialogTitle.textContent = reminder ? "编辑提醒" : "新建提醒";
+  elements.reminderTitle.value = reminder?.title || "";
+  elements.reminderContent.value = reminder?.content || "";
+  elements.reminderType.value = reminder?.schedule_type || "once";
+  elements.reminderOnceAt.value = reminder?.schedule_at ? toDateTimeLocal(reminder.schedule_at) : "";
+  elements.reminderRepeatTime.value = reminder?.schedule_time || "09:00";
+  elements.reminderWeekday.value = String(reminder?.weekday ?? 1);
+  elements.reminderMonth.value = String(reminder?.schedule_month ?? 1);
+  elements.reminderMonthday.value = String(reminder?.monthday ?? 1);
+  elements.reminderEnabled.checked = reminder?.enabled !== false;
+  elements.reminderError.textContent = "";
+  updateReminderFields();
+  elements.reminderDialog.showModal();
+  setTimeout(() => elements.reminderTitle.focus(), 50);
+}
+
+function updateReminderFields() {
+  const type = elements.reminderType.value;
+  elements.onceTimeField.hidden = type !== "once";
+  elements.repeatTimeField.hidden = type === "once";
+  elements.weekdayField.hidden = type !== "weekly";
+  elements.monthField.hidden = type !== "yearly";
+  elements.monthdayField.hidden = !["monthly", "yearly"].includes(type);
+}
+
+async function saveReminder(event) {
+  event.preventDefault();
+  const type = elements.reminderType.value;
+  const submit = elements.reminderForm.querySelector('button[type="submit"]');
+  const onceAt = elements.reminderOnceAt.value ? Math.floor(new Date(elements.reminderOnceAt.value).getTime() / 1000) : 0;
+  if (type === "once" && !onceAt) {
+    elements.reminderError.textContent = "请选择单次提醒时间";
+    return;
+  }
+  submit.disabled = true;
+  submit.textContent = "保存中…";
+  try {
+    const response = await apiFetch("/api/v1/reminders", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: elements.reminderId.value,
+        title: elements.reminderTitle.value.trim(),
+        content: elements.reminderContent.value.trim(),
+        schedule_type: type,
+        schedule_at: onceAt,
+        schedule_time: elements.reminderRepeatTime.value,
+        weekday: Number(elements.reminderWeekday.value),
+        schedule_month: Number(elements.reminderMonth.value),
+        monthday: Number(elements.reminderMonthday.value),
+        enabled: elements.reminderEnabled.checked,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "保存失败");
+    elements.reminderDialog.close();
+    await refreshReminders();
+  } catch (error) {
+    elements.reminderError.textContent = error.message || "保存失败";
+  } finally {
+    submit.disabled = false;
+    submit.textContent = "保存提醒";
+  }
+}
+
+async function handleReminderAction(event) {
+  const button = event.target.closest("[data-action]");
+  const card = event.target.closest(".reminder-card");
+  if (!button || !card) return;
+  const reminder = state.reminders.get(card.dataset.id);
+  if (!reminder) return;
+  if (button.dataset.action === "edit") return openReminderDialog(reminder.id);
+  if (button.dataset.action === "delete" && !confirm(`删除提醒“${reminder.title}”？`)) return;
+  const endpoint = button.dataset.action === "delete" ? "delete" : "toggle";
+  const response = await apiFetch(`/api/v1/reminders/${endpoint}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: reminder.id, enabled: !reminder.enabled }),
+  });
+  if (response.ok) await refreshReminders();
+}
+
+function reminderScheduleLabel(reminder) {
+  if (reminder.schedule_type === "once") return `单次 · ${formatDateTime(reminder.schedule_at)}`;
+  if (reminder.schedule_type === "daily") return `每天 · ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "weekly") return `每周${"日一二三四五六"[reminder.weekday]} · ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "monthly") return `每月 ${reminder.monthday} 日 · ${reminder.schedule_time}`;
+  return `每年 ${reminder.schedule_month} 月 ${reminder.monthday} 日 · ${reminder.schedule_time}`;
 }
 
 function render(data) {
