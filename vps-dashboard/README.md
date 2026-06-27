@@ -25,6 +25,12 @@ npx wrangler secret put TELEGRAM_CHAT_ID
 - Windows 可直接运行 `.\setup-secrets.ps1`。脚本会自动复用 `.dashboard-secrets.local.json` 中已有的本机私密配置，只询问缺少的项目；敏感输入不回显，成功后保存到该 Git 忽略文件供以后复用，不写入公开脚本。
 - 定时检查使用 Cloudflare Cron Trigger，每 5 分钟执行一次；整个项目只使用 Workers Free 可用能力。
 
+## 全局备忘
+
+- 首页“全局备忘”可创建不关联 VPS 的提醒事项，名称、内容和时间均可编辑。
+- 支持单次、每天、每周、每月、每年；可暂停、重新启用或删除。
+- 单次提醒发送后自动标记完成，循环提醒会按计划继续执行。
+
 ## VPS 安装
 
 ```bash
