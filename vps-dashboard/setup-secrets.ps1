@@ -18,24 +18,23 @@ function Read-RequiredSecret {
     return $value
 }
 
-$wrangler = Join-Path $PSScriptRoot "node_modules\.bin\wrangler.cmd"
+$wrangler = Join-Path $PSScriptRoot "node_modules\wrangler\bin\wrangler.js"
 if (-not (Test-Path -LiteralPath $wrangler)) {
     throw "Wrangler was not found. Run pnpm install in this project first."
 }
 
 $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
-if (-not $nodeCommand) {
-    $nodeCandidates = @(
-        (Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"),
-        (Join-Path $env:ProgramFiles "nodejs\node.exe"),
-        (Join-Path ${env:ProgramFiles(x86)} "nodejs\node.exe")
-    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+$nodeCandidates = @(
+    (Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"),
+    (Join-Path $env:ProgramFiles "nodejs\node.exe"),
+    $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} "nodejs\node.exe" }),
+    $(if ($nodeCommand) { $nodeCommand.Source })
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
 
-    if (-not $nodeCandidates) {
-        throw "Node.js was not found. Install Node.js or add node.exe to PATH."
-    }
-    $env:PATH = "$(Split-Path -Parent $nodeCandidates[0]);$env:PATH"
+if (-not $nodeCandidates) {
+    throw "Node.js was not found. Install Node.js or add node.exe to PATH."
 }
+$node = $nodeCandidates[0]
 
 $cloudflareToken = Read-RequiredSecret "Cloudflare API Token"
 $accountId = Read-Host "Cloudflare Account ID"
@@ -52,16 +51,16 @@ $env:CLOUDFLARE_API_TOKEN = $cloudflareToken
 $env:CLOUDFLARE_ACCOUNT_ID = $accountId
 
 try {
-    $viewToken | & $wrangler secret put VIEW_TOKEN
+    $viewToken | & $node $wrangler secret put VIEW_TOKEN
     if ($LASTEXITCODE -ne 0) { throw "Failed to save VIEW_TOKEN." }
 
-    $ingestToken | & $wrangler secret put INGEST_TOKEN
+    $ingestToken | & $node $wrangler secret put INGEST_TOKEN
     if ($LASTEXITCODE -ne 0) { throw "Failed to save INGEST_TOKEN." }
 
-    $telegramBotToken | & $wrangler secret put TELEGRAM_BOT_TOKEN
+    $telegramBotToken | & $node $wrangler secret put TELEGRAM_BOT_TOKEN
     if ($LASTEXITCODE -ne 0) { throw "Failed to save TELEGRAM_BOT_TOKEN." }
 
-    $telegramChatId | & $wrangler secret put TELEGRAM_CHAT_ID
+    $telegramChatId | & $node $wrangler secret put TELEGRAM_CHAT_ID
     if ($LASTEXITCODE -ne 0) { throw "Failed to save TELEGRAM_CHAT_ID." }
 
     Write-Host ""
