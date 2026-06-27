@@ -153,7 +153,8 @@ h1 span { color: var(--muted); }
 .node-card[data-status="degraded"] .status-dot { background: var(--yellow); box-shadow: 0 0 12px rgba(255,200,90,.7); }
 .node-card[data-status="offline"] .status-dot, .node-card[data-status="shutdown"] .status-dot { background: var(--red); box-shadow: none; }
 .node-card[data-status="maintenance"] .status-dot { background: var(--cyan); box-shadow: 0 0 12px rgba(86,215,255,.7); }
-.node-name { margin: 0; font-size: 18px; letter-spacing: -.02em; }
+.node-name { margin: 0; padding: 0; border: 0; color: var(--text); background: transparent; cursor: pointer; font: inherit; font-size: 18px; font-weight: 700; letter-spacing: -.02em; text-align: left; }
+.node-name:hover { color: var(--cyan); }
 .node-location { margin: 7px 0 0 18px; color: var(--muted); font-size: 11px; }
 .status-pill { padding: 5px 9px; border-radius: 99px; color: var(--green); background: rgba(63,227,160,.09); font-size: 10px; }
 .node-card[data-status="degraded"] .status-pill { color: var(--yellow); background: rgba(255,200,90,.09); }
@@ -274,6 +275,7 @@ footer { display: flex; justify-content: space-between; padding: 24px 0 38px; bo
 .secondary-button:disabled { opacity: .45; cursor: not-allowed; }
 .dialog-actions { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; }
 .dialog-actions .primary-button { width: auto; min-width: 140px; padding: 0 22px; }
+.profile-actions { justify-content: flex-end; }
 .settings-dialog .form-error { margin: 10px 0 0; }
 .reminder-dialog > form > label:first-of-type { display: block; }
 .reminder-schedule-grid { margin-top: 16px; }
