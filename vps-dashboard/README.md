@@ -22,7 +22,7 @@ npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TELEGRAM_CHAT_ID
 ```
 
-- Windows 可直接运行 `.\setup-secrets.ps1`，安装过程中会依次询问 Cloudflare Token、Account ID、网页密码、上报密钥、Bot Token 和 Chat ID；所有敏感输入均不回显、无默认值，也不会保存到脚本。
+- Windows 可直接运行 `.\setup-secrets.ps1`。脚本会自动复用 `.dashboard-secrets.local.json` 中已有的本机私密配置，只询问缺少的项目；敏感输入不回显，成功后保存到该 Git 忽略文件供以后复用，不写入公开脚本。
 - 定时检查使用 Cloudflare Cron Trigger，每 5 分钟执行一次；整个项目只使用 Workers Free 可用能力。
 
 ## VPS 安装
