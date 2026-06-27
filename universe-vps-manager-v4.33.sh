@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.06.27-5"
+APP_VERSION="2026.06.27-6"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -1142,6 +1142,7 @@ def status_text():
     disk = disk_info()
     io_read, io_write = disk_io_rates()
     singbox = singbox_status()
+    filebrowser = filebrowser_status()
     xray, _ = xhttp_status()
     port = display_ports()
 
@@ -1151,6 +1152,7 @@ def status_text():
         service_rows = [two_sided_row(xray_text, singbox_text)]
     else:
         service_rows = [text for text in (xray_text, singbox_text) if text]
+    service_rows.append(f"网盘\uff1a{filebrowser}")
     service_lines = "\n".join(service_rows) + ("\n" if service_rows else "")
 
     total_rx = read_int(state_path("traffic_total_rx"))
