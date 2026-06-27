@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.06.27-8"
+APP_VERSION="2026.06.27-9"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -1199,7 +1199,7 @@ def status_text(rich_mode=False):
         if xray_text and singbox_text:
             service_cells.append(
                 f'<tr><td align="left">{html.escape(xray_text)}</td>'
-                f'<td align="right">{html.escape(singbox_text)}</td></tr>'
+                f'<td align="left">{html.escape(singbox_text)}</td></tr>'
             )
         elif xray_text or singbox_text:
             service_cells.append(
@@ -1215,7 +1215,7 @@ def status_text(rich_mode=False):
             if len(columns) == 2:
                 port_cells.append(
                     f'<tr><td align="left">{html.escape(columns[0])}</td>'
-                    f'<td align="right">{html.escape(columns[1])}</td></tr>'
+                    f'<td align="left">{html.escape(columns[1])}</td></tr>'
                 )
             else:
                 port_cells.append(
