@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.06.27-3"
+APP_VERSION="2026.06.27-4"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -756,9 +756,43 @@ def grpc_port_mapping():
     return values.get("GRPC_PORT", ""), values.get("GRPC_LOCAL_PORT", "")
 
 
+def singbox_config_path():
+    for path in (
+        Path("/etc/sing-box/config.json"),
+        Path("/etc/singbox/config.json"),
+        Path("/usr/local/etc/sing-box/config.json"),
+    ):
+        if path.exists():
+            return path
+    return None
+
+
+def singbox_service_name():
+    configured = str(CFG.get("service_name", "")).strip()
+    candidates = ["sing-box", "singbox"]
+    if "singbox" in configured.lower().replace("-", ""):
+        candidates.insert(0, configured)
+    seen = set()
+    for service in candidates:
+        if not service or service in seen:
+            continue
+        seen.add(service)
+        code, _, _ = run(f"systemctl cat {service}", timeout=3)
+        if code == 0:
+            return service
+    return ""
+
+
+def singbox_process_running():
+    return any(
+        "sing-box" in row["line"].lower() or "singbox" in row["line"].lower()
+        for row in ss_listeners()
+    )
+
+
 def inbound_protocols():
-    config = Path("/etc/sing-box/config.json")
-    if not config.exists():
+    config = singbox_config_path()
+    if config is None:
         return {}
     try:
         inbounds = json.loads(config.read_text(errors="ignore")).get("inbounds", [])
@@ -786,9 +820,9 @@ def singbox_ports():
     for port in inbound_protocols():
         ports.add(grpc_public if grpc_public and port == grpc_local else port)
     if not ports:
-        service = str(CFG.get("service_name", "sing-box")).strip()
         for row in ss_listeners():
-            if service and service in row["line"] and not row["loopback"]:
+            line = row["line"].lower()
+            if ("sing-box" in line or "singbox" in line) and not row["loopback"]:
                 ports.add(row["port"])
     return sorted(ports, key=int)
 
@@ -821,6 +855,22 @@ def label_for_listener(row):
     return row["process"] or "\u76d1\u542c\u4e2d"
 
 
+def visual_width(text):
+    return sum(1 if ord(char) < 128 else 2 for char in str(text))
+
+
+def width_spaces(width):
+    width = max(0, int(width))
+    return "\u3000" * (width // 2) + " " * (width % 2)
+
+
+def two_sided_row(left, right, total_width=44):
+    if not right:
+        return left
+    gap = max(2, total_width - visual_width(left) - visual_width(right))
+    return left + width_spaces(gap) + right
+
+
 def format_port_labels(port_map):
     items = []
     for port in sorted(port_map, key=lambda value: int(value)):
@@ -828,20 +878,21 @@ def format_port_labels(port_map):
         items.append(f"{port}\uff08{labels}\uff09")
     if not items:
         return "\u672a\u68c0\u6d4b\u5230\u516c\u5f00\u76d1\u542c\u7aef\u53e3"
-    lines, pending = [], []
+    lines, pending = [], None
     for item in items:
-        if len(item) > 20:
-            if pending:
-                lines.append("    ".join(pending))
-                pending = []
+        if visual_width(item) > 22:
+            if pending is not None:
+                lines.append(pending)
+                pending = None
             lines.append(item)
             continue
-        pending.append(item)
-        if len(pending) == 2:
-            lines.append("    ".join(pending))
-            pending = []
-    if pending:
-        lines.append("    ".join(pending))
+        if pending is None:
+            pending = item
+        else:
+            lines.append(two_sided_row(pending, item))
+            pending = None
+    if pending is not None:
+        lines.append(pending)
     return "\n".join(lines)
 
 
@@ -918,8 +969,8 @@ def unit_active(service):
 
 
 def service_running():
-    service = str(CFG.get("service_name", "sing-box")).strip() or "sing-box"
-    return unit_active(service)
+    service = singbox_service_name()
+    return unit_active(service) if service else singbox_process_running()
 
 
 def port_listening(required_ports=None):
@@ -952,23 +1003,22 @@ def node_ok():
 
 
 def singbox_status():
-    service = str(CFG.get("service_name", "sing-box")).strip() or "sing-box"
-    unit_code, _, _ = run(f"systemctl cat {service}", timeout=3)
-    if unit_code != 0:
+    service = singbox_service_name()
+    config = singbox_config_path()
+    process_running = singbox_process_running()
+    if not service and config is None and not process_running:
         return None
-    config = Path("/etc/sing-box/config.json")
-    if not config.exists():
-        return "未使用"
-    try:
-        inbounds = json.loads(config.read_text(errors="ignore")).get("inbounds", [])
-    except Exception:
-        return "异常"
-    if not inbounds:
-        return None
+    if config is not None:
+        try:
+            inbounds = json.loads(config.read_text(errors="ignore")).get("inbounds", [])
+        except Exception:
+            return "异常"
+        if not inbounds and not process_running:
+            return "未使用"
     if not service_running():
         return "断开"
     ports = singbox_ports()
-    return "正常" if port_listening(ports) else "异常"
+    return "正常" if not ports or port_listening(ports) else "异常"
 
 
 def filebrowser_status():
@@ -1097,15 +1147,18 @@ def status_text():
     anytls = anytls_status()
     port = display_ports()
 
-    def status_column(label, value, width=20):
-        text = f"{label}\uff1a{value or '未安装'}"
-        visual_width = sum(1 if ord(char) < 128 else 2 for char in text)
-        return text + "\u3000" * max(1, (width - visual_width + 1) // 2)
-
-    service_lines = (
-        f"{status_column('xray', xray)}│ singbox\uff1a{singbox or '未安装'}\n"
-        f"{status_column('网盘', filebrowser)}│ AnyTLS\uff1a{anytls or '未安装'}\n"
-    )
+    xray_text = f"xray\uff1a{xray}" if xray is not None else ""
+    singbox_text = f"singbox\uff1a{singbox}" if singbox is not None else ""
+    anytls_text = f"AnyTLS\uff1a{anytls}" if anytls is not None else ""
+    service_rows = [
+        row
+        for row in (
+            two_sided_row(xray_text, singbox_text),
+            two_sided_row(f"网盘\uff1a{filebrowser}", anytls_text),
+        )
+        if row.strip()
+    ]
+    service_lines = "\n".join(service_rows) + "\n"
 
     total_rx = read_int(state_path("traffic_total_rx"))
     total_tx = read_int(state_path("traffic_total_tx"))
@@ -1122,7 +1175,6 @@ def status_text():
         f"磁盘: {disk['pct']}% ({disk['used_gb']:.1f}/{disk['total_gb']:.1f}GB)\n\n"
         f"磁盘 I/O: 读 {format_rate(io_read)} / 写 {format_rate(io_write)}\n\n"
         f"{service_lines}"
-        f"网盘: {filebrowser}\n"
         f"端口:\n{port}\n\n"
         f"总入站: {bytes_to_gb(total_rx):.2f} GB\n"
         f"总出站: {bytes_to_gb(total_tx):.2f} GB\n"
