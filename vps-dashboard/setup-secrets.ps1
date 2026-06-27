@@ -67,7 +67,7 @@ $nodeCandidates = @(
 if (-not $nodeCandidates) {
     throw "Node.js was not found. Install Node.js or add node.exe to PATH."
 }
-$node = $nodeCandidates[0]
+$node = @($nodeCandidates)[0]
 
 $localConfigPath = Join-Path $PSScriptRoot ".dashboard-secrets.local.json"
 $localConfig = $null
@@ -94,20 +94,20 @@ if ([string]::IsNullOrWhiteSpace($accountId)) {
 $env:CLOUDFLARE_API_TOKEN = $cloudflareToken
 $env:CLOUDFLARE_ACCOUNT_ID = $accountId
 
+[ordered]@{
+    cloudflare_api_token = $cloudflareToken
+    cloudflare_account_id = $accountId
+    view_token = $viewToken
+    ingest_token = $ingestToken
+    telegram_bot_token = $telegramBotToken
+    telegram_chat_id = $telegramChatId
+} | ConvertTo-Json | Set-Content -LiteralPath $localConfigPath -Encoding UTF8
+
 try {
     Set-WorkerSecret -Name "VIEW_TOKEN" -Value $viewToken -NodePath $node -WranglerPath $wrangler
     Set-WorkerSecret -Name "INGEST_TOKEN" -Value $ingestToken -NodePath $node -WranglerPath $wrangler
     Set-WorkerSecret -Name "TELEGRAM_BOT_TOKEN" -Value $telegramBotToken -NodePath $node -WranglerPath $wrangler
     Set-WorkerSecret -Name "TELEGRAM_CHAT_ID" -Value $telegramChatId -NodePath $node -WranglerPath $wrangler
-
-    [ordered]@{
-        cloudflare_api_token = $cloudflareToken
-        cloudflare_account_id = $accountId
-        view_token = $viewToken
-        ingest_token = $ingestToken
-        telegram_bot_token = $telegramBotToken
-        telegram_chat_id = $telegramChatId
-    } | ConvertTo-Json | Set-Content -LiteralPath $localConfigPath -Encoding UTF8
 
     Write-Host ""
     Write-Host "All secrets were saved to Cloudflare." -ForegroundColor Green
