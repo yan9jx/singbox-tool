@@ -92,6 +92,9 @@
           <h2>服务器状态</h2>
         </div>
         <div class="node-section-actions">
+          <button class="secondary-button" id="exportConfig" type="button">导出配置</button>
+          <button class="secondary-button" id="importConfig" type="button">恢复配置</button>
+          <input id="importConfigFile" type="file" accept="application/json,.json" hidden>
           <label>离线自动清理
             <select id="autoDeleteDays">
               <option value="0">关闭</option>
@@ -156,6 +159,7 @@
       <div class="node-meta">
         <span class="public-ip"></span>
         <span class="uptime"></span>
+        <span class="agent-version"></span>
       </div>
 
       <div class="metrics">
@@ -219,6 +223,34 @@
         <button type="button" class="dialog-close" id="settingsClose" aria-label="关闭">×</button>
       </div>
       <input type="hidden" id="settingsNodeId">
+
+      <div class="form-grid">
+        <label>
+          <span>显示名称</span>
+          <input id="displayName" type="text" maxlength="80" placeholder="留空使用 Agent 名称">
+        </label>
+        <label>
+          <span>分组</span>
+          <input id="nodeGroup" type="text" maxlength="40" placeholder="例如：生产、备用">
+        </label>
+        <label>
+          <span>服务商</span>
+          <input id="displayProvider" type="text" maxlength="40" placeholder="留空使用上报值">
+        </label>
+        <label>
+          <span>国家 / 地区</span>
+          <input id="displayLocation" type="text" maxlength="40" placeholder="留空使用上报值">
+        </label>
+        <label>
+          <span>用途</span>
+          <input id="nodePurpose" type="text" maxlength="80" placeholder="例如：主力节点、云盘">
+        </label>
+        <label>
+          <span>维护模式结束时间</span>
+          <input id="maintenanceUntil" type="datetime-local">
+          <small>到期前显示维护中，并暂停该 VPS 的 Telegram 提醒。</small>
+        </label>
+      </div>
 
       <div class="form-grid">
         <label>
