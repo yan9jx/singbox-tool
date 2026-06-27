@@ -105,6 +105,11 @@ h1 span { color: var(--muted); }
 
 .reminder-section { padding: 60px 0 0; }
 .reminder-header-actions { display: flex; align-items: center; gap: 9px; }
+.telegram-coverage {
+  padding: 7px 10px; border: 1px solid rgba(255,102,126,.15); border-radius: 999px;
+  color: var(--red); background: rgba(255,102,126,.05); font-size: 9px; white-space: nowrap;
+}
+.telegram-coverage.configured { border-color: rgba(63,227,160,.16); color: var(--green); background: rgba(63,227,160,.05); }
 .add-reminder-button {
   min-height: 40px; padding: 0 15px; border: 1px solid rgba(86,215,255,.24); border-radius: 11px;
   color: var(--cyan); background: rgba(86,215,255,.07); cursor: pointer;
@@ -292,6 +297,8 @@ footer { display: flex; justify-content: space-between; padding: 24px 0 38px; bo
   .network-row > div { padding: 10px 7px; }
   .network-row strong { font-size: 10px; }
   .section-title > span { display: none; }
+  .reminder-section .section-title { align-items: flex-start; flex-direction: column; }
+  .reminder-header-actions { flex-wrap: wrap; }
   .settings-dialog form { padding: 22px 18px; }
   .form-grid { grid-template-columns: 1fr; }
   .telegram-row { align-items: flex-start; flex-direction: column; }
