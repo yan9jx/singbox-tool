@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.06.27-2"
+APP_VERSION="2026.06.27-3"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -994,7 +994,7 @@ def filebrowser_status():
                         if check != 0:
                             return "服务异常"
                     break
-    return "正常运行"
+    return "正常"
 
 
 def anytls_status():
