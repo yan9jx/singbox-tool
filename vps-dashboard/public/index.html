@@ -146,7 +146,7 @@
         <div>
           <div class="node-title-row">
             <span class="status-dot"></span>
-            <h3 class="node-name"></h3>
+            <button class="node-name node-edit-button" type="button" title="编辑节点信息"></button>
           </div>
           <p class="node-location"></p>
         </div>
@@ -226,34 +226,6 @@
 
       <div class="form-grid">
         <label>
-          <span>显示名称</span>
-          <input id="displayName" type="text" maxlength="80" placeholder="留空使用 Agent 名称">
-        </label>
-        <label>
-          <span>分组</span>
-          <input id="nodeGroup" type="text" maxlength="40" placeholder="例如：生产、备用">
-        </label>
-        <label>
-          <span>服务商</span>
-          <input id="displayProvider" type="text" maxlength="40" placeholder="留空使用上报值">
-        </label>
-        <label>
-          <span>国家 / 地区</span>
-          <input id="displayLocation" type="text" maxlength="40" placeholder="留空使用上报值">
-        </label>
-        <label>
-          <span>用途</span>
-          <input id="nodePurpose" type="text" maxlength="80" placeholder="例如：主力节点、云盘">
-        </label>
-        <label>
-          <span>维护模式结束时间</span>
-          <input id="maintenanceUntil" type="datetime-local">
-          <small>到期前显示维护中，并暂停该 VPS 的 Telegram 提醒。</small>
-        </label>
-      </div>
-
-      <div class="form-grid">
-        <label>
           <span>VPS 到期日期</span>
           <input id="expiryDate" type="date">
           <small>自动显示剩余天数，并在 30/7/3/1/0 天提醒。</small>
@@ -287,6 +259,35 @@
       <div class="dialog-actions">
         <button type="button" class="secondary-button" id="clearReminder">清除单次提醒</button>
         <button type="submit" class="primary-button">保存设置</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="settings-dialog" id="profileDialog">
+    <form id="profileForm">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">NODE PROFILE</p>
+          <h2 id="profileNodeName">编辑节点信息</h2>
+        </div>
+        <button type="button" class="dialog-close" id="profileClose" aria-label="关闭">×</button>
+      </div>
+      <input type="hidden" id="profileNodeId">
+      <div class="form-grid">
+        <label><span>显示名称</span><input id="displayName" type="text" maxlength="80" placeholder="留空使用 Agent 名称"></label>
+        <label><span>分组</span><input id="nodeGroup" type="text" maxlength="40" placeholder="例如：生产、备用"></label>
+        <label><span>服务商</span><input id="displayProvider" type="text" maxlength="40" placeholder="留空使用上报值"></label>
+        <label><span>国家 / 地区</span><input id="displayLocation" type="text" maxlength="40" placeholder="留空使用上报值"></label>
+        <label><span>用途</span><input id="nodePurpose" type="text" maxlength="80" placeholder="例如：主力节点、云盘"></label>
+        <label>
+          <span>维护结束时间</span>
+          <input id="maintenanceUntil" type="datetime-local">
+          <small>到期前显示维护中，并暂停该 VPS 的面板 Telegram 提醒。</small>
+        </label>
+      </div>
+      <p class="form-error" id="profileError" role="alert"></p>
+      <div class="dialog-actions profile-actions">
+        <button type="submit" class="primary-button">保存节点信息</button>
       </div>
     </form>
   </dialog>
