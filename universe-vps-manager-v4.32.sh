@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.06.27-4"
+APP_VERSION="2026.06.27-5"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -1142,23 +1142,16 @@ def status_text():
     disk = disk_info()
     io_read, io_write = disk_io_rates()
     singbox = singbox_status()
-    filebrowser = filebrowser_status()
     xray, _ = xhttp_status()
-    anytls = anytls_status()
     port = display_ports()
 
     xray_text = f"xray\uff1a{xray}" if xray is not None else ""
     singbox_text = f"singbox\uff1a{singbox}" if singbox is not None else ""
-    anytls_text = f"AnyTLS\uff1a{anytls}" if anytls is not None else ""
-    service_rows = [
-        row
-        for row in (
-            two_sided_row(xray_text, singbox_text),
-            two_sided_row(f"网盘\uff1a{filebrowser}", anytls_text),
-        )
-        if row.strip()
-    ]
-    service_lines = "\n".join(service_rows) + "\n"
+    if xray_text and singbox_text:
+        service_rows = [two_sided_row(xray_text, singbox_text)]
+    else:
+        service_rows = [text for text in (xray_text, singbox_text) if text]
+    service_lines = "\n".join(service_rows) + ("\n" if service_rows else "")
 
     total_rx = read_int(state_path("traffic_total_rx"))
     total_tx = read_int(state_path("traffic_total_tx"))
