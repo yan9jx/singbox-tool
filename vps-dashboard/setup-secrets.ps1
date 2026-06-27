@@ -23,6 +23,20 @@ if (-not (Test-Path -LiteralPath $wrangler)) {
     throw "Wrangler was not found. Run pnpm install in this project first."
 }
 
+$nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+if (-not $nodeCommand) {
+    $nodeCandidates = @(
+        (Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"),
+        (Join-Path $env:ProgramFiles "nodejs\node.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "nodejs\node.exe")
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+
+    if (-not $nodeCandidates) {
+        throw "Node.js was not found. Install Node.js or add node.exe to PATH."
+    }
+    $env:PATH = "$(Split-Path -Parent $nodeCandidates[0]);$env:PATH"
+}
+
 $cloudflareToken = Read-RequiredSecret "Cloudflare API Token"
 $accountId = Read-Host "Cloudflare Account ID"
 if ([string]::IsNullOrWhiteSpace($accountId)) {
