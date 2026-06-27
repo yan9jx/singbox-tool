@@ -63,13 +63,25 @@ const elements = {
   telegramCoverage: document.querySelector("#telegramCoverage"),
   globalTelegramTest: document.querySelector("#globalTelegramTest"),
   autoDeleteDays: document.querySelector("#autoDeleteDays"),
+  exportConfig: document.querySelector("#exportConfig"),
+  importConfig: document.querySelector("#importConfig"),
+  importConfigFile: document.querySelector("#importConfigFile"),
+  displayName: document.querySelector("#displayName"),
+  displayProvider: document.querySelector("#displayProvider"),
+  displayLocation: document.querySelector("#displayLocation"),
+  nodePurpose: document.querySelector("#nodePurpose"),
+  nodeGroup: document.querySelector("#nodeGroup"),
+  maintenanceUntil: document.querySelector("#maintenanceUntil"),
 };
+
+const CURRENT_AGENT_VERSION = "1.0.0";
 
 const STATUS_LABELS = {
   online: "正常",
   degraded: "异常",
   offline: "离线",
   shutdown: "已关机",
+  maintenance: "维护中",
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -141,6 +153,13 @@ function bindEvents() {
   elements.reminderGrid.addEventListener("click", handleReminderAction);
   elements.globalTelegramTest.addEventListener("click", testGlobalTelegram);
   elements.autoDeleteDays.addEventListener("change", saveAutoDeleteSetting);
+  elements.exportConfig.addEventListener("click", exportDashboardConfig);
+  elements.importConfig.addEventListener("click", () => elements.importConfigFile.click());
+  elements.importConfigFile.addEventListener("change", importDashboardConfig);
+  elements.grid.addEventListener("dragstart", handleNodeDragStart);
+  elements.grid.addEventListener("dragover", handleNodeDragOver);
+  elements.grid.addEventListener("drop", handleNodeDrop);
+  elements.grid.addEventListener("dragend", handleNodeDragEnd);
 }
 
 function openLogin() {
@@ -399,7 +418,17 @@ function render(data) {
     return;
   }
 
+  const grouped = data.nodes.some((node) => node.settings?.group);
+  let lastGroup = null;
   for (const node of data.nodes) {
+    const group = node.settings?.group || "未分组";
+    if (grouped && group !== lastGroup) {
+      const heading = document.createElement("h3");
+      heading.className = "node-group-title";
+      heading.textContent = group;
+      elements.grid.appendChild(heading);
+      lastGroup = group;
+    }
     elements.grid.appendChild(renderNode(node, data.server_time));
   }
 }
@@ -408,14 +437,21 @@ function renderNode(node, serverTime) {
   const fragment = elements.template.content.cloneNode(true);
   const card = fragment.querySelector(".node-card");
   card.dataset.status = node.status;
+  card.dataset.nodeId = node.node_id;
+  card.draggable = true;
   const deleteButton = fragment.querySelector(".delete-node-button");
   deleteButton.dataset.nodeId = node.node_id;
   deleteButton.hidden = !["offline", "shutdown"].includes(node.status);
   text(fragment, ".node-name", node.name || node.node_id);
-  text(fragment, ".node-location", [node.provider, node.location].filter(Boolean).join(" · ") || node.hostname || "未设置位置");
+  text(fragment, ".node-location", [node.provider, node.location, node.purpose].filter(Boolean).join(" · ") || node.hostname || "未设置位置");
   text(fragment, ".status-pill", STATUS_LABELS[node.status] || node.status);
   text(fragment, ".public-ip", node.public_ip || "未获取");
   text(fragment, ".uptime", node.status === "shutdown" ? "已关机" : formatDuration(node.uptime_seconds));
+  const versionState = compareVersions(node.agent_version || "0", CURRENT_AGENT_VERSION);
+  text(fragment, ".agent-version", !node.agent_version
+    ? "Agent 未上报版本"
+    : versionState < 0 ? `Agent v${node.agent_version} · 可更新至 v${CURRENT_AGENT_VERSION}` : `Agent v${node.agent_version} · 最新`);
+  fragment.querySelector(".agent-version").classList.toggle("outdated", versionState < 0);
 
   setMetric(fragment, "cpu", node.cpu?.usage_pct, `${fixed(node.cpu?.usage_pct)}%`, `负载 ${fixed(node.cpu?.load_1, 2)} · ${node.cpu?.cores || "—"} 核`);
   setMetric(fragment, "memory", node.memory?.usage_pct, `${fixed(node.memory?.usage_pct)}%`, `${formatBytesFromMB(node.memory?.used_mb)} / ${formatBytesFromMB(node.memory?.total_mb)}`);
@@ -485,6 +521,12 @@ function openNodeSettings(nodeId) {
   const settings = node.settings || {};
   elements.settingsNodeId.value = node.node_id;
   elements.settingsNodeName.textContent = node.name || node.node_id;
+  elements.displayName.value = settings.display_name || "";
+  elements.displayProvider.value = settings.display_provider || "";
+  elements.displayLocation.value = settings.display_location || "";
+  elements.nodePurpose.value = settings.purpose || "";
+  elements.nodeGroup.value = settings.group || "";
+  elements.maintenanceUntil.value = settings.maintenance_until ? toDateTimeLocal(settings.maintenance_until) : "";
   elements.expiryDate.value = settings.expiry_date || "";
   elements.reminderAt.value = settings.reminder_at ? toDateTimeLocal(settings.reminder_at) : "";
   elements.nodeMemo.value = settings.memo || "";
@@ -503,6 +545,9 @@ async function saveNodeSettings(event) {
   const reminderAt = elements.reminderAt.value
     ? Math.floor(new Date(elements.reminderAt.value).getTime() / 1000)
     : 0;
+  const maintenanceUntil = elements.maintenanceUntil.value
+    ? Math.floor(new Date(elements.maintenanceUntil.value).getTime() / 1000)
+    : 0;
   submit.disabled = true;
   submit.textContent = "保存中…";
   elements.settingsError.textContent = "";
@@ -517,6 +562,12 @@ async function saveNodeSettings(event) {
         memo: elements.nodeMemo.value.trim(),
         reminder_at: reminderAt,
         telegram_enabled: elements.telegramEnabled.checked,
+        display_name: elements.displayName.value.trim(),
+        display_provider: elements.displayProvider.value.trim(),
+        display_location: elements.displayLocation.value.trim(),
+        purpose: elements.nodePurpose.value.trim(),
+        group: elements.nodeGroup.value.trim(),
+        maintenance_until: maintenanceUntil,
       }),
     });
     const result = await response.json();
@@ -529,6 +580,83 @@ async function saveNodeSettings(event) {
     submit.disabled = false;
     submit.textContent = "保存设置";
   }
+}
+
+let draggedNodeId = "";
+
+function handleNodeDragStart(event) {
+  const card = event.target.closest(".node-card");
+  if (!card) return;
+  draggedNodeId = card.dataset.nodeId;
+  card.classList.add("dragging");
+  event.dataTransfer.effectAllowed = "move";
+}
+
+function handleNodeDragOver(event) {
+  const target = event.target.closest(".node-card");
+  if (!target || target.dataset.nodeId === draggedNodeId) return;
+  event.preventDefault();
+  const rect = target.getBoundingClientRect();
+  const before = event.clientY < rect.top + rect.height / 2;
+  target.parentNode.insertBefore(document.querySelector(`.node-card[data-node-id="${CSS.escape(draggedNodeId)}"]`), before ? target : target.nextSibling);
+}
+
+async function handleNodeDrop(event) {
+  if (!draggedNodeId) return;
+  event.preventDefault();
+  const nodeIds = [...elements.grid.querySelectorAll(".node-card")].map((card) => card.dataset.nodeId);
+  await apiFetch("/api/v1/nodes/order", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ node_ids: nodeIds }),
+  });
+  draggedNodeId = "";
+  await refreshNodes();
+}
+
+function handleNodeDragEnd() {
+  elements.grid.querySelectorAll(".dragging").forEach((card) => card.classList.remove("dragging"));
+  draggedNodeId = "";
+}
+
+async function exportDashboardConfig() {
+  const response = await apiFetch("/api/v1/config/export");
+  if (!response.ok) return alert("配置导出失败");
+  const blob = await response.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `ejectors-dashboard-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+async function importDashboardConfig() {
+  const file = elements.importConfigFile.files?.[0];
+  elements.importConfigFile.value = "";
+  if (!file || !confirm("恢复配置会覆盖现有节点设置、面板设置和同 ID 的全局备忘，确定继续吗？")) return;
+  try {
+    const data = JSON.parse(await file.text());
+    const response = await apiFetch("/api/v1/config/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "恢复失败");
+    alert(`恢复完成：${result.imported.nodes} 台 VPS，${result.imported.reminders} 条备忘；跳过 ${result.skipped_nodes} 台未上报 VPS。`);
+    await refreshNodes();
+  } catch (error) {
+    alert(error.message || "备份文件无法读取");
+  }
+}
+
+function compareVersions(left, right) {
+  const a = String(left).split(".").map(Number);
+  const b = String(right).split(".").map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0) ? 1 : -1;
+  }
+  return 0;
 }
 
 async function testTelegram() {
