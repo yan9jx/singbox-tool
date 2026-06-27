@@ -6,6 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
+APP_VERSION="2026.06.27-1"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -96,10 +97,11 @@ write_config() {
   read -r -p "检测服务名 [sing-box]: " SERVICE_NAME
   SERVICE_NAME="${SERVICE_NAME:-sing-box}"
 
-  AUTO_PORTS="$(detect_singbox_ports || true)"
-  if [ -n "$AUTO_PORTS" ]; then
-    read -r -p "检测端口 [自动识别 $AUTO_PORTS，回车使用]: " CHECK_PORT
-    CHECK_PORT="${CHECK_PORT:-$AUTO_PORTS}"
+  AUTO_PORTS=""
+  AUTO_PORTS="$(detect_singbox_ports 2>/dev/null || true)"
+  if [ -n "${AUTO_PORTS:-}" ]; then
+    read -r -p "检测端口 [自动识别 ${AUTO_PORTS:-}，回车使用]: " CHECK_PORT
+    CHECK_PORT="${CHECK_PORT:-${AUTO_PORTS:-}}"
   else
     read -r -p "检测端口 [可留空，只检测服务]: " CHECK_PORT
   fi
@@ -108,6 +110,12 @@ write_config() {
   echo "流量迁移：旧机器人已有总流量就手动输入 GB；不知道就回车自动。"
   read -r -p "初始入站 GB [回车=自动]: " INIT_RX_GB
   read -r -p "初始出站 GB [回车=自动]: " INIT_TX_GB
+  while true; do
+    read -r -p "VPS 标称带宽 Mbps [1000]: " BANDWIDTH_MBPS
+    BANDWIDTH_MBPS="${BANDWIDTH_MBPS:-1000}"
+    [[ "$BANDWIDTH_MBPS" =~ ^[1-9][0-9]*$ ]] && break
+    echo "带宽必须是大于 0 的整数 Mbps。"
+  done
 
   mkdir -p "$APP_DIR" "$APP_DIR/state" "$APP_DIR/logs"
 
@@ -118,8 +126,9 @@ write_config() {
   CHECK_PORT="$(clean_input "$CHECK_PORT")"
   INIT_RX_GB="$(clean_input "$INIT_RX_GB")"
   INIT_TX_GB="$(clean_input "$INIT_TX_GB")"
+  BANDWIDTH_MBPS="$(clean_input "$BANDWIDTH_MBPS")"
 
-  export BOT_TOKEN CHAT_ID SERVER_NAME SERVICE_NAME CHECK_PORT INIT_RX_GB INIT_TX_GB CONFIG_FILE
+  export BOT_TOKEN CHAT_ID SERVER_NAME SERVICE_NAME CHECK_PORT INIT_RX_GB INIT_TX_GB BANDWIDTH_MBPS CONFIG_FILE
 
   python3 - <<'PYCONF'
 from pathlib import Path
@@ -160,6 +169,11 @@ cfg = {
     "pause_until": 0,
     "init_rx_gb": safe_env("INIT_RX_GB"),
     "init_tx_gb": safe_env("INIT_TX_GB"),
+    "bandwidth_mbps": int(safe_env("BANDWIDTH_MBPS", "1000") or "1000"),
+    "traffic_spike_multiplier": 5,
+    "traffic_spike_min_ratio": 10,
+    "traffic_saturation_ratio": 90,
+    "traffic_saturation_samples": 3,
 }
 
 p = Path(os.environ["CONFIG_FILE"])
@@ -437,6 +451,110 @@ def update_traffic():
         write_int(state_path("traffic_last_rx"), raw_rx)
         write_int(state_path("traffic_last_tx"), raw_tx)
         fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def traffic_rate_sample():
+    lock_path = state_path("traffic_alert.lock")
+    with lock_path.open("w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        iface, raw_rx, raw_tx = get_raw_traffic()
+        now = now_ts()
+        last_ts = read_int(state_path("traffic_alert_last_ts"), 0)
+        last_rx = read_int(state_path("traffic_alert_last_rx"), raw_rx)
+        last_tx = read_int(state_path("traffic_alert_last_tx"), raw_tx)
+
+        if last_ts <= 0:
+            write_int(state_path("traffic_alert_last_ts"), now)
+            write_int(state_path("traffic_alert_last_rx"), raw_rx)
+            write_int(state_path("traffic_alert_last_tx"), raw_tx)
+            fcntl.flock(lf, fcntl.LOCK_UN)
+            return None
+
+        elapsed = now - last_ts
+        if elapsed < 30:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+            return None
+
+        delta_rx = raw_rx - last_rx if raw_rx >= last_rx else 0
+        delta_tx = raw_tx - last_tx if raw_tx >= last_tx else 0
+        write_int(state_path("traffic_alert_last_ts"), now)
+        write_int(state_path("traffic_alert_last_rx"), raw_rx)
+        write_int(state_path("traffic_alert_last_tx"), raw_tx)
+        fcntl.flock(lf, fcntl.LOCK_UN)
+
+    return {
+        "iface": iface,
+        "rx_mbps": delta_rx * 8 / elapsed / 1_000_000,
+        "tx_mbps": delta_tx * 8 / elapsed / 1_000_000,
+        "elapsed": elapsed,
+    }
+
+
+def traffic_alert_check():
+    sample = traffic_rate_sample()
+    if not sample:
+        return
+
+    try:
+        bandwidth = max(1.0, float(CFG.get("bandwidth_mbps", 1000)))
+    except (TypeError, ValueError):
+        bandwidth = 1000.0
+
+    rx_mbps = sample["rx_mbps"]
+    tx_mbps = sample["tx_mbps"]
+    peak_mbps = max(rx_mbps, tx_mbps)
+    baseline_path = state_path("traffic_alert_baseline_kbps")
+    samples_path = state_path("traffic_alert_baseline_samples")
+    baseline_mbps = read_int(baseline_path, 0) / 1000
+    baseline_samples = read_int(samples_path, 0)
+
+    spike_multiplier = max(2.0, float(CFG.get("traffic_spike_multiplier", 5)))
+    spike_min_ratio = max(1.0, float(CFG.get("traffic_spike_min_ratio", 10)))
+    spike_min_mbps = max(1.0, bandwidth * spike_min_ratio / 100)
+    if (
+        baseline_samples >= 3
+        and baseline_mbps > 0
+        and peak_mbps >= spike_min_mbps
+        and peak_mbps >= baseline_mbps * spike_multiplier
+        and can_alert("traffic_spike", CFG.get("alert_cooldown_sec", 600))
+    ):
+        send_message(
+            f"🚨 流量突增告警\n"
+            f"[{CFG['server_name']}]\n\n"
+            f"网卡: {sample['iface']}\n"
+            f"入站: {rx_mbps:.1f} Mbps\n"
+            f"出站: {tx_mbps:.1f} Mbps\n"
+            f"近期基线: {baseline_mbps:.1f} Mbps\n"
+            f"触发条件: ≥ {spike_min_mbps:.1f} Mbps 且达到基线 {spike_multiplier:.0f} 倍"
+        )
+
+    if baseline_samples <= 0:
+        new_baseline = peak_mbps
+    else:
+        new_baseline = baseline_mbps * 0.8 + peak_mbps * 0.2
+    write_int(baseline_path, round(new_baseline * 1000))
+    write_int(samples_path, min(60, baseline_samples + 1))
+
+    saturation_ratio = max(1.0, min(100.0, float(CFG.get("traffic_saturation_ratio", 90))))
+    saturation_mbps = bandwidth * saturation_ratio / 100
+    required_samples = max(2, int(CFG.get("traffic_saturation_samples", 3)))
+    streak_path = state_path("traffic_saturation_streak")
+    streak = read_int(streak_path, 0) + 1 if peak_mbps >= saturation_mbps else 0
+    write_int(streak_path, streak)
+
+    if (
+        streak >= required_samples
+        and can_alert("traffic_saturation", CFG.get("alert_cooldown_sec", 600))
+    ):
+        send_message(
+            f"🚨 带宽持续跑满告警\n"
+            f"[{CFG['server_name']}]\n\n"
+            f"网卡: {sample['iface']}\n"
+            f"入站: {rx_mbps:.1f} Mbps\n"
+            f"出站: {tx_mbps:.1f} Mbps\n"
+            f"标称带宽: {bandwidth:.0f} Mbps\n"
+            f"已连续 {streak} 分钟达到 {saturation_ratio:.0f}% 以上"
+        )
 
 
 def mem_info():
@@ -983,8 +1101,8 @@ def status_text():
         service_lines += f"singbox\uff1a{singbox}\n"
     if xray is not None:
         service_lines += f"xray\uff1a{xray}\n"
-    if anytls is not None:
-        service_lines += f"AnyTLS\uff1a{anytls}\n"
+    if anytls is not None and singbox is None:
+        service_lines += f"singbox\uff1a{anytls}\n"
 
     total_rx = read_int(state_path("traffic_total_rx"))
     total_tx = read_int(state_path("traffic_total_tx"))
@@ -1104,6 +1222,7 @@ def alive_check():
     update_traffic()
     if is_paused():
         return
+    traffic_alert_check()
 
     statuses = managed_service_statuses()
     if not statuses:
@@ -1430,6 +1549,7 @@ main() {
   need_root
   echo "======================================"
   echo "宇宙监察委员会VPS管理局"
+  echo "版本：$APP_VERSION"
   echo "======================================"
   install_deps
   clean_old
