@@ -57,6 +57,11 @@ const elements = {
   weekdayField: document.querySelector("#weekdayField"),
   monthField: document.querySelector("#monthField"),
   monthdayField: document.querySelector("#monthdayField"),
+  intervalMonthsField: document.querySelector("#intervalMonthsField"),
+  reminderIntervalMonths: document.querySelector("#reminderIntervalMonths"),
+  globalTelegramStatus: document.querySelector("#globalTelegramStatus"),
+  globalTelegramTest: document.querySelector("#globalTelegramTest"),
+  autoDeleteDays: document.querySelector("#autoDeleteDays"),
 };
 
 const STATUS_LABELS = {
@@ -107,6 +112,11 @@ function bindEvents() {
   });
   elements.refresh.addEventListener("click", refreshNodes);
   elements.grid.addEventListener("click", (event) => {
+    const deleteButton = event.target.closest(".delete-node-button");
+    if (deleteButton) {
+      deleteOfflineNode(deleteButton.dataset.nodeId);
+      return;
+    }
     const button = event.target.closest(".node-settings-button");
     if (button) openNodeSettings(button.dataset.nodeId);
   });
@@ -128,6 +138,8 @@ function bindEvents() {
   elements.reminderType.addEventListener("change", updateReminderFields);
   elements.reminderForm.addEventListener("submit", saveReminder);
   elements.reminderGrid.addEventListener("click", handleReminderAction);
+  elements.globalTelegramTest.addEventListener("click", testGlobalTelegram);
+  elements.autoDeleteDays.addEventListener("change", saveAutoDeleteSetting);
 }
 
 function openLogin() {
@@ -152,7 +164,7 @@ async function refreshNodes() {
     if (!response.ok) throw new Error("状态接口暂时不可用");
     const data = await response.json();
     render(data);
-    await refreshReminders();
+    await Promise.all([refreshReminders(), refreshDashboardSettings()]);
     setSync("实时连接", "ok");
     scheduleRefresh((data.refresh_seconds || 15) * 1000);
   } catch (error) {
@@ -169,6 +181,31 @@ async function refreshReminders() {
   const data = await response.json();
   state.reminders = new Map(data.reminders.map((item) => [item.id, item]));
   renderReminders(data.reminders);
+}
+
+async function refreshDashboardSettings() {
+  const response = await apiFetch("/api/v1/dashboard-settings");
+  if (!response.ok) throw new Error("面板设置暂时不可用");
+  const data = await response.json();
+  elements.autoDeleteDays.value = String(data.settings?.auto_delete_offline_days || 0);
+}
+
+async function saveAutoDeleteSetting() {
+  elements.autoDeleteDays.disabled = true;
+  try {
+    const response = await apiFetch("/api/v1/dashboard-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ auto_delete_offline_days: Number(elements.autoDeleteDays.value) }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "自动清理设置保存失败");
+  } catch (error) {
+    alert(error.message || "自动清理设置保存失败");
+    await refreshDashboardSettings();
+  } finally {
+    elements.autoDeleteDays.disabled = false;
+  }
 }
 
 function renderReminders(reminders) {
@@ -234,6 +271,7 @@ function openReminderDialog(id = "") {
   elements.reminderWeekday.value = String(reminder?.weekday ?? 1);
   elements.reminderMonth.value = String(reminder?.schedule_month ?? 1);
   elements.reminderMonthday.value = String(reminder?.monthday ?? 1);
+  elements.reminderIntervalMonths.value = String(reminder?.interval_months ?? 3);
   elements.reminderEnabled.checked = reminder?.enabled !== false;
   elements.reminderError.textContent = "";
   updateReminderFields();
@@ -243,8 +281,11 @@ function openReminderDialog(id = "") {
 
 function updateReminderFields() {
   const type = elements.reminderType.value;
-  elements.onceTimeField.hidden = type !== "once";
-  elements.repeatTimeField.hidden = type === "once";
+  const usesAnchor = ["once", "interval_months"].includes(type);
+  elements.onceTimeField.hidden = !usesAnchor;
+  elements.onceTimeField.querySelector("span").textContent = type === "interval_months" ? "首次提醒时间" : "提醒时间";
+  elements.repeatTimeField.hidden = usesAnchor;
+  elements.intervalMonthsField.hidden = type !== "interval_months";
   elements.weekdayField.hidden = type !== "weekly";
   elements.monthField.hidden = type !== "yearly";
   elements.monthdayField.hidden = !["monthly", "yearly"].includes(type);
@@ -255,8 +296,8 @@ async function saveReminder(event) {
   const type = elements.reminderType.value;
   const submit = elements.reminderForm.querySelector('button[type="submit"]');
   const onceAt = elements.reminderOnceAt.value ? Math.floor(new Date(elements.reminderOnceAt.value).getTime() / 1000) : 0;
-  if (type === "once" && !onceAt) {
-    elements.reminderError.textContent = "请选择单次提醒时间";
+  if (["once", "interval_months"].includes(type) && !onceAt) {
+    elements.reminderError.textContent = type === "interval_months" ? "请选择首次提醒时间" : "请选择单次提醒时间";
     return;
   }
   submit.disabled = true;
@@ -275,6 +316,7 @@ async function saveReminder(event) {
         weekday: Number(elements.reminderWeekday.value),
         schedule_month: Number(elements.reminderMonth.value),
         monthday: Number(elements.reminderMonthday.value),
+        interval_months: Number(elements.reminderIntervalMonths.value),
         enabled: elements.reminderEnabled.checked,
       }),
     });
@@ -312,12 +354,16 @@ function reminderScheduleLabel(reminder) {
   if (reminder.schedule_type === "daily") return `每天 · ${reminder.schedule_time}`;
   if (reminder.schedule_type === "weekly") return `每周${"日一二三四五六"[reminder.weekday]} · ${reminder.schedule_time}`;
   if (reminder.schedule_type === "monthly") return `每月 ${reminder.monthday} 日 · ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "interval_months") return `每 ${reminder.interval_months} 个月 · 首次 ${formatDateTime(reminder.schedule_at)}`;
   return `每年 ${reminder.schedule_month} 月 ${reminder.monthday} 日 · ${reminder.schedule_time}`;
 }
 
 function render(data) {
   state.serverTime = data.server_time;
   state.telegramConfigured = Boolean(data.telegram_configured);
+  elements.globalTelegramStatus.textContent = state.telegramConfigured ? "Telegram 已连接" : "Telegram 未配置";
+  elements.globalTelegramStatus.classList.toggle("configured", state.telegramConfigured);
+  elements.globalTelegramTest.disabled = !state.telegramConfigured;
   state.nodes = new Map(data.nodes.map((node) => [node.node_id, node]));
   document.querySelector("#countTotal").textContent = data.summary.total;
   document.querySelector("#countOnline").textContent = data.summary.online;
@@ -345,6 +391,9 @@ function renderNode(node, serverTime) {
   const fragment = elements.template.content.cloneNode(true);
   const card = fragment.querySelector(".node-card");
   card.dataset.status = node.status;
+  const deleteButton = fragment.querySelector(".delete-node-button");
+  deleteButton.dataset.nodeId = node.node_id;
+  deleteButton.hidden = !["offline", "shutdown"].includes(node.status);
   text(fragment, ".node-name", node.name || node.node_id);
   text(fragment, ".node-location", [node.provider, node.location].filter(Boolean).join(" · ") || node.hostname || "未设置位置");
   text(fragment, ".status-pill", STATUS_LABELS[node.status] || node.status);
@@ -394,6 +443,23 @@ function renderNode(node, serverTime) {
   text(fragment, ".memo-preview", node.settings?.memo || (node.settings?.reminder_at ? `提醒：${formatDateTime(node.settings.reminder_at)}` : "可添加续费信息和提醒"));
 
   return fragment;
+}
+
+async function deleteOfflineNode(nodeId) {
+  const node = state.nodes.get(nodeId);
+  if (!node || !confirm(`确定从面板删除离线节点“${node.name || nodeId}”吗？`)) return;
+  try {
+    const response = await apiFetch("/api/v1/nodes/delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ node_id: nodeId }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "删除失败");
+    await refreshNodes();
+  } catch (error) {
+    alert(error.message || "删除失败");
+  }
 }
 
 function openNodeSettings(nodeId) {
@@ -463,6 +529,24 @@ async function testTelegram() {
   } finally {
     elements.telegramTest.disabled = !state.telegramConfigured;
     elements.telegramTest.textContent = "发送测试";
+  }
+}
+
+async function testGlobalTelegram() {
+  elements.globalTelegramTest.disabled = true;
+  elements.globalTelegramTest.textContent = "发送中…";
+  try {
+    const response = await apiFetch("/api/v1/telegram/test", { method: "POST" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "发送失败");
+    elements.globalTelegramStatus.textContent = "Telegram 测试成功";
+    elements.globalTelegramStatus.classList.add("configured");
+    alert("测试消息已发送到 Telegram");
+  } catch (error) {
+    alert(error.message || "Telegram 测试失败");
+  } finally {
+    elements.globalTelegramTest.disabled = !state.telegramConfigured;
+    elements.globalTelegramTest.textContent = "发送测试";
   }
 }
 
