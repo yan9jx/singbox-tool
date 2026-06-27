@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.6"
+SCRIPT_VERSION="v1.7"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -51,6 +51,38 @@ configure_china_time() {
   timezone="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
   synchronized="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
   echo "当前时区：${timezone:-未知}；自动对时：${synchronized:-未知}"
+}
+
+configure_bbr() {
+  local current available bbr_file="/etc/sysctl.d/99-xray-xhttp-bbr.conf"
+  current="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")"
+
+  echo
+  echo "当前 TCP 拥塞控制算法：$current"
+  if ! confirm_yes "是否安装 / 启用 BBR + FQ？"; then
+    echo "已跳过 BBR 设置。"
+    return
+  fi
+
+  modprobe tcp_bbr 2>/dev/null || true
+  available="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+  if ! grep -qw bbr <<<"$available"; then
+    echo "警告：当前内核不支持 BBR，已跳过，不影响 XHTTP 节点安装。"
+    return
+  fi
+
+  cat >"$bbr_file" <<EOF
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+
+  if sysctl -w net.core.default_qdisc=fq >/dev/null &&
+    sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null; then
+    echo "BBR + FQ 已启用：拥塞控制=$(sysctl -n net.ipv4.tcp_congestion_control)，队列=$(sysctl -n net.core.default_qdisc)"
+  else
+    rm -f "$bbr_file"
+    echo "警告：BBR + FQ 设置失败，已跳过，不影响 XHTTP 节点安装。"
+  fi
 }
 
 install_xray() {
@@ -272,6 +304,7 @@ EOF
 
 install_node() {
   install_deps
+  configure_bbr
   configure_china_time
   ensure_nginx_ready
   install_xray

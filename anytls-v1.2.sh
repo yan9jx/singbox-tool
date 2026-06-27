@@ -4,7 +4,7 @@
 # 如果 TCP/443 已被占用，会自动选择可用的 *443 备用端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.1"
+SCRIPT_VERSION="v1.2"
 INSTALL_DIR="/opt/anytls"
 BIN="$INSTALL_DIR/anytls-server"
 CONFIG_DIR="/etc/anytls"
@@ -47,6 +47,38 @@ configure_china_time() {
   timezone="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
   synchronized="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
   echo "当前时区：${timezone:-未知}；自动对时：${synchronized:-未知}"
+}
+
+configure_bbr() {
+  local current available bbr_file="/etc/sysctl.d/99-anytls-bbr.conf"
+  current="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")"
+
+  echo
+  echo "当前 TCP 拥塞控制算法：$current"
+  if ! confirm_yes "是否安装 / 启用 BBR + FQ？"; then
+    echo "已跳过 BBR 设置。"
+    return
+  fi
+
+  modprobe tcp_bbr 2>/dev/null || true
+  available="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+  if ! grep -qw bbr <<<"$available"; then
+    echo "警告：当前内核不支持 BBR，已跳过，不影响 AnyTLS 安装。"
+    return
+  fi
+
+  cat >"$bbr_file" <<EOF
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+
+  if sysctl -w net.core.default_qdisc=fq >/dev/null &&
+    sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null; then
+    echo "BBR + FQ 已启用：拥塞控制=$(sysctl -n net.ipv4.tcp_congestion_control)，队列=$(sysctl -n net.core.default_qdisc)"
+  else
+    rm -f "$bbr_file"
+    echo "警告：BBR + FQ 设置失败，已跳过，不影响 AnyTLS 安装。"
+  fi
 }
 
 urlencode() {
@@ -152,6 +184,7 @@ start_service() {
 
 install_node() {
   install_deps
+  configure_bbr
   configure_china_time
   install_anytls
   systemctl stop "$SERVICE_NAME" 2>/dev/null || true
