@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a101c">
+  <title>Ejectors · VPS 状态</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="返回状态首页">
+        <span class="brand-mark"><span></span></span>
+        <span>
+          <strong>EJECTORS</strong>
+          <small>INFRASTRUCTURE</small>
+        </span>
+      </a>
+      <div class="top-actions">
+        <span class="sync-state" id="syncState"><i></i><span>等待连接</span></span>
+        <button class="icon-button" id="refreshButton" title="立即刷新" aria-label="立即刷新">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-3M4 4v4h4M4 13a8.1 8.1 0 0 0 15.5 3M20 20v-4h-4"/></svg>
+        </button>
+        <button class="text-button" id="lockButton">锁定</button>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div>
+        <p class="eyebrow">GLOBAL OVERVIEW</p>
+        <h1>所有节点，<span>一眼看清。</span></h1>
+        <p class="hero-copy">状态、资源与服务运行情况会自动刷新。节点失联后保留最后数据，并显示最后在线时间。</p>
+      </div>
+      <a class="drive-card" id="driveLink" href="https://disk.ejectors.net" target="_blank" rel="noopener">
+        <div class="drive-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5h6l2 2h8v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Z"/><path d="m14.5 13.5 2 2 3.5-4"/></svg>
+        </div>
+        <div>
+          <small>CLOUD DRIVE</small>
+          <strong>打开我的云盘</strong>
+          <span>disk.ejectors.net</span>
+        </div>
+        <span class="arrow">↗</span>
+      </a>
+    </section>
+
+    <section class="summary-grid" aria-label="节点汇总">
+      <article class="summary-card">
+        <span class="summary-icon all">◎</span>
+        <div><small>节点总数</small><strong id="countTotal">—</strong></div>
+      </article>
+      <article class="summary-card">
+        <span class="summary-icon online">●</span>
+        <div><small>正常运行</small><strong id="countOnline">—</strong></div>
+      </article>
+      <article class="summary-card">
+        <span class="summary-icon warn">◆</span>
+        <div><small>异常告警</small><strong id="countDegraded">—</strong></div>
+      </article>
+      <article class="summary-card">
+        <span class="summary-icon offline">■</span>
+        <div><small>离线 / 关机</small><strong id="countOffline">—</strong></div>
+      </article>
+    </section>
+
+    <section class="node-section">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">LIVE NODES</p>
+          <h2>服务器状态</h2>
+        </div>
+        <span id="updatedAt">尚未刷新</span>
+      </div>
+      <div class="node-grid" id="nodeGrid">
+        <div class="empty-state">
+          <span class="loader"></span>
+          <strong>正在读取节点状态</strong>
+          <p>首次打开需要输入查看密码。</p>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <span>Ejectors Infrastructure</span>
+      <span>60 秒心跳 · 15 秒页面刷新</span>
+    </footer>
+  </main>
+
+  <dialog class="login-dialog" id="loginDialog">
+    <form method="dialog" id="loginForm">
+      <div class="login-mark"><span></span></div>
+      <p class="eyebrow">PRIVATE DASHBOARD</p>
+      <h2>查看 VPS 状态</h2>
+      <p>输入面板查看密码。密码只保存在当前浏览器会话中。</p>
+      <label>
+        <span>查看密码</span>
+        <input id="viewToken" type="password" autocomplete="current-password" required autofocus placeholder="请输入密码">
+      </label>
+      <p class="form-error" id="loginError" role="alert"></p>
+      <button class="primary-button" value="default" type="submit">进入状态面板</button>
+    </form>
+  </dialog>
+
+  <template id="nodeTemplate">
+    <article class="node-card">
+      <div class="node-head">
+        <div>
+          <div class="node-title-row">
+            <span class="status-dot"></span>
+            <h3 class="node-name"></h3>
+          </div>
+          <p class="node-location"></p>
+        </div>
+        <span class="status-pill"></span>
+      </div>
+
+      <div class="node-meta">
+        <span class="public-ip"></span>
+        <span class="uptime"></span>
+      </div>
+
+      <div class="metrics">
+        <div class="metric" data-metric="cpu">
+          <div><span>CPU</span><strong class="metric-value"></strong></div>
+          <div class="bar"><i></i></div>
+          <small class="metric-detail"></small>
+        </div>
+        <div class="metric" data-metric="memory">
+          <div><span>RAM</span><strong class="metric-value"></strong></div>
+          <div class="bar"><i></i></div>
+          <small class="metric-detail"></small>
+        </div>
+        <div class="metric" data-metric="disk">
+          <div><span>磁盘</span><strong class="metric-value"></strong></div>
+          <div class="bar"><i></i></div>
+          <small class="metric-detail"></small>
+        </div>
+        <div class="metric" data-metric="swap">
+          <div><span>SWAP</span><strong class="metric-value"></strong></div>
+          <div class="bar"><i></i></div>
+          <small class="metric-detail"></small>
+        </div>
+      </div>
+
+      <div class="network-row">
+        <div><small>实时下行</small><strong class="network-rx"></strong></div>
+        <div><small>实时上行</small><strong class="network-tx"></strong></div>
+        <div><small>累计流量</small><strong class="network-total"></strong></div>
+      </div>
+
+      <div class="detail-block services-block">
+        <div class="detail-heading"><span>服务</span><small class="last-seen"></small></div>
+        <div class="service-list"></div>
+      </div>
+
+      <details class="ports-details">
+        <summary><span>监听端口</span><small class="port-count"></small></summary>
+        <div class="port-list"></div>
+      </details>
+    </article>
+  </template>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
