@@ -58,6 +58,14 @@ curl -fsSL https://status.example.com/agent.sh -o /tmp/ejectors-agent.sh
 sudo bash /tmp/ejectors-agent.sh
 ```
 
+已安装旧版 Agent 的 VPS 重新运行一次上述安装命令即可升级并安装自动更新定时器；现有配置会自动复用，不再重复询问。此后每天北京时间 04:00 检查 GitHub，仅在远程版本较新时更新并重启 Agent。
+
+查看自动更新时间：
+
+```bash
+systemctl list-timers ejectors-vps-agent-update.timer --no-pager
+```
+
 卸载：
 
 ```bash
