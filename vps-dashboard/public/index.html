@@ -76,6 +76,7 @@
         <div class="reminder-header-actions">
           <span class="telegram-status" id="globalTelegramStatus">检测中</span>
           <span class="telegram-coverage" id="telegramCoverage" title="统计全部 VPS 和全部全局备忘的 Telegram 开启情况">Telegram 通知服务：—/—</span>
+          <button class="secondary-button" id="telegramRepeatButton" type="button">提醒 1 次</button>
           <button class="secondary-button" id="globalTelegramTest" type="button">测试 Telegram</button>
           <button class="add-reminder-button" id="addReminderButton" type="button">＋ 新建提醒</button>
         </div>
@@ -235,6 +236,11 @@
           <input id="reminderAt" type="datetime-local">
           <small>到点发送一次 Telegram，修改时间后可重新提醒。</small>
         </label>
+        <label>
+          <span>持续提醒截止时间（可选）</span>
+          <input id="nodeReminderUntil" type="datetime-local">
+          <small>填写后从单次提醒时间开始，每小时提醒一次直到截止。</small>
+        </label>
       </div>
 
       <label class="memo-label">
@@ -292,6 +298,33 @@
     </form>
   </dialog>
 
+  <dialog class="settings-dialog compact-dialog" id="telegramRepeatDialog">
+    <form id="telegramRepeatForm">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">TELEGRAM REPEAT</p>
+          <h2>提醒次数</h2>
+        </div>
+        <button type="button" class="dialog-close" id="telegramRepeatClose" aria-label="关闭">×</button>
+      </div>
+      <div class="form-grid">
+        <label>
+          <span>发送次数</span>
+          <input id="telegramRepeatCount" type="number" min="1" max="10" value="1">
+        </label>
+        <label>
+          <span>间隔分钟</span>
+          <input id="telegramRepeatInterval" type="number" min="1" max="1440" value="5">
+        </label>
+      </div>
+      <small class="dialog-note">第 1 次立即发送，后续按所选分钟间隔重复。</small>
+      <p class="form-error" id="telegramRepeatError" role="alert"></p>
+      <div class="dialog-actions profile-actions">
+        <button type="submit" class="primary-button">保存提醒次数</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog class="settings-dialog reminder-dialog" id="reminderDialog">
     <form id="reminderForm">
       <div class="dialog-head">
@@ -322,6 +355,7 @@
             <option value="monthly">每月</option>
             <option value="yearly">每年</option>
             <option value="interval_months">每 N 个月</option>
+            <option value="hourly_until">持续提醒（每小时）</option>
           </select>
         </label>
         <label id="onceTimeField">
@@ -356,6 +390,10 @@
         <label id="intervalMonthsField" hidden>
           <span>间隔月数</span>
           <input id="reminderIntervalMonths" type="number" min="1" max="60" value="3">
+        </label>
+        <label id="reminderEndField" hidden>
+          <span>结束时间</span>
+          <input id="reminderEndAt" type="datetime-local">
         </label>
       </div>
 
