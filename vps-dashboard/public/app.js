@@ -27,6 +27,7 @@ const elements = {
   settingsNodeName: document.querySelector("#settingsNodeName"),
   expiryDate: document.querySelector("#expiryDate"),
   reminderAt: document.querySelector("#reminderAt"),
+  nodeReminderUntil: document.querySelector("#nodeReminderUntil"),
   nodeMemo: document.querySelector("#nodeMemo"),
   memoCount: document.querySelector("#memoCount"),
   telegramEnabled: document.querySelector("#telegramEnabled"),
@@ -59,6 +60,8 @@ const elements = {
   monthdayField: document.querySelector("#monthdayField"),
   intervalMonthsField: document.querySelector("#intervalMonthsField"),
   reminderIntervalMonths: document.querySelector("#reminderIntervalMonths"),
+  reminderEndField: document.querySelector("#reminderEndField"),
+  reminderEndAt: document.querySelector("#reminderEndAt"),
   globalTelegramStatus: document.querySelector("#globalTelegramStatus"),
   telegramCoverage: document.querySelector("#telegramCoverage"),
   globalTelegramTest: document.querySelector("#globalTelegramTest"),
@@ -78,6 +81,13 @@ const elements = {
   profileNodeId: document.querySelector("#profileNodeId"),
   profileNodeName: document.querySelector("#profileNodeName"),
   profileError: document.querySelector("#profileError"),
+  telegramRepeatButton: document.querySelector("#telegramRepeatButton"),
+  telegramRepeatDialog: document.querySelector("#telegramRepeatDialog"),
+  telegramRepeatForm: document.querySelector("#telegramRepeatForm"),
+  telegramRepeatClose: document.querySelector("#telegramRepeatClose"),
+  telegramRepeatCount: document.querySelector("#telegramRepeatCount"),
+  telegramRepeatInterval: document.querySelector("#telegramRepeatInterval"),
+  telegramRepeatError: document.querySelector("#telegramRepeatError"),
 };
 
 const CURRENT_AGENT_VERSION = "1.1.0";
@@ -157,6 +167,7 @@ function bindEvents() {
   });
   elements.clearReminder.addEventListener("click", () => {
     elements.reminderAt.value = "";
+    elements.nodeReminderUntil.value = "";
   });
   elements.telegramTest.addEventListener("click", testTelegram);
   elements.settingsForm.addEventListener("submit", saveNodeSettings);
@@ -176,6 +187,12 @@ function bindEvents() {
   elements.exportConfig.addEventListener("click", exportDashboardConfig);
   elements.importConfig.addEventListener("click", () => elements.importConfigFile.click());
   elements.importConfigFile.addEventListener("change", importDashboardConfig);
+  elements.telegramRepeatButton.addEventListener("click", () => elements.telegramRepeatDialog.showModal());
+  elements.telegramRepeatClose.addEventListener("click", () => elements.telegramRepeatDialog.close());
+  elements.telegramRepeatDialog.addEventListener("click", (event) => {
+    if (event.target === elements.telegramRepeatDialog) elements.telegramRepeatDialog.close();
+  });
+  elements.telegramRepeatForm.addEventListener("submit", saveTelegramRepeatSettings);
   elements.grid.addEventListener("dragstart", handleNodeDragStart);
   elements.grid.addEventListener("dragover", handleNodeDragOver);
   elements.grid.addEventListener("drop", handleNodeDrop);
@@ -243,6 +260,11 @@ async function refreshDashboardSettings() {
   if (!response.ok) throw new Error("面板设置暂时不可用");
   const data = await response.json();
   elements.autoDeleteDays.value = String(data.settings?.auto_delete_offline_days || 0);
+  const repeatCount = Number(data.settings?.telegram_repeat_count || 1);
+  const repeatInterval = Number(data.settings?.telegram_repeat_interval_minutes || 5);
+  elements.telegramRepeatCount.value = String(repeatCount);
+  elements.telegramRepeatInterval.value = String(repeatInterval);
+  elements.telegramRepeatButton.textContent = `提醒 ${repeatCount} 次 / ${repeatInterval} 分钟`;
 }
 
 async function saveAutoDeleteSetting() {
@@ -260,6 +282,33 @@ async function saveAutoDeleteSetting() {
     await refreshDashboardSettings();
   } finally {
     elements.autoDeleteDays.disabled = false;
+  }
+}
+
+async function saveTelegramRepeatSettings(event) {
+  event.preventDefault();
+  const submit = elements.telegramRepeatForm.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  submit.textContent = "保存中…";
+  elements.telegramRepeatError.textContent = "";
+  try {
+    const response = await apiFetch("/api/v1/dashboard-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        telegram_repeat_count: Number(elements.telegramRepeatCount.value),
+        telegram_repeat_interval_minutes: Number(elements.telegramRepeatInterval.value),
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "保存失败");
+    elements.telegramRepeatDialog.close();
+    await refreshDashboardSettings();
+  } catch (error) {
+    elements.telegramRepeatError.textContent = error.message || "保存失败";
+  } finally {
+    submit.disabled = false;
+    submit.textContent = "保存提醒次数";
   }
 }
 
@@ -322,6 +371,7 @@ function openReminderDialog(id = "") {
   elements.reminderContent.value = reminder?.content || "";
   elements.reminderType.value = reminder?.schedule_type || "once";
   elements.reminderOnceAt.value = reminder?.schedule_at ? toDateTimeLocal(reminder.schedule_at) : "";
+  elements.reminderEndAt.value = reminder?.schedule_end_at ? toDateTimeLocal(reminder.schedule_end_at) : "";
   elements.reminderRepeatTime.value = reminder?.schedule_time || "09:00";
   elements.reminderWeekday.value = String(reminder?.weekday ?? 1);
   elements.reminderMonth.value = String(reminder?.schedule_month ?? 1);
@@ -336,11 +386,14 @@ function openReminderDialog(id = "") {
 
 function updateReminderFields() {
   const type = elements.reminderType.value;
-  const usesAnchor = ["once", "interval_months"].includes(type);
+  const usesAnchor = ["once", "interval_months", "hourly_until"].includes(type);
   elements.onceTimeField.hidden = !usesAnchor;
-  elements.onceTimeField.querySelector("span").textContent = type === "interval_months" ? "首次提醒时间" : "提醒时间";
+  elements.onceTimeField.querySelector("span").textContent = type === "interval_months"
+    ? "首次提醒时间"
+    : type === "hourly_until" ? "开始时间" : "提醒时间";
   elements.repeatTimeField.hidden = usesAnchor;
   elements.intervalMonthsField.hidden = type !== "interval_months";
+  elements.reminderEndField.hidden = type !== "hourly_until";
   elements.weekdayField.hidden = type !== "weekly";
   elements.monthField.hidden = type !== "yearly";
   elements.monthdayField.hidden = !["monthly", "yearly"].includes(type);
@@ -351,8 +404,13 @@ async function saveReminder(event) {
   const type = elements.reminderType.value;
   const submit = elements.reminderForm.querySelector('button[type="submit"]');
   const onceAt = elements.reminderOnceAt.value ? Math.floor(new Date(elements.reminderOnceAt.value).getTime() / 1000) : 0;
-  if (["once", "interval_months"].includes(type) && !onceAt) {
+  const endAt = elements.reminderEndAt.value ? Math.floor(new Date(elements.reminderEndAt.value).getTime() / 1000) : 0;
+  if (["once", "interval_months", "hourly_until"].includes(type) && !onceAt) {
     elements.reminderError.textContent = type === "interval_months" ? "请选择首次提醒时间" : "请选择单次提醒时间";
+    return;
+  }
+  if (type === "hourly_until" && endAt <= onceAt) {
+    elements.reminderError.textContent = "结束时间必须晚于开始时间";
     return;
   }
   submit.disabled = true;
@@ -367,6 +425,7 @@ async function saveReminder(event) {
         content: elements.reminderContent.value.trim(),
         schedule_type: type,
         schedule_at: onceAt,
+        schedule_end_at: endAt,
         schedule_time: elements.reminderRepeatTime.value,
         weekday: Number(elements.reminderWeekday.value),
         schedule_month: Number(elements.reminderMonth.value),
@@ -410,6 +469,7 @@ function reminderScheduleLabel(reminder) {
   if (reminder.schedule_type === "weekly") return `每周${"日一二三四五六"[reminder.weekday]} · ${reminder.schedule_time}`;
   if (reminder.schedule_type === "monthly") return `每月 ${reminder.monthday} 日 · ${reminder.schedule_time}`;
   if (reminder.schedule_type === "interval_months") return `每 ${reminder.interval_months} 个月 · 首次 ${formatDateTime(reminder.schedule_at)}`;
+  if (reminder.schedule_type === "hourly_until") return `每小时 · ${formatDateTime(reminder.schedule_at)} 至 ${formatDateTime(reminder.schedule_end_at)}`;
   return `每年 ${reminder.schedule_month} 月 ${reminder.monthday} 日 · ${reminder.schedule_time}`;
 }
 
@@ -554,6 +614,7 @@ function openNodeSettings(nodeId) {
   elements.settingsNodeName.textContent = node.name || node.node_id;
   elements.expiryDate.value = settings.expiry_date || "";
   elements.reminderAt.value = settings.reminder_at ? toDateTimeLocal(settings.reminder_at) : "";
+  elements.nodeReminderUntil.value = settings.reminder_repeat_until ? toDateTimeLocal(settings.reminder_repeat_until) : "";
   elements.nodeMemo.value = settings.memo || "";
   elements.memoCount.textContent = elements.nodeMemo.value.length;
   elements.telegramEnabled.checked = settings.telegram_enabled !== false;
@@ -570,6 +631,13 @@ async function saveNodeSettings(event) {
   const reminderAt = elements.reminderAt.value
     ? Math.floor(new Date(elements.reminderAt.value).getTime() / 1000)
     : 0;
+  const reminderRepeatUntil = elements.nodeReminderUntil.value
+    ? Math.floor(new Date(elements.nodeReminderUntil.value).getTime() / 1000)
+    : 0;
+  if (reminderRepeatUntil && (!reminderAt || reminderRepeatUntil <= reminderAt)) {
+    elements.settingsError.textContent = "持续提醒截止时间必须晚于单次提醒时间";
+    return;
+  }
   submit.disabled = true;
   submit.textContent = "保存中…";
   elements.settingsError.textContent = "";
@@ -583,6 +651,7 @@ async function saveNodeSettings(event) {
         expiry_date: elements.expiryDate.value,
         memo: elements.nodeMemo.value.trim(),
         reminder_at: reminderAt,
+        reminder_repeat_until: reminderRepeatUntil,
         telegram_enabled: elements.telegramEnabled.checked,
       }),
     });
