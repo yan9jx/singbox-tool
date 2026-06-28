@@ -358,7 +358,8 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now ejectors-vps-agent.service
+systemctl enable ejectors-vps-agent.service
+systemctl restart ejectors-vps-agent.service
 systemctl enable --now ejectors-vps-agent-update.timer
 sleep 2
 systemctl --no-pager --full status ejectors-vps-agent.service || true
