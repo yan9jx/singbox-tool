@@ -243,6 +243,8 @@ footer { display: flex; justify-content: space-between; padding: 24px 0 38px; bo
   border: 1px solid rgba(255,255,255,.1); border-radius: 24px; color: var(--text); background: #101827;
   box-shadow: 0 30px 100px rgba(0,0,0,.6);
 }
+.compact-dialog { width: min(480px, calc(100% - 28px)); }
+.dialog-note { display: block; margin-top: 10px; color: #647086; font-size: 9px; }
 .settings-dialog::backdrop { background: rgba(4,8,14,.82); backdrop-filter: blur(8px); }
 .settings-dialog form { padding: 30px; }
 .dialog-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 26px; }
