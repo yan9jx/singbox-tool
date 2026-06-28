@@ -434,9 +434,19 @@ function render(data) {
     return;
   }
 
-  const grouped = data.nodes.some((node) => node.settings?.group);
+  const offlineNodes = data.nodes.filter((node) => ["offline", "shutdown"].includes(node.status));
+  const activeNodes = data.nodes.filter((node) => !["offline", "shutdown"].includes(node.status));
+  if (offlineNodes.length) {
+    const heading = document.createElement("h3");
+    heading.className = "node-group-title offline-group-title";
+    heading.textContent = "离线 / 关机";
+    elements.grid.appendChild(heading);
+    for (const node of offlineNodes) elements.grid.appendChild(renderNode(node, data.server_time));
+  }
+
+  const grouped = activeNodes.some((node) => node.settings?.group);
   let lastGroup = null;
-  for (const node of data.nodes) {
+  for (const node of activeNodes) {
     const group = node.settings?.group || "未分组";
     if (grouped && group !== lastGroup) {
       const heading = document.createElement("h3");
