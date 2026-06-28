@@ -16,6 +16,11 @@ export default {
         return json({ ok: true, service: "ejectors-vps-dashboard" });
       }
 
+      if (requiresViewAuthorization(url.pathname)) {
+        const authError = await enforceViewAuthorization(request, env);
+        if (authError) return authError;
+      }
+
       if (url.pathname === "/api/v1/session" && request.method === "POST") {
         if (!isViewAuthorized(request, env)) return unauthorized("查看密码不正确");
         return json({ ok: true });
@@ -333,6 +338,46 @@ export class VpsStatusStore {
       record.settings = existing?.settings || defaultSettings();
       await this.ctx.storage.put(`node:${nodeId}`, record);
       return json({ ok: true, node_id: nodeId, state: record.agent_state, server_time: record.last_seen });
+    }
+
+    if (url.pathname === "/auth/check" && request.method === "GET") {
+      const id = url.searchParams.get("id") || "unknown";
+      const key = `auth:${id}`;
+      const now = Math.floor(Date.now() / 1000);
+      const record = await this.ctx.storage.get(key);
+      if (!record) return json({ ok: true, blocked: false, has_failures: false });
+      if (record.blocked_until > now) {
+        return json({ ok: true, blocked: true, retry_after: record.blocked_until - now, has_failures: true });
+      }
+      const attempts = (record.attempts || []).filter((time) => now - time < 600);
+      if (!attempts.length) {
+        await this.ctx.storage.delete(key);
+        return json({ ok: true, blocked: false, has_failures: false });
+      }
+      if (attempts.length !== (record.attempts || []).length) await this.ctx.storage.put(key, { attempts, blocked_until: 0 });
+      return json({ ok: true, blocked: false, has_failures: true, attempts: attempts.length });
+    }
+
+    if (url.pathname === "/auth/fail" && request.method === "POST") {
+      const input = await request.json();
+      const id = String(input.id || "unknown");
+      const key = `auth:${id}`;
+      const now = Math.floor(Date.now() / 1000);
+      const record = await this.ctx.storage.get(key) || { attempts: [], blocked_until: 0 };
+      if (record.blocked_until > now) return json({ ok: true, blocked: true, retry_after: record.blocked_until - now });
+      const attempts = [...(record.attempts || []).filter((time) => now - time < 600), now];
+      if (attempts.length >= 5) {
+        await this.ctx.storage.put(key, { attempts: [], blocked_until: now + 600 });
+        return json({ ok: true, blocked: true, retry_after: 600, remaining_attempts: 0 });
+      }
+      await this.ctx.storage.put(key, { attempts, blocked_until: 0 });
+      return json({ ok: true, blocked: false, remaining_attempts: 5 - attempts.length });
+    }
+
+    if (url.pathname === "/auth/success" && request.method === "POST") {
+      const input = await request.json();
+      await this.ctx.storage.delete(`auth:${String(input.id || "unknown")}`);
+      return json({ ok: true });
     }
 
     if (url.pathname === "/settings" && request.method === "POST") {
@@ -864,9 +909,54 @@ function isIngestAuthorized(request, env) {
   return env.INGEST_TOKEN && safeEqual(header, `Bearer ${env.INGEST_TOKEN}`);
 }
 
+function requiresViewAuthorization(pathname) {
+  return pathname.startsWith("/api/v1/")
+    && !["/api/v1/health", "/api/v1/heartbeat", "/api/v1/shutdown"].includes(pathname);
+}
+
+async function enforceViewAuthorization(request, env) {
+  const ip = request.headers.get("cf-connecting-ip") || "local";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ip));
+  const id = [...new Uint8Array(digest)].slice(0, 12).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const store = statusStore(env);
+  const check = await store.fetch(new Request(`https://store/auth/check?id=${id}`));
+  const state = await check.json();
+  if (state.blocked) return rateLimited(state.retry_after || 600);
+
+  if (isViewAuthorized(request, env)) {
+    if (state.has_failures) {
+      await store.fetch(new Request("https://store/auth/success", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id }),
+      }));
+    }
+    return null;
+  }
+
+  const failed = await store.fetch(new Request("https://store/auth/fail", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  }));
+  const result = await failed.json();
+  if (result.blocked) return rateLimited(result.retry_after || 600);
+  return json({ ok: false, error: "查看密码不正确", remaining_attempts: result.remaining_attempts }, 401);
+}
+
 function isViewAuthorized(request, env) {
   const token = request.headers.get("x-view-token") || "";
   return env.VIEW_TOKEN && safeEqual(token, encodeURIComponent(env.VIEW_TOKEN));
+}
+
+function rateLimited(seconds) {
+  return new Response(JSON.stringify({ ok: false, error: "登录尝试过多，请稍后重试", retry_after: seconds }), {
+    status: 429,
+    headers: {
+      ...JSON_HEADERS,
+      "retry-after": String(seconds),
+    },
+  });
 }
 
 function safeEqual(left, right) {
