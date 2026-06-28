@@ -51,6 +51,12 @@ npx wrangler secret put TELEGRAM_CHAT_ID
 - 备份不包含查看密码、上报密钥、Cloudflare API Token、Telegram Token，也不包含实时 CPU、RAM 和流量数据。
 - “恢复配置”只恢复当前已上报节点的设置；尚不存在的节点会跳过，等该 VPS 上报后可再次导入。
 
+## 安全保护
+
+- 所有查看接口按来源 IP 统计失败次数：10 分钟内连续输错 5 次，锁定 10 分钟。
+- Agent 心跳和关机上报继续使用独立上报密钥，不受查看密码限速影响。
+- 静态页面启用 CSP、禁止 iframe 嵌套、MIME 嗅探、外部引用和搜索引擎收录等安全响应头。
+
 ## VPS 安装
 
 ```bash
