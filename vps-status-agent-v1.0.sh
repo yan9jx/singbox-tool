@@ -4,6 +4,9 @@ set -euo pipefail
 APP="/usr/local/bin/ejectors-vps-agent"
 CONF="/etc/ejectors-vps-agent.conf"
 SERVICE="/etc/systemd/system/ejectors-vps-agent.service"
+UPDATE_APP="/usr/local/sbin/ejectors-vps-agent-update"
+UPDATE_SERVICE="/etc/systemd/system/ejectors-vps-agent-update.service"
+UPDATE_TIMER="/etc/systemd/system/ejectors-vps-agent-update.timer"
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "请使用 root 运行：sudo bash $0"
@@ -14,19 +17,20 @@ action="${1:-install}"
 
 case "$action" in
   uninstall)
-    systemctl disable --now ejectors-vps-agent.service 2>/dev/null || true
-    rm -f "$SERVICE" "$APP" "$CONF" /var/lib/ejectors-vps-agent.json
+    systemctl disable --now ejectors-vps-agent.service ejectors-vps-agent-update.timer 2>/dev/null || true
+    rm -f "$SERVICE" "$UPDATE_SERVICE" "$UPDATE_TIMER" "$UPDATE_APP" "$APP" "$CONF" /var/lib/ejectors-vps-agent.json
     systemctl daemon-reload
     echo "VPS 状态上报已卸载。面板会在约 150 秒后显示离线。"
     exit 0
     ;;
   status)
     systemctl status ejectors-vps-agent.service --no-pager
+    systemctl status ejectors-vps-agent-update.timer --no-pager || true
     exit $?
     ;;
-  install) ;;
+  install|update) ;;
   *)
-    echo "用法：$0 [install|uninstall|status]"
+    echo "用法：$0 [install|update|uninstall|status]"
     exit 1
     ;;
 esac
@@ -36,37 +40,43 @@ command -v python3 >/dev/null 2>&1 || {
   exit 1
 }
 
-default_url="${DASHBOARD_URL:-}"
-default_id="$(hostname | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-' | cut -c1-64)"
-
-if [[ -n "$default_url" ]]; then
-  read -rp "面板地址 [$default_url]: " input_url
-  dashboard_url="${input_url:-$default_url}"
+if [[ -f "$CONF" ]]; then
+  read_conf_value() {
+    sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$CONF" | head -n1
+  }
+  dashboard_url="$(read_conf_value DASHBOARD_URL)"
+  ingest_token="$(read_conf_value INGEST_TOKEN)"
+  node_id="$(read_conf_value NODE_ID)"
+  node_name="$(read_conf_value NODE_NAME)"
+  provider="$(read_conf_value PROVIDER)"
+  location="$(read_conf_value LOCATION)"
+  node_name="${node_name:-$(hostname)}"
+  [[ -n "$dashboard_url" && -n "$ingest_token" && -n "$node_id" ]] || { echo "现有配置不完整，请先修复 $CONF。"; exit 1; }
+  echo "检测到现有配置，将保留面板地址、密钥和节点信息。"
 else
-  read -rp "面板地址（例如 https://status.example.com）: " dashboard_url
-fi
-dashboard_url="${dashboard_url%/}"
-[[ "$dashboard_url" =~ ^https?://[^[:space:]]+$ ]] || { echo "面板地址格式错误。"; exit 1; }
+  [[ "$action" != "update" ]] || { echo "未找到现有配置，无法自动更新。"; exit 1; }
+  default_url="${DASHBOARD_URL:-}"
+  default_id="$(hostname | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-' | cut -c1-64)"
+  if [[ -n "$default_url" ]]; then
+    read -rp "面板地址 [$default_url]: " input_url
+    dashboard_url="${input_url:-$default_url}"
+  else
+    read -rp "面板地址（例如 https://status.example.com）: " dashboard_url
+  fi
+  dashboard_url="${dashboard_url%/}"
+  [[ "$dashboard_url" =~ ^https?://[^[:space:]]+$ ]] || { echo "面板地址格式错误。"; exit 1; }
+  if [[ -n "${INGEST_TOKEN:-}" ]]; then ingest_token="$INGEST_TOKEN"; else read -rsp "上报密钥: " ingest_token; echo; fi
+  [[ -n "$ingest_token" ]] || { echo "上报密钥不能为空。"; exit 1; }
+  read -rp "节点 ID [$default_id]: " input_id
+  node_id="${input_id:-$default_id}"
+  [[ "$node_id" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]] || { echo "节点 ID 格式错误。"; exit 1; }
+  read -rp "显示名称 [$(hostname)]: " input_name
+  node_name="${input_name:-$(hostname)}"
+  read -rp "服务商（可留空）: " provider
+  read -rp "地区（可留空）: " location
 
-if [[ -n "${INGEST_TOKEN:-}" ]]; then
-  ingest_token="$INGEST_TOKEN"
-else
-  read -rsp "上报密钥: " ingest_token
-  echo
-fi
-[[ -n "$ingest_token" ]] || { echo "上报密钥不能为空。"; exit 1; }
-
-read -rp "节点 ID [$default_id]: " input_id
-node_id="${input_id:-$default_id}"
-[[ "$node_id" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]] || { echo "节点 ID 格式错误。"; exit 1; }
-
-read -rp "显示名称 [$(hostname)]: " input_name
-node_name="${input_name:-$(hostname)}"
-read -rp "服务商（可留空）: " provider
-read -rp "地区（可留空）: " location
-
-install -d -m 700 /var/lib/ejectors-vps-agent
-cat > "$CONF" <<EOF
+  install -d -m 700 /var/lib/ejectors-vps-agent
+  cat > "$CONF" <<EOF
 DASHBOARD_URL='$dashboard_url'
 INGEST_TOKEN='$ingest_token'
 NODE_ID='$node_id'
@@ -74,13 +84,16 @@ NODE_NAME='$node_name'
 PROVIDER='$provider'
 LOCATION='$location'
 EOF
-chmod 600 "$CONF"
+  chmod 600 "$CONF"
+fi
+
+install -d -m 700 /var/lib/ejectors-vps-agent
 
 cat > "$APP" <<'PY'
 #!/usr/bin/env python3
 import argparse, json, os, platform, re, shutil, socket, subprocess, time, urllib.request
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 
@@ -252,7 +265,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--shutdown", action="store_true")
+    parser.add_argument("--version", action="store_true")
     args = parser.parse_args()
+    if args.version:
+        print(VERSION)
+        return
     conf = read_conf()
     if args.shutdown:
         payload = {"node_id": conf["NODE_ID"], "name": conf["NODE_NAME"], "provider": conf.get("PROVIDER", ""), "location": conf.get("LOCATION", ""), "agent_version": VERSION}
@@ -270,6 +287,30 @@ def main():
 if __name__ == "__main__": main()
 PY
 chmod 755 "$APP"
+
+cat > "$UPDATE_APP" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+APP="/usr/local/bin/ejectors-vps-agent"
+URL="https://raw.githubusercontent.com/yan9jx/singbox-tool/main/vps-status-agent-v1.0.sh"
+tmp="$(mktemp /tmp/ejectors-agent-update.XXXXXX.sh)"
+trap 'rm -f "$tmp"' EXIT
+python3 - "$URL?ts=$(date +%s)" "$tmp" <<'PY'
+import sys, urllib.request
+req = urllib.request.Request(sys.argv[1], headers={"User-Agent": "ejectors-vps-agent-updater"})
+with urllib.request.urlopen(req, timeout=30) as response, open(sys.argv[2], "wb") as output:
+    output.write(response.read())
+PY
+current="$("$APP" --version 2>/dev/null || echo 0)"
+remote="$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' "$tmp" | head -n1)"
+[[ -n "$remote" ]] || { echo "无法读取远程版本"; exit 1; }
+[[ "$current" != "$remote" ]] || { echo "Agent 已是最新版：$current"; exit 0; }
+newest="$(printf '%s\n%s\n' "$current" "$remote" | sort -V | tail -n1)"
+[[ "$newest" == "$remote" ]] || { echo "远程版本不高于当前版本：$current"; exit 0; }
+echo "更新 Agent：$current -> $remote"
+bash "$tmp" update
+EOF
+chmod 755 "$UPDATE_APP"
 
 cat > "$SERVICE" <<EOF
 [Unit]
@@ -292,10 +333,36 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
+cat > "$UPDATE_SERVICE" <<EOF
+[Unit]
+Description=Ejectors VPS Agent Auto Update
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$UPDATE_APP
+EOF
+
+cat > "$UPDATE_TIMER" <<'EOF'
+[Unit]
+Description=Check Ejectors VPS Agent updates daily
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 Asia/Shanghai
+Persistent=true
+Unit=ejectors-vps-agent-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
 systemctl enable --now ejectors-vps-agent.service
+systemctl enable --now ejectors-vps-agent-update.timer
 sleep 2
 systemctl --no-pager --full status ejectors-vps-agent.service || true
 echo
 echo "安装完成。节点通常会在 10 秒内出现在面板。"
+echo "自动更新：每天北京时间 04:00 检查。"
 echo "卸载命令：sudo bash $0 uninstall"
