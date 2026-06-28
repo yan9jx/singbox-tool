@@ -110,7 +110,11 @@ function bindEvents() {
     button.textContent = "验证中…";
     try {
       const response = await apiFetch("/api/v1/session", { method: "POST" }, token);
-      if (!response.ok) throw new Error("查看密码不正确");
+      const result = await response.json();
+      if (!response.ok) {
+        const suffix = result.remaining_attempts > 0 ? `（还可尝试 ${result.remaining_attempts} 次）` : "";
+        throw new Error(`${result.error || "查看密码不正确"}${suffix}`);
+      }
       state.viewToken = token;
       sessionStorage.setItem("ejectors_view_token", token);
       elements.dialog.close();
