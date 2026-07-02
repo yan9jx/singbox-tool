@@ -22,62 +22,62 @@ export default {
       }
 
       if (url.pathname === "/api/v1/session" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("查看密码不正确");
+        if (!isViewAuthorized(request, env)) return unauthorized("???????");
         return json({ ok: true });
       }
 
       if (url.pathname === "/api/v1/nodes" && request.method === "GET") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return statusStore(env).fetch(new Request("https://store/nodes"));
       }
 
       if (url.pathname === "/api/v1/node-settings" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return updateNodeSettings(request, env);
       }
 
       if (url.pathname === "/api/v1/node-profile" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return updateNodeProfile(request, env);
       }
 
       if (url.pathname === "/api/v1/reminders" && request.method === "GET") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return statusStore(env).fetch(new Request("https://store/global-reminders"));
       }
 
       if (url.pathname === "/api/v1/reminders" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return saveGlobalReminder(request, env);
       }
 
       if (url.pathname === "/api/v1/reminders/delete" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return mutateGlobalReminder(request, env, "delete");
       }
 
       if (url.pathname === "/api/v1/reminders/toggle" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return mutateGlobalReminder(request, env, "toggle");
       }
 
       if (url.pathname === "/api/v1/dashboard-settings" && request.method === "GET") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return statusStore(env).fetch(new Request("https://store/dashboard-settings"));
       }
 
       if (url.pathname === "/api/v1/dashboard-settings" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return saveDashboardSettings(request, env);
       }
 
       if (url.pathname === "/api/v1/nodes/delete" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return deleteOfflineNode(request, env);
       }
 
       if (url.pathname === "/api/v1/nodes/order" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return statusStore(env).fetch(new Request("https://store/nodes/order", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -86,12 +86,12 @@ export default {
       }
 
       if (url.pathname === "/api/v1/config/export" && request.method === "GET") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return statusStore(env).fetch(new Request("https://store/config/export"));
       }
 
       if (url.pathname === "/api/v1/config/import" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
         return statusStore(env).fetch(new Request("https://store/config/import", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -100,30 +100,30 @@ export default {
       }
 
       if (url.pathname === "/api/v1/telegram/test" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
-        if (!telegramConfigured(env)) return json({ ok: false, error: "Telegram 尚未配置" }, 400);
-        await sendTelegram(env, "✅ VPS 状态面板 Telegram 提醒连接成功");
+        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!telegramConfigured(env)) return json({ ok: false, error: "Telegram ????" }, 400);
+        await sendTelegram(env, "? VPS ???? Telegram ??????");
         return json({ ok: true });
       }
 
       if (url.pathname === "/api/v1/heartbeat" && request.method === "POST") {
-        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
+        if (!isIngestAuthorized(request, env)) return unauthorized("???????");
         return receiveHeartbeat(request, env, "online");
       }
 
       if (url.pathname === "/api/v1/shutdown" && request.method === "POST") {
-        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
+        if (!isIngestAuthorized(request, env)) return unauthorized("???????");
         return receiveHeartbeat(request, env, "shutdown");
       }
 
       if (url.pathname.startsWith("/api/")) {
-        return json({ ok: false, error: "接口不存在" }, 404);
+        return json({ ok: false, error: "?????" }, 404);
       }
 
       return env.ASSETS.fetch(request);
     } catch (error) {
       console.error(error);
-      return json({ ok: false, error: "服务器内部错误" }, 500);
+      return json({ ok: false, error: "???????" }, 500);
     }
   },
 
@@ -137,18 +137,18 @@ export default {
 async function receiveHeartbeat(request, env, forcedState) {
   const contentLength = Number(request.headers.get("content-length") || 0);
   if (contentLength > MAX_BODY_BYTES) {
-    return json({ ok: false, error: "上报数据过大" }, 413);
+    return json({ ok: false, error: "??????" }, 413);
   }
 
   let input;
   try {
     input = await request.json();
   } catch {
-    return json({ ok: false, error: "JSON 格式错误" }, 400);
+    return json({ ok: false, error: "JSON ????" }, 400);
   }
 
   if (!input || typeof input !== "object" || !NODE_ID_PATTERN.test(input.node_id || "")) {
-    return json({ ok: false, error: "node_id 格式错误" }, 400);
+    return json({ ok: false, error: "node_id ????" }, 400);
   }
 
   const now = Math.floor(Date.now() / 1000);
@@ -180,7 +180,7 @@ async function updateNodeSettings(request, env) {
   try {
     input = await request.json();
   } catch {
-    return json({ ok: false, error: "JSON 格式错误" }, 400);
+    return json({ ok: false, error: "JSON ????" }, 400);
   }
 
   const nodeId = String(input?.node_id || "");
@@ -188,14 +188,14 @@ async function updateNodeSettings(request, env) {
   const memo = cleanText(input?.memo, 500);
   const reminderAt = Number(input?.reminder_at || 0);
   const reminderRepeatUntil = Number(input?.reminder_repeat_until || 0);
-  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
-  if (expiryDate && !isValidDate(expiryDate)) return json({ ok: false, error: "到期日期格式错误" }, 400);
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id ????" }, 400);
+  if (expiryDate && !isValidDate(expiryDate)) return json({ ok: false, error: "????????" }, 400);
   if (!Number.isInteger(reminderAt) || reminderAt < 0 || reminderAt > 4102444800) {
-    return json({ ok: false, error: "提醒时间格式错误" }, 400);
+    return json({ ok: false, error: "????????" }, 400);
   }
   if (!Number.isInteger(reminderRepeatUntil) || reminderRepeatUntil < 0 || reminderRepeatUntil > 4102444800
     || (reminderRepeatUntil > 0 && (reminderAt < 1 || reminderRepeatUntil <= reminderAt))) {
-    return json({ ok: false, error: "持续提醒截止时间错误" }, 400);
+    return json({ ok: false, error: "??????????" }, 400);
   }
   const settings = {
     expiry_date: expiryDate,
@@ -213,12 +213,12 @@ async function updateNodeSettings(request, env) {
 
 async function updateNodeProfile(request, env) {
   let input;
-  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON 格式错误" }, 400); }
+  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON ????" }, 400); }
   const nodeId = String(input?.node_id || "");
   const maintenanceUntil = Number(input?.maintenance_until || 0);
-  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id ????" }, 400);
   if (!Number.isInteger(maintenanceUntil) || maintenanceUntil < 0 || maintenanceUntil > 4102444800) {
-    return json({ ok: false, error: "维护结束时间格式错误" }, 400);
+    return json({ ok: false, error: "??????????" }, 400);
   }
   return statusStore(env).fetch(new Request("https://store/settings", {
     method: "POST",
@@ -242,11 +242,11 @@ async function saveGlobalReminder(request, env) {
   try {
     input = await request.json();
   } catch {
-    return json({ ok: false, error: "JSON 格式错误" }, 400);
+    return json({ ok: false, error: "JSON ????" }, 400);
   }
 
   const scheduleType = String(input?.schedule_type || "");
-  const allowedTypes = ["once", "daily", "weekly", "monthly", "yearly", "interval_months", "hourly_until"];
+  const allowedTypes = ["once", "daily", "weekly", "monthly", "yearly", "interval_months"];
   const reminder = {
     id: /^[a-zA-Z0-9_-]{1,64}$/.test(input?.id || "") ? input.id : crypto.randomUUID(),
     title: cleanText(input?.title, 100),
@@ -261,28 +261,28 @@ async function saveGlobalReminder(request, env) {
     interval_months: Number(input?.interval_months || 1),
     enabled: input?.enabled !== false,
   };
-  if (!reminder.title) return json({ ok: false, error: "提醒名称不能为空" }, 400);
-  if (!allowedTypes.includes(scheduleType)) return json({ ok: false, error: "提醒类型错误" }, 400);
-  if (["once", "interval_months", "hourly_until"].includes(scheduleType) && (!Number.isInteger(reminder.schedule_at) || reminder.schedule_at < 1)) {
-    return json({ ok: false, error: "首次提醒时间错误" }, 400);
+  if (!reminder.title) return json({ ok: false, error: "????????" }, 400);
+  if (!allowedTypes.includes(scheduleType)) return json({ ok: false, error: "??????" }, 400);
+  if (["once", "interval_months"].includes(scheduleType) && (!Number.isInteger(reminder.schedule_at) || reminder.schedule_at < 1)) {
+    return json({ ok: false, error: "????????" }, 400);
   }
-  if (!["once", "interval_months", "hourly_until"].includes(scheduleType) && !/^([01]\d|2[0-3]):[0-5]\d$/.test(reminder.schedule_time)) {
-    return json({ ok: false, error: "循环提醒时间错误" }, 400);
+  if (!["once", "interval_months"].includes(scheduleType) && !/^([01]\d|2[0-3]):[0-5]\d$/.test(reminder.schedule_time)) {
+    return json({ ok: false, error: "????????" }, 400);
   }
   if (scheduleType === "weekly" && (!Number.isInteger(reminder.weekday) || reminder.weekday < 0 || reminder.weekday > 6)) {
-    return json({ ok: false, error: "星期设置错误" }, 400);
+    return json({ ok: false, error: "??????" }, 400);
   }
   if (["monthly", "yearly"].includes(scheduleType) && (!Number.isInteger(reminder.monthday) || reminder.monthday < 1 || reminder.monthday > 31)) {
-    return json({ ok: false, error: "每月日期设置错误" }, 400);
+    return json({ ok: false, error: "????????" }, 400);
   }
   if (scheduleType === "yearly" && (!Number.isInteger(reminder.schedule_month) || reminder.schedule_month < 1 || reminder.schedule_month > 12)) {
-    return json({ ok: false, error: "每年月份设置错误" }, 400);
+    return json({ ok: false, error: "????????" }, 400);
   }
   if (scheduleType === "interval_months" && (!Number.isInteger(reminder.interval_months) || reminder.interval_months < 1 || reminder.interval_months > 60)) {
-    return json({ ok: false, error: "间隔月数错误" }, 400);
+    return json({ ok: false, error: "??????" }, 400);
   }
   if (scheduleType === "hourly_until" && (!Number.isInteger(reminder.schedule_end_at) || reminder.schedule_end_at <= reminder.schedule_at)) {
-    return json({ ok: false, error: "持续提醒结束时间必须晚于开始时间" }, 400);
+    return json({ ok: false, error: "????????????????" }, 400);
   }
   return statusStore(env).fetch(new Request("https://store/global-reminder/save", {
     method: "POST",
@@ -296,10 +296,10 @@ async function mutateGlobalReminder(request, env, action) {
   try {
     input = await request.json();
   } catch {
-    return json({ ok: false, error: "JSON 格式错误" }, 400);
+    return json({ ok: false, error: "JSON ????" }, 400);
   }
   const id = String(input?.id || "");
-  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(id)) return json({ ok: false, error: "提醒 ID 错误" }, 400);
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(id)) return json({ ok: false, error: "?? ID ??" }, 400);
   return statusStore(env).fetch(new Request(`https://store/global-reminder/${action}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -309,24 +309,28 @@ async function mutateGlobalReminder(request, env, action) {
 
 async function saveDashboardSettings(request, env) {
   let input;
-  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON 格式错误" }, 400); }
+  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON ????" }, 400); }
   const settings = {};
   if (Object.hasOwn(input, "auto_delete_offline_days")) {
     const days = Number(input.auto_delete_offline_days);
-    if (![0, 7, 30, 90].includes(days)) return json({ ok: false, error: "自动清理周期错误" }, 400);
+    if (![0, 7, 30, 90].includes(days)) return json({ ok: false, error: "????????" }, 400);
     settings.auto_delete_offline_days = days;
-  }
-  if (Object.hasOwn(input, "telegram_repeat_count")) {
-    const count = Number(input.telegram_repeat_count);
-    if (!Number.isInteger(count) || count < 1 || count > 10) return json({ ok: false, error: "提醒次数应为 1～10" }, 400);
-    settings.telegram_repeat_count = count;
   }
   if (Object.hasOwn(input, "telegram_repeat_interval_minutes")) {
     const interval = Number(input.telegram_repeat_interval_minutes);
-    if (!Number.isInteger(interval) || interval < 1 || interval > 1440) return json({ ok: false, error: "提醒间隔应为 1～1440 分钟" }, 400);
+    if (!Number.isInteger(interval) || interval < 1 || interval > 1440) return json({ ok: false, error: "?????? 1?1440 ??" }, 400);
     settings.telegram_repeat_interval_minutes = interval;
   }
-  if (!Object.keys(settings).length) return json({ ok: false, error: "没有可保存的设置" }, 400);
+  if (Object.hasOwn(input, "telegram_repeat_start") || Object.hasOwn(input, "telegram_repeat_end")) {
+    const start = String(input.telegram_repeat_start || "");
+    const end = String(input.telegram_repeat_end || "");
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(start) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(end) || start >= end) {
+      return json({ ok: false, error: "??????????????" }, 400);
+    }
+    settings.telegram_repeat_start = start;
+    settings.telegram_repeat_end = end;
+  }
+  if (!Object.keys(settings).length) return json({ ok: false, error: "????????" }, 400);
   return statusStore(env).fetch(new Request("https://store/dashboard-settings", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -336,9 +340,9 @@ async function saveDashboardSettings(request, env) {
 
 async function deleteOfflineNode(request, env) {
   let input;
-  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON 格式错误" }, 400); }
+  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON ????" }, 400); }
   const nodeId = String(input?.node_id || "");
-  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id ????" }, 400);
   return statusStore(env).fetch(new Request("https://store/node/delete", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -358,7 +362,7 @@ export class VpsStatusStore {
     if (url.pathname === "/report" && request.method === "POST") {
       const record = await request.json();
       const nodeId = record?.payload?.node_id;
-      if (!NODE_ID_PATTERN.test(nodeId || "")) return json({ ok: false, error: "node_id 格式错误" }, 400);
+      if (!NODE_ID_PATTERN.test(nodeId || "")) return json({ ok: false, error: "node_id ????" }, 400);
       const existing = await this.ctx.storage.get(`node:${nodeId}`);
       record.settings = existing?.settings || defaultSettings();
       await this.ctx.storage.put(`node:${nodeId}`, record);
@@ -409,7 +413,7 @@ export class VpsStatusStore {
       const input = await request.json();
       const key = `node:${input.node_id}`;
       const record = await this.ctx.storage.get(key);
-      if (!record) return json({ ok: false, error: "节点不存在" }, 404);
+      if (!record) return json({ ok: false, error: "?????" }, 404);
       const previous = record.settings || defaultSettings();
       const next = {
         ...previous,
@@ -466,7 +470,7 @@ export class VpsStatusStore {
       const input = await request.json();
       const key = `global-reminder:${input.id}`;
       const record = await this.ctx.storage.get(key);
-      if (!record) return json({ ok: false, error: "提醒不存在" }, 404);
+      if (!record) return json({ ok: false, error: "?????" }, 404);
       record.enabled = Boolean(input.enabled);
       record.completed = false;
       record.updated_at = Math.floor(Date.now() / 1000);
@@ -478,8 +482,9 @@ export class VpsStatusStore {
       const settings = await this.ctx.storage.get("dashboard:settings") || {};
       return json({ ok: true, settings: {
         auto_delete_offline_days: 0,
-        telegram_repeat_count: 1,
-        telegram_repeat_interval_minutes: 5,
+        telegram_repeat_interval_minutes: 10,
+        telegram_repeat_start: "09:00",
+        telegram_repeat_end: "18:00",
         ...settings,
       } });
     }
@@ -496,18 +501,18 @@ export class VpsStatusStore {
       const input = await request.json();
       const key = `node:${input.node_id}`;
       const record = await this.ctx.storage.get(key);
-      if (!record) return json({ ok: false, error: "节点不存在" }, 404);
+      if (!record) return json({ ok: false, error: "?????" }, 404);
       const now = Math.floor(Date.now() / 1000);
       const offlineAfter = clampNumber(this.env.OFFLINE_AFTER_SECONDS, 30, 3600, 150);
       const offline = record.agent_state === "shutdown" || now - record.last_seen > offlineAfter;
-      if (!offline) return json({ ok: false, error: "在线节点不能删除" }, 409);
+      if (!offline) return json({ ok: false, error: "????????" }, 409);
       await this.ctx.storage.delete(key);
       return json({ ok: true });
     }
 
     if (url.pathname === "/nodes/order" && request.method === "POST") {
       const input = await request.json();
-      if (!Array.isArray(input.node_ids) || input.node_ids.length > 500) return json({ ok: false, error: "排序数据错误" }, 400);
+      if (!Array.isArray(input.node_ids) || input.node_ids.length > 500) return json({ ok: false, error: "??????" }, 400);
       let updated = 0;
       for (let index = 0; index < input.node_ids.length; index += 1) {
         const nodeId = String(input.node_ids[index] || "");
@@ -540,7 +545,7 @@ export class VpsStatusStore {
 
     if (url.pathname === "/config/import" && request.method === "POST") {
       const input = await request.json();
-      if (input?.format !== "ejectors-dashboard-config" || input?.version !== 1) return json({ ok: false, error: "备份文件格式错误" }, 400);
+      if (input?.format !== "ejectors-dashboard-config" || input?.version !== 1) return json({ ok: false, error: "????????" }, 400);
       let nodes = 0;
       let skipped = 0;
       for (const [nodeId, imported] of Object.entries(input.nodes || {}).slice(0, 500)) {
@@ -564,12 +569,16 @@ export class VpsStatusStore {
         reminders += 1;
       }
       const days = Number(input.dashboard_settings?.auto_delete_offline_days || 0);
-      const repeatCount = clampNumber(input.dashboard_settings?.telegram_repeat_count, 1, 10, 1);
-      const repeatInterval = clampNumber(input.dashboard_settings?.telegram_repeat_interval_minutes, 1, 1440, 5);
+      const repeatInterval = clampNumber(input.dashboard_settings?.telegram_repeat_interval_minutes, 1, 1440, 10);
+      const repeatStart = /^([01]\d|2[0-3]):[0-5]\d$/.test(input.dashboard_settings?.telegram_repeat_start)
+        ? input.dashboard_settings.telegram_repeat_start : "09:00";
+      const repeatEnd = /^([01]\d|2[0-3]):[0-5]\d$/.test(input.dashboard_settings?.telegram_repeat_end)
+        ? input.dashboard_settings.telegram_repeat_end : "18:00";
       await this.ctx.storage.put("dashboard:settings", {
         auto_delete_offline_days: [0, 7, 30, 90].includes(days) ? days : 0,
-        telegram_repeat_count: repeatCount,
         telegram_repeat_interval_minutes: repeatInterval,
+        telegram_repeat_start: repeatStart < repeatEnd ? repeatStart : "09:00",
+        telegram_repeat_end: repeatStart < repeatEnd ? repeatEnd : "18:00",
       });
       return json({ ok: true, imported: { nodes, reminders }, skipped_nodes: skipped });
     }
@@ -599,7 +608,7 @@ export class VpsStatusStore {
           settings,
         };
       }).sort((a, b) => {
-        const groupOrder = (a.settings.group || "未分组").localeCompare(b.settings.group || "未分组", "zh-CN");
+        const groupOrder = (a.settings.group || "???").localeCompare(b.settings.group || "???", "zh-CN");
         return groupOrder || (a.settings.sort_order - b.settings.sort_order) || a.name.localeCompare(b.name, "zh-CN");
       });
 
@@ -621,15 +630,16 @@ export class VpsStatusStore {
       });
     }
 
-    return json({ ok: false, error: "存储接口不存在" }, 404);
+    return json({ ok: false, error: "???????" }, 404);
   }
 
   async runReminders(now) {
     const records = await this.ctx.storage.list({ prefix: "node:" });
     const dashboardSettings = {
       auto_delete_offline_days: 0,
-      telegram_repeat_count: 1,
-      telegram_repeat_interval_minutes: 5,
+      telegram_repeat_interval_minutes: 10,
+      telegram_repeat_start: "09:00",
+      telegram_repeat_end: "18:00",
       ...(await this.ctx.storage.get("dashboard:settings") || {}),
     };
     let deleted = 0;
@@ -656,26 +666,11 @@ export class VpsStatusStore {
 
       if (settings.reminder_at > 0 && settings.reminder_at <= now) {
         const message = [
-          "⏰ VPS 备忘提醒",
-          `节点：${record.payload.name}`,
-          settings.memo ? `备忘：${settings.memo}` : "备忘：请查看 VPS 状态面板",
+          "? VPS ????",
+          `???${record.payload.name}`,
+          settings.memo ? `???${settings.memo}` : "?????? VPS ????",
         ].join("\n");
-        if (settings.reminder_repeat_until > settings.reminder_at) {
-          if (now <= settings.reminder_repeat_until) {
-            const occurrence = Math.floor((now - settings.reminder_at) / 3600);
-            const fireKey = `hourly:${settings.reminder_at + occurrence * 3600}`;
-            if (settings.reminder_hourly_key !== fireKey) {
-              try {
-                await sendTelegram(this.env, message);
-                settings.reminder_hourly_key = fireKey;
-                changed = true;
-                sent += 1;
-              } catch (error) {
-                errors.push(`${record.payload.node_id}: ${error.message}`);
-              }
-            }
-          }
-        } else if (!settings.reminder_sent_at) {
+        if (!settings.reminder_sent_at) {
           try {
             await this.sendReminder(message, now, dashboardSettings, {
               type: "node-reminder",
@@ -696,13 +691,13 @@ export class VpsStatusStore {
         const notificationKey = `${settings.expiry_date}:${daysLeft}`;
         const sentKeys = Array.isArray(settings.expiry_notifications) ? settings.expiry_notifications : [];
         if ([30, 7, 3, 1, 0].includes(daysLeft) && !sentKeys.includes(notificationKey)) {
-          const countdown = daysLeft === 0 ? "今天到期" : `剩余 ${daysLeft} 天`;
+          const countdown = daysLeft === 0 ? "????" : `?? ${daysLeft} ?`;
           const message = [
-            "📅 VPS 到期提醒",
-            `节点：${record.payload.name}`,
-            `到期日期：${settings.expiry_date}`,
-            `状态：${countdown}`,
-            settings.memo ? `备忘：${settings.memo}` : "",
+            "?? VPS ????",
+            `???${record.payload.name}`,
+            `?????${settings.expiry_date}`,
+            `???${countdown}`,
+            settings.memo ? `???${settings.memo}` : "",
           ].filter(Boolean).join("\n");
           try {
             await this.sendReminder(message, now, dashboardSettings, {
@@ -738,10 +733,10 @@ export class VpsStatusStore {
       const fireKey = globalReminderFireKey(reminder, now);
       if (!fireKey || reminder.last_fired_key === fireKey) continue;
       const message = [
-        "📝 全局备忘提醒",
-        `事项：${reminder.title}`,
-        reminder.content ? `内容：${reminder.content}` : "",
-        `计划：${globalReminderScheduleLabel(reminder)}`,
+        "?? ??????",
+        `???${reminder.title}`,
+        reminder.content ? `???${reminder.content}` : "",
+        `???${globalReminderScheduleLabel(reminder)}`,
       ].filter(Boolean).join("\n");
       try {
         if (reminder.schedule_type === "hourly_until") {
@@ -770,16 +765,24 @@ export class VpsStatusStore {
   }
 
   async sendReminder(text, now, dashboardSettings, source) {
-    await sendTelegram(this.env, text);
-    const count = clampNumber(dashboardSettings.telegram_repeat_count, 1, 10, 1);
-    const interval = clampNumber(dashboardSettings.telegram_repeat_interval_minutes, 1, 1440, 5);
-    if (count <= 1) return;
+    const interval = clampNumber(dashboardSettings.telegram_repeat_interval_minutes, 1, 1440, 10);
+    const window = chinaTimeWindow(
+      now,
+      dashboardSettings.telegram_repeat_start || "09:00",
+      dashboardSettings.telegram_repeat_end || "18:00",
+    );
+    if (now > window.end) {
+      await sendTelegram(this.env, text);
+      return;
+    }
+    const firstAt = Math.max(now, window.start);
+    if (firstAt === now) await sendTelegram(this.env, text);
     await this.ctx.storage.put(`telegram-repeat:${crypto.randomUUID()}`, {
       text,
       source,
-      remaining: count - 1,
-      next_at: now + interval * 60,
+      next_at: firstAt === now ? now + interval * 60 : firstAt,
       interval_seconds: interval * 60,
+      end_at: window.end,
     });
   }
 
@@ -792,15 +795,25 @@ export class VpsStatusStore {
         await this.ctx.storage.delete(key);
         continue;
       }
+      if (item.end_at && now > item.end_at) {
+        await this.ctx.storage.delete(key);
+        continue;
+      }
       if (item.next_at > now) continue;
       try {
         await sendTelegram(this.env, item.text);
         sent += 1;
-        item.remaining -= 1;
-        if (item.remaining <= 0) await this.ctx.storage.delete(key);
-        else {
+        if (item.end_at) {
           item.next_at = now + item.interval_seconds;
-          await this.ctx.storage.put(key, item);
+          if (item.next_at > item.end_at) await this.ctx.storage.delete(key);
+          else await this.ctx.storage.put(key, item);
+        } else {
+          item.remaining -= 1;
+          if (item.remaining <= 0) await this.ctx.storage.delete(key);
+          else {
+            item.next_at = now + item.interval_seconds;
+            await this.ctx.storage.put(key, item);
+          }
         }
       } catch (error) {
         errors.push(`repeat:${error.message}`);
@@ -908,17 +921,17 @@ function globalReminderScheduleLabel(reminder) {
     return new Date(reminder.schedule_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
   }
   if (reminder.schedule_type === "interval_months") {
-    return `每 ${reminder.interval_months} 个月，自 ${new Date(reminder.schedule_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`;
+    return `? ${reminder.interval_months} ???? ${new Date(reminder.schedule_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`;
   }
   if (reminder.schedule_type === "hourly_until") {
     const start = new Date(reminder.schedule_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
     const end = new Date(reminder.schedule_end_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
-    return `每小时，自 ${start} 至 ${end}`;
+    return `????? ${start} ? ${end}`;
   }
-  if (reminder.schedule_type === "daily") return `每天 ${reminder.schedule_time}`;
-  if (reminder.schedule_type === "weekly") return `每周${"日一二三四五六"[reminder.weekday]} ${reminder.schedule_time}`;
-  if (reminder.schedule_type === "monthly") return `每月 ${reminder.monthday} 日 ${reminder.schedule_time}`;
-  return `每年 ${reminder.schedule_month} 月 ${reminder.monthday} 日 ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "daily") return `?? ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "weekly") return `??${"???????"[reminder.weekday]} ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "monthly") return `?? ${reminder.monthday} ? ${reminder.schedule_time}`;
+  return `?? ${reminder.schedule_month} ? ${reminder.monthday} ? ${reminder.schedule_time}`;
 }
 
 function defaultSettings() {
@@ -983,6 +996,20 @@ function isValidDate(value) {
   const [year, month, day] = value.split("-").map(Number);
   const date = new Date(Date.UTC(year, month - 1, day));
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function chinaTimeWindow(nowSeconds, startText, endText) {
+  const china = new Date((nowSeconds + 8 * 3600) * 1000);
+  const [startHour, startMinute] = startText.split(":").map(Number);
+  const [endHour, endMinute] = endText.split(":").map(Number);
+  const offset = 8 * 3600;
+  const start = Date.UTC(
+    china.getUTCFullYear(), china.getUTCMonth(), china.getUTCDate(), startHour, startMinute,
+  ) / 1000 - offset;
+  const end = Date.UTC(
+    china.getUTCFullYear(), china.getUTCMonth(), china.getUTCDate(), endHour, endMinute,
+  ) / 1000 - offset;
+  return { start, end };
 }
 
 function daysUntil(expiryDate, nowSeconds) {
@@ -1097,7 +1124,7 @@ async function enforceViewAuthorization(request, env) {
   }));
   const result = await failed.json();
   if (result.blocked) return rateLimited(result.retry_after || 600);
-  return json({ ok: false, error: "查看密码不正确", remaining_attempts: result.remaining_attempts }, 401);
+  return json({ ok: false, error: "???????", remaining_attempts: result.remaining_attempts }, 401);
 }
 
 function isViewAuthorized(request, env) {
@@ -1106,7 +1133,7 @@ function isViewAuthorized(request, env) {
 }
 
 function rateLimited(seconds) {
-  return new Response(JSON.stringify({ ok: false, error: "登录尝试过多，请稍后重试", retry_after: seconds }), {
+  return new Response(JSON.stringify({ ok: false, error: "????????????", retry_after: seconds }), {
     status: 429,
     headers: {
       ...JSON_HEADERS,
