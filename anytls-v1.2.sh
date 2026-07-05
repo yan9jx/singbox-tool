@@ -4,7 +4,7 @@
 # 如果 TCP/443 已被占用，会自动选择可用的 *443 备用端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.2"
+SCRIPT_VERSION="v1.3"
 INSTALL_DIR="/opt/anytls"
 BIN="$INSTALL_DIR/anytls-server"
 CONFIG_DIR="/etc/anytls"
@@ -12,6 +12,9 @@ INFO_FILE="$CONFIG_DIR/node-info.env"
 SERVICE_FILE="/etc/systemd/system/anytls.service"
 SERVICE_NAME="anytls"
 DEFAULT_PORT=443
+DEFAULT_DASHBOARD_URL="${DEFAULT_DASHBOARD_URL:-https://home.ejectors.net}"
+DASHBOARD_AGENT_CONF="${DASHBOARD_AGENT_CONF:-/etc/ejectors-vps-agent.conf}"
+SUBSCRIPTION_INFO_FILE="$CONFIG_DIR/subscription.env"
 
 die() { echo "错误：$*" >&2; exit 1; }
 require_root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || die "请使用 root 运行。"; command -v systemctl >/dev/null || die "当前系统需要支持 systemd。"; }
@@ -91,6 +94,16 @@ urlencode() {
     esac
   done
   printf '%s' "$encoded"
+}
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
 }
 
 install_anytls() {
@@ -174,7 +187,93 @@ EOF
 }
 
 info_value() { sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$INFO_FILE"; }
+subscription_info_value() { if [[ -f "$SUBSCRIPTION_INFO_FILE" ]]; then sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$SUBSCRIPTION_INFO_FILE"; fi; return 0; }
+agent_info_value() { if [[ -f "$DASHBOARD_AGENT_CONF" ]]; then sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$DASHBOARD_AGENT_CONF"; fi; return 0; }
 require_node_files() { [[ -x "$BIN" && -f "$INFO_FILE" && -f "$SERVICE_FILE" ]] || die "未找到 AnyTLS 节点，请先安装。"; }
+
+load_subscription_identity() {
+  SUB_DASHBOARD_URL="$(agent_info_value DASHBOARD_URL)"
+  SUB_INGEST_TOKEN="$(agent_info_value INGEST_TOKEN)"
+  SUB_NODE_ID="$(agent_info_value NODE_ID)"
+  [[ -n "$SUB_DASHBOARD_URL" ]] || SUB_DASHBOARD_URL="$(subscription_info_value DASHBOARD_URL)"
+  [[ -n "$SUB_INGEST_TOKEN" ]] || SUB_INGEST_TOKEN="$(subscription_info_value INGEST_TOKEN)"
+  [[ -n "$SUB_NODE_ID" ]] || SUB_NODE_ID="$(subscription_info_value NODE_ID)"
+  SUB_DASHBOARD_URL="${SUB_DASHBOARD_URL:-$DEFAULT_DASHBOARD_URL}"
+  SUB_DASHBOARD_URL="${SUB_DASHBOARD_URL%/}"
+  if [[ -z "$SUB_NODE_ID" && -r /etc/machine-id ]]; then
+    SUB_NODE_ID="anytls-$(tr -cd 'a-zA-Z0-9' </etc/machine-id | head -c 20)"
+  fi
+  [[ "$SUB_DASHBOARD_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die "订阅服务地址必须是 HTTPS 地址。"
+  [[ "$SUB_NODE_ID" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]] || die "订阅节点 ID 格式错误。"
+  if [[ -z "$SUB_INGEST_TOKEN" ]]; then
+    read -rsp "VPS 状态面板上报密钥（输入不显示）: " SUB_INGEST_TOKEN
+    echo
+  fi
+  [[ "$SUB_INGEST_TOKEN" =~ ^[A-Za-z0-9._~-]{16,512}$ ]] || die "上报密钥格式错误。"
+}
+
+subscription_access_hash() {
+  printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}'
+}
+
+sync_subscription_node() {
+  require_node_files
+  local quiet="${1:-false}" name host port password sni payload access_hash subscription_url
+  name="$(info_value NODE_NAME)"
+  host="$(info_value SERVER_ADDRESS)"
+  port="$(info_value PORT)"
+  password="$(info_value PASSWORD)"
+  sni="$(info_value SNI)"
+  load_subscription_identity
+  payload="$(printf '{"node_id":"%s","name":"%s","server":"%s","port":%s,"password":"%s","sni":"%s","insecure":true}' \
+    "$(json_escape "$SUB_NODE_ID")" "$(json_escape "$name")" "$(json_escape "$host")" "$port" \
+    "$(json_escape "$password")" "$(json_escape "$sni")")"
+  if ! curl -fsS --max-time 20 -X POST "${SUB_DASHBOARD_URL}/api/v1/anytls" \
+    -H "Authorization: Bearer ${SUB_INGEST_TOKEN}" -H "Content-Type: application/json" --data "$payload" >/dev/null; then
+    echo "警告：AnyTLS 节点未能登记到聚合订阅服务。" >&2
+    return 1
+  fi
+  access_hash="$(subscription_access_hash "$SUB_INGEST_TOKEN")"
+  [[ "$access_hash" =~ ^[a-f0-9]{64}$ ]] || die "无法生成订阅访问令牌。"
+  subscription_url="${SUB_DASHBOARD_URL}/sub/anytls/${access_hash}"
+  install -d -m 700 "$CONFIG_DIR"
+  cat >"$SUBSCRIPTION_INFO_FILE" <<EOF
+DASHBOARD_URL='$SUB_DASHBOARD_URL'
+INGEST_TOKEN='$SUB_INGEST_TOKEN'
+NODE_ID='$SUB_NODE_ID'
+SUBSCRIPTION_URL='$subscription_url'
+EOF
+  chmod 600 "$SUBSCRIPTION_INFO_FILE"
+  if [[ "$quiet" != "true" ]]; then
+    echo
+    echo "AnyTLS 聚合订阅（Mihomo / Clash Meta）："
+    echo "$subscription_url"
+    echo "当前 VPS 已加入；在其他 VPS 运行同一脚本加入后，仍使用这条链接。"
+  fi
+}
+
+refresh_subscription_if_enabled() {
+  [[ -f "$SUBSCRIPTION_INFO_FILE" ]] || return 0
+  sync_subscription_node true || true
+}
+
+remove_subscription_node() {
+  local quiet="${1:-false}" dashboard_url ingest_token node_id payload
+  [[ -f "$SUBSCRIPTION_INFO_FILE" ]] || { [[ "$quiet" == "true" ]] || echo "当前 VPS 未加入聚合订阅。"; return 0; }
+  dashboard_url="$(subscription_info_value DASHBOARD_URL)"
+  ingest_token="$(subscription_info_value INGEST_TOKEN)"
+  node_id="$(subscription_info_value NODE_ID)"
+  payload="$(printf '{"node_id":"%s"}' "$(json_escape "$node_id")")"
+  if ! curl -fsS --max-time 20 -X POST "${dashboard_url}/api/v1/anytls/delete" \
+    -H "Authorization: Bearer ${ingest_token}" -H "Content-Type: application/json" --data "$payload" >/dev/null; then
+    echo "警告：无法从聚合订阅移除此 VPS；本地记录暂未删除。" >&2
+    return 1
+  fi
+  rm -f "$SUBSCRIPTION_INFO_FILE"
+  [[ "$quiet" == "true" ]] || echo "当前 VPS 已退出 AnyTLS 聚合订阅。"
+}
+
+generate_subscription() { sync_subscription_node "${1:-false}"; }
 
 start_service() {
   systemctl daemon-reload
@@ -221,6 +320,10 @@ install_node() {
   echo
   echo "AnyTLS 节点已创建。参考实现使用自签证书，所以链接中的 insecure=1 是必需的："
   print_all_formats "$name" "$host" "$port" "$password" "$sni" "$link"
+  echo
+  if confirm_yes "是否将这台 VPS 加入 home.ejectors.net 的 AnyTLS 聚合订阅？"; then
+    sync_subscription_node
+  fi
 }
 
 show_link() { require_node_files; info_value LINK; }
@@ -257,6 +360,13 @@ mihomo 节点配置：
   sni: "$sni"
   skip-cert-verify: true
 EOF
+  if [[ -f "$SUBSCRIPTION_INFO_FILE" ]]; then
+    cat <<EOF
+
+AnyTLS 聚合订阅（Mihomo / Clash Meta）：
+$(subscription_info_value SUBSCRIPTION_URL)
+EOF
+  fi
 }
 show_status() { [[ -x "$BIN" ]] && "$BIN" -h 2>&1 | head -n1 || true; systemctl status "$SERVICE_NAME" --no-pager; }
 show_logs() { journalctl -u "$SERVICE_NAME" -n 100 --no-pager; }
@@ -276,6 +386,7 @@ change_port() {
   write_info "$name" "$host" "$new_port" "$password" "$sni" "$link"
   systemctl daemon-reload
   restart_node
+  refresh_subscription_if_enabled
   print_all_formats "$name" "$host" "$new_port" "$password" "$sni" "$link"
 }
 
@@ -293,6 +404,7 @@ change_link_host() {
   [[ "$sni" =~ ^[A-Za-z0-9.-]+$ ]] || die "SNI 格式不正确。"
   link="$(make_link "$password" "$host" "$port" "$name" "$sni")"
   write_info "$name" "$host" "$port" "$password" "$sni" "$link"
+  refresh_subscription_if_enabled
   print_all_formats "$name" "$host" "$port" "$password" "$sni" "$link"
 }
 
@@ -307,6 +419,7 @@ reset_password() {
   write_info "$name" "$host" "$port" "$password" "$sni" "$link"
   systemctl daemon-reload
   restart_node
+  refresh_subscription_if_enabled
   print_all_formats "$name" "$host" "$port" "$password" "$sni" "$link"
 }
 
@@ -314,8 +427,9 @@ upgrade_anytls() { require_node_files; install_anytls; restart_node; }
 
 uninstall_node() {
   confirm_yes "是否卸载本脚本创建的 AnyTLS 节点？" || return
+  remove_subscription_node true || true
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
-  rm -f "$SERVICE_FILE" "$INFO_FILE"
+  rm -f "$SERVICE_FILE" "$INFO_FILE" "$SUBSCRIPTION_INFO_FILE"
   rmdir "$CONFIG_DIR" 2>/dev/null || true
   systemctl daemon-reload
   echo "AnyTLS 节点已卸载；二进制保留在 $INSTALL_DIR。"
@@ -336,6 +450,8 @@ menu() {
 8. 更换密码
 9. 检查 / 更新 anytls-go
 10. 卸载节点
+11. 加入 / 更新聚合订阅
+12. 退出聚合订阅
 0. 退出
 EOF
   local choice
@@ -354,6 +470,8 @@ EOF
     8) reset_password ;;
     9) upgrade_anytls ;;
     10) uninstall_node ;;
+    11) generate_subscription ;;
+    12) remove_subscription_node ;;
     0) exit 0 ;;
     *) die "无效选项。" ;;
   esac
@@ -370,6 +488,8 @@ case "${1:-}" in
   host) change_link_host ;;
   password) reset_password ;;
   update) upgrade_anytls ;;
+  subscription|subscribe|sub) generate_subscription ;;
+  unsubscribe|unsub) remove_subscription_node ;;
   uninstall) uninstall_node ;;
   *) menu ;;
 esac
