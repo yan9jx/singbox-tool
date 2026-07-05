@@ -13,7 +13,7 @@
 
   <main class="shell">
     <header class="topbar">
-      <a class="brand" href="/" aria-label="??????">
+      <a class="brand" href="/" aria-label="返回状态首页">
         <span class="brand-mark"><span></span></span>
         <span>
           <strong>EJECTORS</strong>
@@ -21,49 +21,49 @@
         </span>
       </a>
       <div class="top-actions">
-        <span class="sync-state" id="syncState"><i></i><span>????</span></span>
-        <button class="icon-button" id="refreshButton" title="????" aria-label="????">
+        <span class="sync-state" id="syncState"><i></i><span>等待连接</span></span>
+        <button class="icon-button" id="refreshButton" title="立即刷新" aria-label="立即刷新">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-3M4 4v4h4M4 13a8.1 8.1 0 0 0 15.5 3M20 20v-4h-4"/></svg>
         </button>
-        <button class="text-button" id="lockButton">??</button>
+        <button class="text-button" id="lockButton">锁定</button>
       </div>
     </header>
 
     <section class="hero">
       <div>
         <p class="eyebrow">GLOBAL OVERVIEW</p>
-        <h1>?????<span>?????</span></h1>
-        <p class="hero-copy">????????????????????????????????????????</p>
+        <h1>所有服务，<span>一眼看清。</span></h1>
+        <p class="hero-copy">状态、资源与服务运行情况会自动刷新。节点失联后保留最后数据，并显示最后在线时间。</p>
       </div>
-      <a class="drive-card" id="driveLink" href="https://disk.example.com" target="_blank" rel="noopener">
+      <a class="drive-card" id="driveLink" href="#" target="_blank" rel="noopener">
         <div class="drive-icon">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5h6l2 2h8v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Z"/><path d="m14.5 13.5 2 2 3.5-4"/></svg>
         </div>
         <div>
           <small>CLOUD DRIVE</small>
-          <strong>??????</strong>
-          <span>disk.example.com</span>
+          <strong>打开我的云盘</strong>
+          <span id="driveHost">地址由服务端提供</span>
         </div>
-        <span class="arrow">?</span>
+        <span class="arrow">↗</span>
       </a>
     </section>
 
-    <section class="summary-grid" aria-label="????">
+    <section class="summary-grid" aria-label="节点汇总">
       <article class="summary-card">
-        <span class="summary-icon all">?</span>
-        <div><small>????</small><strong id="countTotal">?</strong></div>
+        <span class="summary-icon all">◎</span>
+        <div><small>节点总数</small><strong id="countTotal">—</strong></div>
       </article>
       <article class="summary-card">
-        <span class="summary-icon online">?</span>
-        <div><small>????</small><strong id="countOnline">?</strong></div>
+        <span class="summary-icon online">●</span>
+        <div><small>正常运行</small><strong id="countOnline">—</strong></div>
       </article>
       <article class="summary-card">
-        <span class="summary-icon warn">?</span>
-        <div><small>????</small><strong id="countDegraded">?</strong></div>
+        <span class="summary-icon warn">◆</span>
+        <div><small>异常告警</small><strong id="countDegraded">—</strong></div>
       </article>
       <article class="summary-card">
-        <span class="summary-icon offline">?</span>
-        <div><small>?? / ??</small><strong id="countOffline">?</strong></div>
+        <span class="summary-icon offline">■</span>
+        <div><small>离线 / 关机</small><strong id="countOffline">—</strong></div>
       </article>
     </section>
 
@@ -71,18 +71,42 @@
       <div class="section-title">
         <div>
           <p class="eyebrow">GLOBAL REMINDERS</p>
-          <h2>????</h2>
+          <h2>全局备忘</h2>
         </div>
         <div class="reminder-header-actions">
-          <span class="telegram-status" id="globalTelegramStatus">???</span>
-          <span class="telegram-coverage" id="telegramCoverage" title="???? VPS ???????? Telegram ????">Telegram ??????/?</span>
-          <button class="secondary-button" id="telegramRepeatButton" type="button">?????? 10 ??</button>
-          <button class="secondary-button" id="globalTelegramTest" type="button">?? Telegram</button>
-          <button class="add-reminder-button" id="addReminderButton" type="button">? ????</button>
+          <span class="telegram-status" id="globalTelegramStatus">检测中</span>
+          <span class="telegram-coverage" id="telegramCoverage" title="统计全部 VPS 和全部全局备忘的 Telegram 开启情况">Telegram 通知服务：—/—</span>
+          <button class="secondary-button" id="telegramRepeatButton" type="button">提醒频率：每 10 分钟</button>
+          <button class="secondary-button" id="globalTelegramTest" type="button">测试 Telegram</button>
+          <button class="add-reminder-button" id="addReminderButton" type="button">＋ 新建提醒</button>
         </div>
       </div>
       <div class="reminder-grid" id="reminderGrid">
-        <div class="reminder-empty">??????</div>
+        <div class="reminder-empty">暂无全局提醒</div>
+      </div>
+    </section>
+
+    <section class="subscription-section">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">ANYTLS SUBSCRIPTION</p>
+          <h2>聚合订阅</h2>
+        </div>
+        <span id="anytlsSummary">等待读取节点</span>
+      </div>
+      <div class="subscription-panel">
+        <div class="subscription-link-row">
+          <div>
+            <small>MIHOMO / CLASH META</small>
+            <strong>唯一订阅链接</strong>
+          </div>
+          <input id="anytlsSubscriptionUrl" type="text" readonly placeholder="加入 AnyTLS 节点后生成">
+          <button class="secondary-button" id="copyAnyTlsSubscription" type="button" disabled>复制链接</button>
+        </div>
+        <p class="subscription-help">在每台 VPS 的 AnyTLS 脚本中选择“加入 / 更新聚合订阅”，节点会出现在下方；开关决定该 VPS 是否包含在订阅中。</p>
+        <div class="subscription-node-grid" id="anytlsNodeGrid">
+          <div class="subscription-empty">暂无 AnyTLS 节点</div>
+        </div>
       </div>
     </section>
 
@@ -90,35 +114,35 @@
       <div class="section-title">
         <div>
           <p class="eyebrow">LIVE NODES</p>
-          <h2>?????</h2>
+          <h2>服务器状态</h2>
         </div>
         <div class="node-section-actions">
-          <button class="secondary-button" id="exportConfig" type="button">????</button>
-          <button class="secondary-button" id="importConfig" type="button">????</button>
+          <button class="secondary-button" id="exportConfig" type="button">导出配置</button>
+          <button class="secondary-button" id="importConfig" type="button">恢复配置</button>
           <input id="importConfigFile" type="file" accept="application/json,.json" hidden>
-          <label>??????
+          <label>离线自动清理
             <select id="autoDeleteDays">
-              <option value="0">??</option>
-              <option value="7">7 ?</option>
-              <option value="30">30 ?</option>
-              <option value="90">90 ?</option>
+              <option value="0">关闭</option>
+              <option value="7">7 天</option>
+              <option value="30">30 天</option>
+              <option value="90">90 天</option>
             </select>
           </label>
-          <span id="updatedAt">????</span>
+          <span id="updatedAt">尚未刷新</span>
         </div>
       </div>
       <div class="node-grid" id="nodeGrid">
         <div class="empty-state">
           <span class="loader"></span>
-          <strong>????????</strong>
-          <p>?????????????</p>
+          <strong>正在读取节点状态</strong>
+          <p>首次打开需要输入查看密码。</p>
         </div>
       </div>
     </section>
 
     <footer>
       <span>Ejectors Infrastructure</span>
-      <span>60 ??? ? 15 ?????</span>
+      <span>60 秒心跳 · 15 秒页面刷新</span>
     </footer>
   </main>
 
@@ -131,13 +155,13 @@
           <small>INFRASTRUCTURE</small>
         </span>
       </div>
-      <p>????????????????????????</p>
+      <p>输入面板查看密码。密码只保存在当前浏览器会话中。</p>
       <label>
-        <span>????</span>
-        <input id="viewToken" type="password" autocomplete="current-password" required autofocus placeholder="?????">
+        <span>查看密码</span>
+        <input id="viewToken" type="password" autocomplete="current-password" required autofocus placeholder="请输入密码">
       </label>
       <p class="form-error" id="loginError" role="alert"></p>
-      <button class="primary-button" value="default" type="submit">??????</button>
+      <button class="primary-button" value="default" type="submit">进入状态面板</button>
     </form>
   </dialog>
 
@@ -147,12 +171,12 @@
         <div>
           <div class="node-title-row">
             <span class="status-dot"></span>
-            <button class="node-name node-edit-button" type="button" title="??????"></button>
+            <button class="node-name node-edit-button" type="button" title="编辑节点信息"></button>
           </div>
           <p class="node-location"></p>
         </div>
         <div class="node-head-actions">
-          <button class="delete-node-button" type="button" hidden>??</button>
+          <button class="delete-node-button" type="button" hidden>删除</button>
           <span class="status-pill"></span>
         </div>
       </div>
@@ -175,7 +199,7 @@
           <small class="metric-detail"></small>
         </div>
         <div class="metric" data-metric="disk">
-          <div><span>??</span><strong class="metric-value"></strong></div>
+          <div><span>磁盘</span><strong class="metric-value"></strong></div>
           <div class="bar"><i></i></div>
           <small class="metric-detail"></small>
         </div>
@@ -187,28 +211,28 @@
       </div>
 
       <div class="network-row">
-        <div><small>????</small><strong class="network-rx"></strong></div>
-        <div><small>????</small><strong class="network-tx"></strong></div>
-        <div><small>????</small><strong class="network-total"></strong></div>
+        <div><small>实时下行</small><strong class="network-rx"></strong></div>
+        <div><small>实时上行</small><strong class="network-tx"></strong></div>
+        <div><small>累计流量</small><strong class="network-total"></strong></div>
       </div>
 
       <button class="lifecycle-card node-settings-button" type="button">
-        <span class="lifecycle-icon">?</span>
+        <span class="lifecycle-icon">⌁</span>
         <span class="lifecycle-copy">
-          <small>?????</small>
-          <strong class="expiry-countdown">????????</strong>
+          <small>到期与备忘</small>
+          <strong class="expiry-countdown">点击设置到期日期</strong>
           <span class="memo-preview"></span>
         </span>
-        <span class="lifecycle-edit">??</span>
+        <span class="lifecycle-edit">编辑</span>
       </button>
 
       <div class="detail-block services-block">
-        <div class="detail-heading"><span>??</span><small class="last-seen"></small></div>
+        <div class="detail-heading"><span>服务</span><small class="last-seen"></small></div>
         <div class="service-list"></div>
       </div>
 
       <details class="ports-details">
-        <summary><span>????</span><small class="port-count"></small></summary>
+        <summary><span>监听端口</span><small class="port-count"></small></summary>
         <div class="port-list"></div>
       </details>
     </article>
@@ -219,28 +243,28 @@
       <div class="dialog-head">
         <div>
           <p class="eyebrow">NODE REMINDER</p>
-          <h2 id="settingsNodeName">????</h2>
+          <h2 id="settingsNodeName">节点设置</h2>
         </div>
-        <button type="button" class="dialog-close" id="settingsClose" aria-label="??">?</button>
+        <button type="button" class="dialog-close" id="settingsClose" aria-label="关闭">×</button>
       </div>
       <input type="hidden" id="settingsNodeId">
 
       <div class="form-grid">
         <label>
-          <span>VPS ????</span>
+          <span>VPS 到期日期</span>
           <input id="expiryDate" type="date">
-          <small>??????????? 30/7/3/1/0 ????</small>
+          <small>自动显示剩余天数，并在 30/7/3/1/0 天提醒。</small>
         </label>
         <label>
-          <span>??????</span>
+          <span>单次提醒时间</span>
           <input id="reminderAt" type="datetime-local">
-          <small>?????? Telegram????????????</small>
+          <small>到点发送一次 Telegram，修改时间后可重新提醒。</small>
         </label>
       </div>
 
       <label class="memo-label">
-        <span>???</span>
-        <textarea id="nodeMemo" maxlength="500" rows="4" placeholder="????????????????????"></textarea>
+        <span>备忘录</span>
+        <textarea id="nodeMemo" maxlength="500" rows="4" placeholder="例如：续费链接、套餐、用途、维护事项……"></textarea>
         <small><span id="memoCount">0</span>/500</small>
       </label>
 
@@ -248,18 +272,18 @@
         <label class="toggle-label">
           <input id="telegramEnabled" type="checkbox" checked>
           <span class="toggle"></span>
-          <span>?? Telegram ??</span>
+          <span>启用 Telegram 提醒</span>
         </label>
         <div class="telegram-actions">
-          <span class="telegram-status" id="telegramStatus">???</span>
-          <button type="button" class="secondary-button" id="telegramTest">????</button>
+          <span class="telegram-status" id="telegramStatus">未配置</span>
+          <button type="button" class="secondary-button" id="telegramTest">发送测试</button>
         </div>
       </div>
 
       <p class="form-error" id="settingsError" role="alert"></p>
       <div class="dialog-actions">
-        <button type="button" class="secondary-button" id="clearReminder">??????</button>
-        <button type="submit" class="primary-button">????</button>
+        <button type="button" class="secondary-button" id="clearReminder">清除单次提醒</button>
+        <button type="submit" class="primary-button">保存设置</button>
       </div>
     </form>
   </dialog>
@@ -269,26 +293,26 @@
       <div class="dialog-head">
         <div>
           <p class="eyebrow">NODE PROFILE</p>
-          <h2 id="profileNodeName">??????</h2>
+          <h2 id="profileNodeName">编辑节点信息</h2>
         </div>
-        <button type="button" class="dialog-close" id="profileClose" aria-label="??">?</button>
+        <button type="button" class="dialog-close" id="profileClose" aria-label="关闭">×</button>
       </div>
       <input type="hidden" id="profileNodeId">
       <div class="form-grid">
-        <label><span>????</span><input id="displayName" type="text" maxlength="80" placeholder="???? Agent ??"></label>
-        <label><span>??</span><input id="nodeGroup" type="text" maxlength="40" placeholder="????????"></label>
-        <label><span>???</span><input id="displayProvider" type="text" maxlength="40" placeholder="???????"></label>
-        <label><span>?? / ??</span><input id="displayLocation" type="text" maxlength="40" placeholder="???????"></label>
-        <label><span>??</span><input id="nodePurpose" type="text" maxlength="80" placeholder="??????????"></label>
+        <label><span>显示名称</span><input id="displayName" type="text" maxlength="80" placeholder="留空使用 Agent 名称"></label>
+        <label><span>分组</span><input id="nodeGroup" type="text" maxlength="40" placeholder="例如：生产、备用"></label>
+        <label><span>服务商</span><input id="displayProvider" type="text" maxlength="40" placeholder="留空使用上报值"></label>
+        <label><span>国家 / 地区</span><input id="displayLocation" type="text" maxlength="40" placeholder="留空使用上报值"></label>
+        <label><span>用途</span><input id="nodePurpose" type="text" maxlength="80" placeholder="例如：主力节点、云盘"></label>
         <label>
-          <span>??????</span>
+          <span>维护结束时间</span>
           <input id="maintenanceUntil" type="datetime-local">
-          <small>????????????? VPS ??? Telegram ???</small>
+          <small>到期前显示维护中，并暂停该 VPS 的面板 Telegram 提醒。</small>
         </label>
       </div>
       <p class="form-error" id="profileError" role="alert"></p>
       <div class="dialog-actions profile-actions">
-        <button type="submit" class="primary-button">??????</button>
+        <button type="submit" class="primary-button">保存节点信息</button>
       </div>
     </form>
   </dialog>
@@ -298,22 +322,22 @@
       <div class="dialog-head">
         <div>
           <p class="eyebrow">TELEGRAM FREQUENCY</p>
-          <h2>??????</h2>
+          <h2>消息提醒频率</h2>
         </div>
-        <button type="button" class="dialog-close" id="telegramRepeatClose" aria-label="??">?</button>
+        <button type="button" class="dialog-close" id="telegramRepeatClose" aria-label="关闭">×</button>
       </div>
       <div class="form-grid">
         <label>
-          <span>????????</span>
+          <span>发送间隔（分钟）</span>
           <input id="telegramRepeatInterval" type="number" min="1" max="1440" value="10" required>
         </label>
-        <label><span>??????</span><input id="telegramHourlyStart" type="time" value="09:00"></label>
-        <label><span>??????</span><input id="telegramHourlyEnd" type="time" value="18:00"></label>
+        <label><span>每天开始时间</span><input id="telegramHourlyStart" type="time" value="09:00"></label>
+        <label><span>每天结束时间</span><input id="telegramHourlyEnd" type="time" value="18:00"></label>
       </div>
-      <small class="dialog-note">???? VPS ???????????? 10 ???09:00?18:00??????????????? 10 ???????</small>
+      <small class="dialog-note">同时控制 VPS 提醒和全局备忘。例如设为 10 分钟、09:00–18:00，提醒触发后会在当天该时段内每 10 分钟发送一条。</small>
       <p class="form-error" id="telegramRepeatError" role="alert"></p>
       <div class="dialog-actions profile-actions">
-        <button type="submit" class="primary-button">??????</button>
+        <button type="submit" class="primary-button">保存提醒频率</button>
       </div>
     </form>
   </dialog>
@@ -323,64 +347,64 @@
       <div class="dialog-head">
         <div>
           <p class="eyebrow">GLOBAL REMINDER</p>
-          <h2 id="reminderDialogTitle">????</h2>
+          <h2 id="reminderDialogTitle">新建提醒</h2>
         </div>
-        <button type="button" class="dialog-close" id="reminderClose" aria-label="??">?</button>
+        <button type="button" class="dialog-close" id="reminderClose" aria-label="关闭">×</button>
       </div>
       <input type="hidden" id="reminderId">
 
       <label>
-        <span>??????</span>
-        <input id="reminderTitle" type="text" maxlength="100" required placeholder="???????">
+        <span>提醒事项名称</span>
+        <input id="reminderTitle" type="text" maxlength="100" required placeholder="例如：域名续费">
       </label>
       <label class="memo-label">
-        <span>????</span>
-        <textarea id="reminderContent" maxlength="1000" rows="4" placeholder="???????????"></textarea>
+        <span>提醒内容</span>
+        <textarea id="reminderContent" maxlength="1000" rows="4" placeholder="填写需要处理的事项……"></textarea>
       </label>
 
       <div class="form-grid reminder-schedule-grid">
         <label>
-          <span>????</span>
+          <span>提醒类型</span>
           <select id="reminderType">
-            <option value="once">??</option>
-            <option value="daily">??</option>
-            <option value="weekly">??</option>
-            <option value="monthly">??</option>
-            <option value="yearly">??</option>
-            <option value="interval_months">? N ??</option>
+            <option value="once">单次</option>
+            <option value="daily">每天</option>
+            <option value="weekly">每周</option>
+            <option value="monthly">每月</option>
+            <option value="yearly">每年</option>
+            <option value="interval_months">每 N 个月</option>
           </select>
         </label>
         <label id="onceTimeField">
-          <span>????</span>
+          <span>提醒时间</span>
           <input id="reminderOnceAt" type="datetime-local">
         </label>
         <label id="repeatTimeField" hidden>
-          <span>????</span>
+          <span>每天时间</span>
           <input id="reminderRepeatTime" type="time" value="09:00">
         </label>
         <label id="weekdayField" hidden>
-          <span>??</span>
+          <span>星期</span>
           <select id="reminderWeekday">
-            <option value="1">???</option><option value="2">???</option><option value="3">???</option>
-            <option value="4">???</option><option value="5">???</option><option value="6">???</option>
-            <option value="0">???</option>
+            <option value="1">星期一</option><option value="2">星期二</option><option value="3">星期三</option>
+            <option value="4">星期四</option><option value="5">星期五</option><option value="6">星期六</option>
+            <option value="0">星期日</option>
           </select>
         </label>
         <label id="monthField" hidden>
-          <span>??</span>
+          <span>月份</span>
           <select id="reminderMonth">
-            <option value="1">1 ?</option><option value="2">2 ?</option><option value="3">3 ?</option>
-            <option value="4">4 ?</option><option value="5">5 ?</option><option value="6">6 ?</option>
-            <option value="7">7 ?</option><option value="8">8 ?</option><option value="9">9 ?</option>
-            <option value="10">10 ?</option><option value="11">11 ?</option><option value="12">12 ?</option>
+            <option value="1">1 月</option><option value="2">2 月</option><option value="3">3 月</option>
+            <option value="4">4 月</option><option value="5">5 月</option><option value="6">6 月</option>
+            <option value="7">7 月</option><option value="8">8 月</option><option value="9">9 月</option>
+            <option value="10">10 月</option><option value="11">11 月</option><option value="12">12 月</option>
           </select>
         </label>
         <label id="monthdayField" hidden>
-          <span>??</span>
+          <span>日期</span>
           <input id="reminderMonthday" type="number" min="1" max="31" value="1">
         </label>
         <label id="intervalMonthsField" hidden>
-          <span>????</span>
+          <span>间隔月数</span>
           <input id="reminderIntervalMonths" type="number" min="1" max="60" value="3">
         </label>
       </div>
@@ -388,12 +412,12 @@
       <label class="toggle-label reminder-enabled-label">
         <input id="reminderEnabled" type="checkbox" checked>
         <span class="toggle"></span>
-        <span>?? Telegram ??</span>
+        <span>启用 Telegram 提醒</span>
       </label>
       <p class="form-error" id="reminderError" role="alert"></p>
       <div class="dialog-actions">
-        <button type="button" class="secondary-button" id="reminderCancel">??</button>
-        <button type="submit" class="primary-button">????</button>
+        <button type="button" class="secondary-button" id="reminderCancel">取消</button>
+        <button type="submit" class="primary-button">保存提醒</button>
       </div>
     </form>
   </dialog>
