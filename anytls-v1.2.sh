@@ -12,7 +12,7 @@ INFO_FILE="$CONFIG_DIR/node-info.env"
 SERVICE_FILE="/etc/systemd/system/anytls.service"
 SERVICE_NAME="anytls"
 DEFAULT_PORT=443
-DEFAULT_DASHBOARD_URL="${DEFAULT_DASHBOARD_URL:-https://home.ejectors.net}"
+DEFAULT_DASHBOARD_URL="${DEFAULT_DASHBOARD_URL:-}"
 DASHBOARD_AGENT_CONF="${DASHBOARD_AGENT_CONF:-/etc/ejectors-vps-agent.conf}"
 SUBSCRIPTION_INFO_FILE="$CONFIG_DIR/subscription.env"
 
@@ -199,6 +199,9 @@ load_subscription_identity() {
   [[ -n "$SUB_INGEST_TOKEN" ]] || SUB_INGEST_TOKEN="$(subscription_info_value INGEST_TOKEN)"
   [[ -n "$SUB_NODE_ID" ]] || SUB_NODE_ID="$(subscription_info_value NODE_ID)"
   SUB_DASHBOARD_URL="${SUB_DASHBOARD_URL:-$DEFAULT_DASHBOARD_URL}"
+  if [[ -z "$SUB_DASHBOARD_URL" ]]; then
+    read -rp "聚合订阅服务地址（HTTPS）: " SUB_DASHBOARD_URL
+  fi
   SUB_DASHBOARD_URL="${SUB_DASHBOARD_URL%/}"
   if [[ -z "$SUB_NODE_ID" && -r /etc/machine-id ]]; then
     SUB_NODE_ID="anytls-$(tr -cd 'a-zA-Z0-9' </etc/machine-id | head -c 20)"
@@ -321,7 +324,7 @@ install_node() {
   echo "AnyTLS 节点已创建。参考实现使用自签证书，所以链接中的 insecure=1 是必需的："
   print_all_formats "$name" "$host" "$port" "$password" "$sni" "$link"
   echo
-  if confirm_yes "是否将这台 VPS 加入 home.ejectors.net 的 AnyTLS 聚合订阅？"; then
+  if confirm_yes "是否将这台 VPS 加入 AnyTLS 聚合订阅？"; then
     sync_subscription_node
   fi
 }
