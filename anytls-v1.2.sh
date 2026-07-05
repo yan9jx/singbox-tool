@@ -215,13 +215,9 @@ load_subscription_identity() {
   [[ "$SUB_INGEST_TOKEN" =~ ^[A-Za-z0-9._~-]{16,512}$ ]] || die "上报密钥格式错误。"
 }
 
-subscription_access_hash() {
-  printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}'
-}
-
 sync_subscription_node() {
   require_node_files
-  local quiet="${1:-false}" name host port password sni payload access_hash subscription_url
+  local quiet="${1:-false}" name host port password sni payload response subscription_url
   name="$(info_value NODE_NAME)"
   host="$(info_value SERVER_ADDRESS)"
   port="$(info_value PORT)"
@@ -231,14 +227,14 @@ sync_subscription_node() {
   payload="$(printf '{"node_id":"%s","name":"%s","server":"%s","port":%s,"password":"%s","sni":"%s","insecure":true}' \
     "$(json_escape "$SUB_NODE_ID")" "$(json_escape "$name")" "$(json_escape "$host")" "$port" \
     "$(json_escape "$password")" "$(json_escape "$sni")")"
-  if ! curl -fsS --max-time 20 -X POST "${SUB_DASHBOARD_URL}/api/v1/anytls" \
-    -H "Authorization: Bearer ${SUB_INGEST_TOKEN}" -H "Content-Type: application/json" --data "$payload" >/dev/null; then
+  if ! response="$(curl -fsS --max-time 20 -X POST "${SUB_DASHBOARD_URL}/api/v1/anytls" \
+    -H "Authorization: Bearer ${SUB_INGEST_TOKEN}" -H "Content-Type: application/json" --data "$payload")"; then
     echo "警告：AnyTLS 节点未能登记到聚合订阅服务。" >&2
     return 1
   fi
-  access_hash="$(subscription_access_hash "$SUB_INGEST_TOKEN")"
-  [[ "$access_hash" =~ ^[a-f0-9]{64}$ ]] || die "无法生成订阅访问令牌。"
-  subscription_url="${SUB_DASHBOARD_URL}/sub/anytls/${access_hash}"
+  subscription_url="$(sed -n 's/.*"subscription_url":"\([^"]*\)".*/\1/p' <<<"$response")"
+  [[ "$subscription_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/sub/anytls/[a-f0-9]{64}$ ]] ||
+    die "订阅服务未返回有效链接。"
   install -d -m 700 "$CONFIG_DIR"
   cat >"$SUBSCRIPTION_INFO_FILE" <<EOF
 DASHBOARD_URL='$SUB_DASHBOARD_URL'
