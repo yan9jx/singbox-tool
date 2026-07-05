@@ -16,68 +16,72 @@ export default {
         return json({ ok: true, service: "ejectors-vps-dashboard" });
       }
 
+      if (url.pathname.startsWith("/sub/anytls/") && request.method === "GET") {
+        return serveAnyTlsSubscription(url, env);
+      }
+
       if (requiresViewAuthorization(url.pathname)) {
         const authError = await enforceViewAuthorization(request, env);
         if (authError) return authError;
       }
 
       if (url.pathname === "/api/v1/session" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("???????");
+        if (!isViewAuthorized(request, env)) return unauthorized("查看密码不正确");
         return json({ ok: true });
       }
 
       if (url.pathname === "/api/v1/nodes" && request.method === "GET") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return statusStore(env).fetch(new Request("https://store/nodes"));
       }
 
       if (url.pathname === "/api/v1/node-settings" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return updateNodeSettings(request, env);
       }
 
       if (url.pathname === "/api/v1/node-profile" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return updateNodeProfile(request, env);
       }
 
       if (url.pathname === "/api/v1/reminders" && request.method === "GET") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return statusStore(env).fetch(new Request("https://store/global-reminders"));
       }
 
       if (url.pathname === "/api/v1/reminders" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return saveGlobalReminder(request, env);
       }
 
       if (url.pathname === "/api/v1/reminders/delete" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return mutateGlobalReminder(request, env, "delete");
       }
 
       if (url.pathname === "/api/v1/reminders/toggle" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return mutateGlobalReminder(request, env, "toggle");
       }
 
       if (url.pathname === "/api/v1/dashboard-settings" && request.method === "GET") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return statusStore(env).fetch(new Request("https://store/dashboard-settings"));
       }
 
       if (url.pathname === "/api/v1/dashboard-settings" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return saveDashboardSettings(request, env);
       }
 
       if (url.pathname === "/api/v1/nodes/delete" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return deleteOfflineNode(request, env);
       }
 
       if (url.pathname === "/api/v1/nodes/order" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return statusStore(env).fetch(new Request("https://store/nodes/order", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -86,12 +90,12 @@ export default {
       }
 
       if (url.pathname === "/api/v1/config/export" && request.method === "GET") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return statusStore(env).fetch(new Request("https://store/config/export"));
       }
 
       if (url.pathname === "/api/v1/config/import" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return statusStore(env).fetch(new Request("https://store/config/import", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -100,30 +104,40 @@ export default {
       }
 
       if (url.pathname === "/api/v1/telegram/test" && request.method === "POST") {
-        if (!isViewAuthorized(request, env)) return unauthorized("??????");
-        if (!telegramConfigured(env)) return json({ ok: false, error: "Telegram ????" }, 400);
-        await sendTelegram(env, "? VPS ???? Telegram ??????");
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        if (!telegramConfigured(env)) return json({ ok: false, error: "Telegram 尚未配置" }, 400);
+        await sendTelegram(env, "✅ VPS 状态面板 Telegram 提醒连接成功");
         return json({ ok: true });
       }
 
       if (url.pathname === "/api/v1/heartbeat" && request.method === "POST") {
-        if (!isIngestAuthorized(request, env)) return unauthorized("???????");
+        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
         return receiveHeartbeat(request, env, "online");
       }
 
       if (url.pathname === "/api/v1/shutdown" && request.method === "POST") {
-        if (!isIngestAuthorized(request, env)) return unauthorized("???????");
+        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
         return receiveHeartbeat(request, env, "shutdown");
       }
 
+      if (url.pathname === "/api/v1/anytls" && request.method === "POST") {
+        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
+        return receiveAnyTlsNode(request, env);
+      }
+
+      if (url.pathname === "/api/v1/anytls/delete" && request.method === "POST") {
+        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
+        return deleteAnyTlsNode(request, env);
+      }
+
       if (url.pathname.startsWith("/api/")) {
-        return json({ ok: false, error: "?????" }, 404);
+        return json({ ok: false, error: "接口不存在" }, 404);
       }
 
       return env.ASSETS.fetch(request);
     } catch (error) {
       console.error(error);
-      return json({ ok: false, error: "???????" }, 500);
+      return json({ ok: false, error: "服务器内部错误" }, 500);
     }
   },
 
@@ -137,18 +151,18 @@ export default {
 async function receiveHeartbeat(request, env, forcedState) {
   const contentLength = Number(request.headers.get("content-length") || 0);
   if (contentLength > MAX_BODY_BYTES) {
-    return json({ ok: false, error: "??????" }, 413);
+    return json({ ok: false, error: "上报数据过大" }, 413);
   }
 
   let input;
   try {
     input = await request.json();
   } catch {
-    return json({ ok: false, error: "JSON ????" }, 400);
+    return json({ ok: false, error: "JSON 格式错误" }, 400);
   }
 
   if (!input || typeof input !== "object" || !NODE_ID_PATTERN.test(input.node_id || "")) {
-    return json({ ok: false, error: "node_id ????" }, 400);
+    return json({ ok: false, error: "node_id 格式错误" }, 400);
   }
 
   const now = Math.floor(Date.now() / 1000);
@@ -171,6 +185,66 @@ async function receiveHeartbeat(request, env, forcedState) {
   }));
 }
 
+async function receiveAnyTlsNode(request, env) {
+  const contentLength = Number(request.headers.get("content-length") || 0);
+  if (contentLength > MAX_BODY_BYTES) return json({ ok: false, error: "上报数据过大" }, 413);
+  let input;
+  try {
+    input = await request.json();
+  } catch {
+    return json({ ok: false, error: "JSON 格式错误" }, 400);
+  }
+  const nodeId = String(input?.node_id || "");
+  const name = cleanText(input?.name || nodeId, 80);
+  const server = cleanText(input?.server, 255);
+  const port = Number(input?.port);
+  const password = cleanText(input?.password, 512);
+  const sni = cleanText(input?.sni, 255);
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
+  if (!name || !server || /[\s/?#]/.test(server)) return json({ ok: false, error: "节点地址格式错误" }, 400);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return json({ ok: false, error: "端口格式错误" }, 400);
+  if (!password) return json({ ok: false, error: "AnyTLS 密码不能为空" }, 400);
+  if (!/^[A-Za-z0-9.-]+$/.test(sni)) return json({ ok: false, error: "SNI 格式错误" }, 400);
+  return statusStore(env).fetch(new Request("https://store/anytls/upsert", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      node_id: nodeId,
+      name,
+      server,
+      port,
+      password,
+      sni,
+      insecure: input?.insecure !== false,
+      updated_at: Math.floor(Date.now() / 1000),
+    }),
+  }));
+}
+
+async function deleteAnyTlsNode(request, env) {
+  let input;
+  try {
+    input = await request.json();
+  } catch {
+    return json({ ok: false, error: "JSON 格式错误" }, 400);
+  }
+  const nodeId = String(input?.node_id || "");
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
+  return statusStore(env).fetch(new Request("https://store/anytls/delete", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ node_id: nodeId }),
+  }));
+}
+
+async function serveAnyTlsSubscription(url, env) {
+  const token = url.pathname.slice("/sub/anytls/".length);
+  if (!/^[a-f0-9]{64}$/.test(token) || !env.INGEST_TOKEN) return new Response("Not Found", { status: 404 });
+  const expected = await sha256Hex(env.INGEST_TOKEN);
+  if (!safeEqual(token, expected)) return new Response("Not Found", { status: 404 });
+  return statusStore(env).fetch(new Request("https://store/anytls/subscription"));
+}
+
 function statusStore(env) {
   return env.STATUS_STORE.getByName("global");
 }
@@ -180,7 +254,7 @@ async function updateNodeSettings(request, env) {
   try {
     input = await request.json();
   } catch {
-    return json({ ok: false, error: "JSON ????" }, 400);
+    return json({ ok: false, error: "JSON 格式错误" }, 400);
   }
 
   const nodeId = String(input?.node_id || "");
@@ -188,14 +262,14 @@ async function updateNodeSettings(request, env) {
   const memo = cleanText(input?.memo, 500);
   const reminderAt = Number(input?.reminder_at || 0);
   const reminderRepeatUntil = Number(input?.reminder_repeat_until || 0);
-  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id ????" }, 400);
-  if (expiryDate && !isValidDate(expiryDate)) return json({ ok: false, error: "????????" }, 400);
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
+  if (expiryDate && !isValidDate(expiryDate)) return json({ ok: false, error: "到期日期格式错误" }, 400);
   if (!Number.isInteger(reminderAt) || reminderAt < 0 || reminderAt > 4102444800) {
-    return json({ ok: false, error: "????????" }, 400);
+    return json({ ok: false, error: "提醒时间格式错误" }, 400);
   }
   if (!Number.isInteger(reminderRepeatUntil) || reminderRepeatUntil < 0 || reminderRepeatUntil > 4102444800
     || (reminderRepeatUntil > 0 && (reminderAt < 1 || reminderRepeatUntil <= reminderAt))) {
-    return json({ ok: false, error: "??????????" }, 400);
+    return json({ ok: false, error: "持续提醒截止时间错误" }, 400);
   }
   const settings = {
     expiry_date: expiryDate,
@@ -213,12 +287,12 @@ async function updateNodeSettings(request, env) {
 
 async function updateNodeProfile(request, env) {
   let input;
-  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON ????" }, 400); }
+  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON 格式错误" }, 400); }
   const nodeId = String(input?.node_id || "");
   const maintenanceUntil = Number(input?.maintenance_until || 0);
-  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id ????" }, 400);
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
   if (!Number.isInteger(maintenanceUntil) || maintenanceUntil < 0 || maintenanceUntil > 4102444800) {
-    return json({ ok: false, error: "??????????" }, 400);
+    return json({ ok: false, error: "维护结束时间格式错误" }, 400);
   }
   return statusStore(env).fetch(new Request("https://store/settings", {
     method: "POST",
@@ -242,7 +316,7 @@ async function saveGlobalReminder(request, env) {
   try {
     input = await request.json();
   } catch {
-    return json({ ok: false, error: "JSON ????" }, 400);
+    return json({ ok: false, error: "JSON 格式错误" }, 400);
   }
 
   const scheduleType = String(input?.schedule_type || "");
@@ -261,28 +335,28 @@ async function saveGlobalReminder(request, env) {
     interval_months: Number(input?.interval_months || 1),
     enabled: input?.enabled !== false,
   };
-  if (!reminder.title) return json({ ok: false, error: "????????" }, 400);
-  if (!allowedTypes.includes(scheduleType)) return json({ ok: false, error: "??????" }, 400);
+  if (!reminder.title) return json({ ok: false, error: "提醒名称不能为空" }, 400);
+  if (!allowedTypes.includes(scheduleType)) return json({ ok: false, error: "提醒类型错误" }, 400);
   if (["once", "interval_months"].includes(scheduleType) && (!Number.isInteger(reminder.schedule_at) || reminder.schedule_at < 1)) {
-    return json({ ok: false, error: "????????" }, 400);
+    return json({ ok: false, error: "首次提醒时间错误" }, 400);
   }
   if (!["once", "interval_months"].includes(scheduleType) && !/^([01]\d|2[0-3]):[0-5]\d$/.test(reminder.schedule_time)) {
-    return json({ ok: false, error: "????????" }, 400);
+    return json({ ok: false, error: "循环提醒时间错误" }, 400);
   }
   if (scheduleType === "weekly" && (!Number.isInteger(reminder.weekday) || reminder.weekday < 0 || reminder.weekday > 6)) {
-    return json({ ok: false, error: "??????" }, 400);
+    return json({ ok: false, error: "星期设置错误" }, 400);
   }
   if (["monthly", "yearly"].includes(scheduleType) && (!Number.isInteger(reminder.monthday) || reminder.monthday < 1 || reminder.monthday > 31)) {
-    return json({ ok: false, error: "????????" }, 400);
+    return json({ ok: false, error: "每月日期设置错误" }, 400);
   }
   if (scheduleType === "yearly" && (!Number.isInteger(reminder.schedule_month) || reminder.schedule_month < 1 || reminder.schedule_month > 12)) {
-    return json({ ok: false, error: "????????" }, 400);
+    return json({ ok: false, error: "每年月份设置错误" }, 400);
   }
   if (scheduleType === "interval_months" && (!Number.isInteger(reminder.interval_months) || reminder.interval_months < 1 || reminder.interval_months > 60)) {
-    return json({ ok: false, error: "??????" }, 400);
+    return json({ ok: false, error: "间隔月数错误" }, 400);
   }
   if (scheduleType === "hourly_until" && (!Number.isInteger(reminder.schedule_end_at) || reminder.schedule_end_at <= reminder.schedule_at)) {
-    return json({ ok: false, error: "????????????????" }, 400);
+    return json({ ok: false, error: "持续提醒结束时间必须晚于开始时间" }, 400);
   }
   return statusStore(env).fetch(new Request("https://store/global-reminder/save", {
     method: "POST",
@@ -296,10 +370,10 @@ async function mutateGlobalReminder(request, env, action) {
   try {
     input = await request.json();
   } catch {
-    return json({ ok: false, error: "JSON ????" }, 400);
+    return json({ ok: false, error: "JSON 格式错误" }, 400);
   }
   const id = String(input?.id || "");
-  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(id)) return json({ ok: false, error: "?? ID ??" }, 400);
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(id)) return json({ ok: false, error: "提醒 ID 错误" }, 400);
   return statusStore(env).fetch(new Request(`https://store/global-reminder/${action}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -309,28 +383,28 @@ async function mutateGlobalReminder(request, env, action) {
 
 async function saveDashboardSettings(request, env) {
   let input;
-  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON ????" }, 400); }
+  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON 格式错误" }, 400); }
   const settings = {};
   if (Object.hasOwn(input, "auto_delete_offline_days")) {
     const days = Number(input.auto_delete_offline_days);
-    if (![0, 7, 30, 90].includes(days)) return json({ ok: false, error: "????????" }, 400);
+    if (![0, 7, 30, 90].includes(days)) return json({ ok: false, error: "自动清理周期错误" }, 400);
     settings.auto_delete_offline_days = days;
   }
   if (Object.hasOwn(input, "telegram_repeat_interval_minutes")) {
     const interval = Number(input.telegram_repeat_interval_minutes);
-    if (!Number.isInteger(interval) || interval < 1 || interval > 1440) return json({ ok: false, error: "?????? 1?1440 ??" }, 400);
+    if (!Number.isInteger(interval) || interval < 1 || interval > 1440) return json({ ok: false, error: "提醒间隔应为 1～1440 分钟" }, 400);
     settings.telegram_repeat_interval_minutes = interval;
   }
   if (Object.hasOwn(input, "telegram_repeat_start") || Object.hasOwn(input, "telegram_repeat_end")) {
     const start = String(input.telegram_repeat_start || "");
     const end = String(input.telegram_repeat_end || "");
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(start) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(end) || start >= end) {
-      return json({ ok: false, error: "??????????????" }, 400);
+      return json({ ok: false, error: "提醒结束时间必须晚于开始时间" }, 400);
     }
     settings.telegram_repeat_start = start;
     settings.telegram_repeat_end = end;
   }
-  if (!Object.keys(settings).length) return json({ ok: false, error: "????????" }, 400);
+  if (!Object.keys(settings).length) return json({ ok: false, error: "没有可保存的设置" }, 400);
   return statusStore(env).fetch(new Request("https://store/dashboard-settings", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -340,9 +414,9 @@ async function saveDashboardSettings(request, env) {
 
 async function deleteOfflineNode(request, env) {
   let input;
-  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON ????" }, 400); }
+  try { input = await request.json(); } catch { return json({ ok: false, error: "JSON 格式错误" }, 400); }
   const nodeId = String(input?.node_id || "");
-  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id ????" }, 400);
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
   return statusStore(env).fetch(new Request("https://store/node/delete", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -362,11 +436,29 @@ export class VpsStatusStore {
     if (url.pathname === "/report" && request.method === "POST") {
       const record = await request.json();
       const nodeId = record?.payload?.node_id;
-      if (!NODE_ID_PATTERN.test(nodeId || "")) return json({ ok: false, error: "node_id ????" }, 400);
+      if (!NODE_ID_PATTERN.test(nodeId || "")) return json({ ok: false, error: "node_id 格式错误" }, 400);
       const existing = await this.ctx.storage.get(`node:${nodeId}`);
       record.settings = existing?.settings || defaultSettings();
       await this.ctx.storage.put(`node:${nodeId}`, record);
       return json({ ok: true, node_id: nodeId, state: record.agent_state, server_time: record.last_seen });
+    }
+
+    if (url.pathname === "/anytls/upsert" && request.method === "POST") {
+      const record = await request.json();
+      await this.ctx.storage.put(`anytls:${record.node_id}`, record);
+      return json({ ok: true, node_id: record.node_id, updated_at: record.updated_at });
+    }
+
+    if (url.pathname === "/anytls/delete" && request.method === "POST") {
+      const input = await request.json();
+      await this.ctx.storage.delete(`anytls:${input.node_id}`);
+      return json({ ok: true, node_id: input.node_id });
+    }
+
+    if (url.pathname === "/anytls/subscription" && request.method === "GET") {
+      const records = await this.ctx.storage.list({ prefix: "anytls:" });
+      const nodes = [...records.values()].sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+      return anyTlsYaml(nodes);
     }
 
     if (url.pathname === "/auth/check" && request.method === "GET") {
@@ -413,7 +505,7 @@ export class VpsStatusStore {
       const input = await request.json();
       const key = `node:${input.node_id}`;
       const record = await this.ctx.storage.get(key);
-      if (!record) return json({ ok: false, error: "?????" }, 404);
+      if (!record) return json({ ok: false, error: "节点不存在" }, 404);
       const previous = record.settings || defaultSettings();
       const next = {
         ...previous,
@@ -470,7 +562,7 @@ export class VpsStatusStore {
       const input = await request.json();
       const key = `global-reminder:${input.id}`;
       const record = await this.ctx.storage.get(key);
-      if (!record) return json({ ok: false, error: "?????" }, 404);
+      if (!record) return json({ ok: false, error: "提醒不存在" }, 404);
       record.enabled = Boolean(input.enabled);
       record.completed = false;
       record.updated_at = Math.floor(Date.now() / 1000);
@@ -501,18 +593,18 @@ export class VpsStatusStore {
       const input = await request.json();
       const key = `node:${input.node_id}`;
       const record = await this.ctx.storage.get(key);
-      if (!record) return json({ ok: false, error: "?????" }, 404);
+      if (!record) return json({ ok: false, error: "节点不存在" }, 404);
       const now = Math.floor(Date.now() / 1000);
       const offlineAfter = clampNumber(this.env.OFFLINE_AFTER_SECONDS, 30, 3600, 150);
       const offline = record.agent_state === "shutdown" || now - record.last_seen > offlineAfter;
-      if (!offline) return json({ ok: false, error: "????????" }, 409);
+      if (!offline) return json({ ok: false, error: "在线节点不能删除" }, 409);
       await this.ctx.storage.delete(key);
       return json({ ok: true });
     }
 
     if (url.pathname === "/nodes/order" && request.method === "POST") {
       const input = await request.json();
-      if (!Array.isArray(input.node_ids) || input.node_ids.length > 500) return json({ ok: false, error: "??????" }, 400);
+      if (!Array.isArray(input.node_ids) || input.node_ids.length > 500) return json({ ok: false, error: "排序数据错误" }, 400);
       let updated = 0;
       for (let index = 0; index < input.node_ids.length; index += 1) {
         const nodeId = String(input.node_ids[index] || "");
@@ -545,7 +637,7 @@ export class VpsStatusStore {
 
     if (url.pathname === "/config/import" && request.method === "POST") {
       const input = await request.json();
-      if (input?.format !== "ejectors-dashboard-config" || input?.version !== 1) return json({ ok: false, error: "????????" }, 400);
+      if (input?.format !== "ejectors-dashboard-config" || input?.version !== 1) return json({ ok: false, error: "备份文件格式错误" }, 400);
       let nodes = 0;
       let skipped = 0;
       for (const [nodeId, imported] of Object.entries(input.nodes || {}).slice(0, 500)) {
@@ -608,7 +700,7 @@ export class VpsStatusStore {
           settings,
         };
       }).sort((a, b) => {
-        const groupOrder = (a.settings.group || "???").localeCompare(b.settings.group || "???", "zh-CN");
+        const groupOrder = (a.settings.group || "未分组").localeCompare(b.settings.group || "未分组", "zh-CN");
         return groupOrder || (a.settings.sort_order - b.settings.sort_order) || a.name.localeCompare(b.name, "zh-CN");
       });
 
@@ -623,14 +715,14 @@ export class VpsStatusStore {
         server_time: now,
         refresh_seconds: 15,
         offline_after_seconds: offlineAfter,
-        cloud_drive_url: this.env.CLOUD_DRIVE_URL || "https://disk.example.com",
+        cloud_drive_url: this.env.CLOUD_DRIVE_URL || "https://disk.ejectors.net",
         telegram_configured: telegramConfigured(this.env),
         summary,
         nodes,
       });
     }
 
-    return json({ ok: false, error: "???????" }, 404);
+    return json({ ok: false, error: "存储接口不存在" }, 404);
   }
 
   async runReminders(now) {
@@ -666,9 +758,9 @@ export class VpsStatusStore {
 
       if (settings.reminder_at > 0 && settings.reminder_at <= now) {
         const message = [
-          "? VPS ????",
-          `???${record.payload.name}`,
-          settings.memo ? `???${settings.memo}` : "?????? VPS ????",
+          "⏰ VPS 备忘提醒",
+          `节点：${record.payload.name}`,
+          settings.memo ? `备忘：${settings.memo}` : "备忘：请查看 VPS 状态面板",
         ].join("\n");
         if (!settings.reminder_sent_at) {
           try {
@@ -691,13 +783,13 @@ export class VpsStatusStore {
         const notificationKey = `${settings.expiry_date}:${daysLeft}`;
         const sentKeys = Array.isArray(settings.expiry_notifications) ? settings.expiry_notifications : [];
         if ([30, 7, 3, 1, 0].includes(daysLeft) && !sentKeys.includes(notificationKey)) {
-          const countdown = daysLeft === 0 ? "????" : `?? ${daysLeft} ?`;
+          const countdown = daysLeft === 0 ? "今天到期" : `剩余 ${daysLeft} 天`;
           const message = [
-            "?? VPS ????",
-            `???${record.payload.name}`,
-            `?????${settings.expiry_date}`,
-            `???${countdown}`,
-            settings.memo ? `???${settings.memo}` : "",
+            "📅 VPS 到期提醒",
+            `节点：${record.payload.name}`,
+            `到期日期：${settings.expiry_date}`,
+            `状态：${countdown}`,
+            settings.memo ? `备忘：${settings.memo}` : "",
           ].filter(Boolean).join("\n");
           try {
             await this.sendReminder(message, now, dashboardSettings, {
@@ -733,10 +825,10 @@ export class VpsStatusStore {
       const fireKey = globalReminderFireKey(reminder, now);
       if (!fireKey || reminder.last_fired_key === fireKey) continue;
       const message = [
-        "?? ??????",
-        `???${reminder.title}`,
-        reminder.content ? `???${reminder.content}` : "",
-        `???${globalReminderScheduleLabel(reminder)}`,
+        "📝 全局备忘提醒",
+        `事项：${reminder.title}`,
+        reminder.content ? `内容：${reminder.content}` : "",
+        `计划：${globalReminderScheduleLabel(reminder)}`,
       ].filter(Boolean).join("\n");
       try {
         if (reminder.schedule_type === "hourly_until") {
@@ -921,17 +1013,17 @@ function globalReminderScheduleLabel(reminder) {
     return new Date(reminder.schedule_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
   }
   if (reminder.schedule_type === "interval_months") {
-    return `? ${reminder.interval_months} ???? ${new Date(reminder.schedule_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`;
+    return `每 ${reminder.interval_months} 个月，自 ${new Date(reminder.schedule_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`;
   }
   if (reminder.schedule_type === "hourly_until") {
     const start = new Date(reminder.schedule_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
     const end = new Date(reminder.schedule_end_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
-    return `????? ${start} ? ${end}`;
+    return `每小时，自 ${start} 至 ${end}`;
   }
-  if (reminder.schedule_type === "daily") return `?? ${reminder.schedule_time}`;
-  if (reminder.schedule_type === "weekly") return `??${"???????"[reminder.weekday]} ${reminder.schedule_time}`;
-  if (reminder.schedule_type === "monthly") return `?? ${reminder.monthday} ? ${reminder.schedule_time}`;
-  return `?? ${reminder.schedule_month} ? ${reminder.monthday} ? ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "daily") return `每天 ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "weekly") return `每周${"日一二三四五六"[reminder.weekday]} ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "monthly") return `每月 ${reminder.monthday} 日 ${reminder.schedule_time}`;
+  return `每年 ${reminder.schedule_month} 月 ${reminder.monthday} 日 ${reminder.schedule_time}`;
 }
 
 function defaultSettings() {
@@ -1081,6 +1173,64 @@ function cleanText(value, maxLength) {
   return String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, "").slice(0, maxLength);
 }
 
+function anyTlsYaml(nodes) {
+  const counts = new Map();
+  for (const node of nodes) counts.set(node.name, (counts.get(node.name) || 0) + 1);
+  const normalized = nodes.map((node) => ({
+    ...node,
+    display_name: counts.get(node.name) > 1 ? `${node.name} (${node.node_id})` : node.name,
+  }));
+  const proxyLines = normalized.map((node) => [
+    `  - name: ${yamlString(node.display_name)}`,
+    "    type: anytls",
+    `    server: ${yamlString(node.server)}`,
+    `    port: ${node.port}`,
+    `    password: ${yamlString(node.password)}`,
+    "    client-fingerprint: chrome",
+    "    udp: true",
+    `    sni: ${yamlString(node.sni)}`,
+    `    skip-cert-verify: ${node.insecure !== false}`,
+  ].join("\n"));
+  const groupNodes = normalized.map((node) => `      - ${yamlString(node.display_name)}`);
+  const body = [
+    "mixed-port: 7890",
+    "allow-lan: false",
+    "mode: rule",
+    "log-level: info",
+    "",
+    ...(proxyLines.length ? ["proxies:", ...proxyLines] : ["proxies: []"]),
+    "",
+    "proxy-groups:",
+    "  - name: PROXY",
+    "    type: select",
+    "    proxies:",
+    ...groupNodes,
+    "      - DIRECT",
+    "",
+    "rules:",
+    "  - MATCH,PROXY",
+    "",
+  ].join("\n");
+  return new Response(body, {
+    headers: {
+      "content-type": "text/yaml; charset=utf-8",
+      "cache-control": "no-store, no-cache, must-revalidate",
+      "content-disposition": 'inline; filename="anytls.yaml"',
+      "x-content-type-options": "nosniff",
+      "x-robots-tag": "noindex, nofollow, noarchive",
+    },
+  });
+}
+
+function yamlString(value) {
+  return JSON.stringify(String(value ?? ""));
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value)));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function clampNumber(value, min, max, fallback) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -1094,7 +1244,7 @@ function isIngestAuthorized(request, env) {
 
 function requiresViewAuthorization(pathname) {
   return pathname.startsWith("/api/v1/")
-    && !["/api/v1/health", "/api/v1/heartbeat", "/api/v1/shutdown"].includes(pathname);
+    && !["/api/v1/health", "/api/v1/heartbeat", "/api/v1/shutdown", "/api/v1/anytls", "/api/v1/anytls/delete"].includes(pathname);
 }
 
 async function enforceViewAuthorization(request, env) {
@@ -1124,7 +1274,7 @@ async function enforceViewAuthorization(request, env) {
   }));
   const result = await failed.json();
   if (result.blocked) return rateLimited(result.retry_after || 600);
-  return json({ ok: false, error: "???????", remaining_attempts: result.remaining_attempts }, 401);
+  return json({ ok: false, error: "查看密码不正确", remaining_attempts: result.remaining_attempts }, 401);
 }
 
 function isViewAuthorized(request, env) {
@@ -1133,7 +1283,7 @@ function isViewAuthorized(request, env) {
 }
 
 function rateLimited(seconds) {
-  return new Response(JSON.stringify({ ok: false, error: "????????????", retry_after: seconds }), {
+  return new Response(JSON.stringify({ ok: false, error: "登录尝试过多，请稍后重试", retry_after: seconds }), {
     status: 429,
     headers: {
       ...JSON_HEADERS,
