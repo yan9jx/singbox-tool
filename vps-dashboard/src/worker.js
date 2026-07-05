@@ -35,6 +35,16 @@ export default {
         return statusStore(env).fetch(new Request("https://store/nodes"));
       }
 
+      if (url.pathname === "/api/v1/anytls/info" && request.method === "GET") {
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        return getAnyTlsInfo(request, env);
+      }
+
+      if (url.pathname === "/api/v1/anytls/toggle" && request.method === "POST") {
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        return toggleAnyTlsNode(request, env);
+      }
+
       if (url.pathname === "/api/v1/node-settings" && request.method === "POST") {
         if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return updateNodeSettings(request, env);
@@ -234,6 +244,36 @@ async function deleteAnyTlsNode(request, env) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ node_id: nodeId }),
+  }));
+}
+
+async function getAnyTlsInfo(request, env) {
+  const response = await statusStore(env).fetch(new Request("https://store/anytls/nodes"));
+  const data = await response.json();
+  const accessHash = await sha256Hex(env.INGEST_TOKEN || "");
+  const origin = new URL(request.url).origin;
+  return json({
+    ok: true,
+    subscription_url: env.INGEST_TOKEN ? `${origin}/sub/anytls/${accessHash}` : "",
+    nodes: data.nodes || [],
+  });
+}
+
+async function toggleAnyTlsNode(request, env) {
+  let input;
+  try {
+    input = await request.json();
+  } catch {
+    return json({ ok: false, error: "JSON 格式错误" }, 400);
+  }
+  const nodeId = String(input?.node_id || "");
+  if (!NODE_ID_PATTERN.test(nodeId) || typeof input?.enabled !== "boolean") {
+    return json({ ok: false, error: "订阅节点设置错误" }, 400);
+  }
+  return statusStore(env).fetch(new Request("https://store/anytls/toggle", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ node_id: nodeId, enabled: input.enabled }),
   }));
 }
 
@@ -445,7 +485,10 @@ export class VpsStatusStore {
 
     if (url.pathname === "/anytls/upsert" && request.method === "POST") {
       const record = await request.json();
-      await this.ctx.storage.put(`anytls:${record.node_id}`, record);
+      const key = `anytls:${record.node_id}`;
+      const existing = await this.ctx.storage.get(key);
+      record.enabled = existing?.enabled !== false;
+      await this.ctx.storage.put(key, record);
       return json({ ok: true, node_id: record.node_id, updated_at: record.updated_at });
     }
 
@@ -455,9 +498,37 @@ export class VpsStatusStore {
       return json({ ok: true, node_id: input.node_id });
     }
 
+    if (url.pathname === "/anytls/toggle" && request.method === "POST") {
+      const input = await request.json();
+      const key = `anytls:${input.node_id}`;
+      const record = await this.ctx.storage.get(key);
+      if (!record) return json({ ok: false, error: "AnyTLS 节点不存在" }, 404);
+      record.enabled = input.enabled;
+      await this.ctx.storage.put(key, record);
+      return json({ ok: true, node_id: input.node_id, enabled: record.enabled });
+    }
+
+    if (url.pathname === "/anytls/nodes" && request.method === "GET") {
+      const records = await this.ctx.storage.list({ prefix: "anytls:" });
+      const nodes = [...records.values()]
+        .map((record) => ({
+          node_id: record.node_id,
+          name: record.name,
+          server: record.server,
+          port: record.port,
+          sni: record.sni,
+          enabled: record.enabled !== false,
+          updated_at: record.updated_at,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+      return json({ ok: true, nodes });
+    }
+
     if (url.pathname === "/anytls/subscription" && request.method === "GET") {
       const records = await this.ctx.storage.list({ prefix: "anytls:" });
-      const nodes = [...records.values()].sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+      const nodes = [...records.values()]
+        .filter((record) => record.enabled !== false)
+        .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
       return anyTlsYaml(nodes);
     }
 
