@@ -90,6 +90,7 @@ const elements = {
   anytlsSummary: document.querySelector("#anytlsSummary"),
   anytlsSubscriptionUrl: document.querySelector("#anytlsSubscriptionUrl"),
   copyAnyTlsSubscription: document.querySelector("#copyAnyTlsSubscription"),
+  resetAnyTlsSubscription: document.querySelector("#resetAnyTlsSubscription"),
   anytlsNodeGrid: document.querySelector("#anytlsNodeGrid"),
   driveHost: document.querySelector("#driveHost"),
 };
@@ -201,6 +202,7 @@ function bindEvents() {
   elements.grid.addEventListener("drop", handleNodeDrop);
   elements.grid.addEventListener("dragend", handleNodeDragEnd);
   elements.copyAnyTlsSubscription.addEventListener("click", copyAnyTlsSubscription);
+  elements.resetAnyTlsSubscription.addEventListener("click", resetAnyTlsSubscription);
   elements.anytlsNodeGrid.addEventListener("change", handleAnyTlsToggle);
 }
 
@@ -253,6 +255,7 @@ async function refreshAnyTls() {
   state.anytlsNodes = new Map((data.nodes || []).map((node) => [node.node_id, node]));
   elements.anytlsSubscriptionUrl.value = data.subscription_url || "";
   elements.copyAnyTlsSubscription.disabled = !data.subscription_url;
+  elements.resetAnyTlsSubscription.disabled = !data.subscription_url;
   renderAnyTlsNodes(data.nodes || []);
 }
 
@@ -327,6 +330,29 @@ async function copyAnyTlsSubscription() {
   }
   elements.copyAnyTlsSubscription.textContent = "已复制";
   setTimeout(() => { elements.copyAnyTlsSubscription.textContent = "复制链接"; }, 1200);
+}
+
+async function resetAnyTlsSubscription() {
+  if (!confirm("重置后旧订阅链接会立即失效，已使用旧链接的客户端将无法继续更新。确定重置吗？")) return;
+  elements.resetAnyTlsSubscription.disabled = true;
+  elements.copyAnyTlsSubscription.disabled = true;
+  elements.resetAnyTlsSubscription.textContent = "重置中…";
+  try {
+    const response = await apiFetch("/api/v1/anytls/reset-subscription", { method: "POST" });
+    const result = await response.json();
+    if (!response.ok || !result.subscription_url) throw new Error(result.error || "订阅链接重置失败");
+    elements.anytlsSubscriptionUrl.value = result.subscription_url;
+    elements.copyAnyTlsSubscription.disabled = false;
+    elements.resetAnyTlsSubscription.textContent = "已重置";
+    setTimeout(() => { elements.resetAnyTlsSubscription.textContent = "重置链接"; }, 1400);
+  } catch (error) {
+    elements.resetAnyTlsSubscription.textContent = "重置链接";
+    alert(error.message || "订阅链接重置失败");
+  } finally {
+    const hasLink = Boolean(elements.anytlsSubscriptionUrl.value);
+    elements.copyAnyTlsSubscription.disabled = !hasLink;
+    elements.resetAnyTlsSubscription.disabled = !hasLink;
+  }
 }
 
 function updateTelegramCoverage() {
