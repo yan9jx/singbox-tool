@@ -101,7 +101,10 @@
             <strong>唯一订阅链接</strong>
           </div>
           <input id="anytlsSubscriptionUrl" type="text" readonly placeholder="加入 AnyTLS 节点后生成">
-          <button class="secondary-button" id="copyAnyTlsSubscription" type="button" disabled>复制链接</button>
+          <div class="subscription-link-actions">
+            <button class="secondary-button" id="copyAnyTlsSubscription" type="button" disabled>复制链接</button>
+            <button class="secondary-button danger-button" id="resetAnyTlsSubscription" type="button" disabled>重置链接</button>
+          </div>
         </div>
         <p class="subscription-help">在每台 VPS 的 AnyTLS 脚本中选择“加入 / 更新聚合订阅”，节点会出现在下方；开关决定该 VPS 是否包含在订阅中。</p>
         <div class="subscription-node-grid" id="anytlsNodeGrid">
