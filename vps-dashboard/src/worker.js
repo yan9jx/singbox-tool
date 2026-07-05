@@ -715,7 +715,7 @@ export class VpsStatusStore {
         server_time: now,
         refresh_seconds: 15,
         offline_after_seconds: offlineAfter,
-        cloud_drive_url: this.env.CLOUD_DRIVE_URL || "https://disk.ejectors.net",
+        cloud_drive_url: this.env.CLOUD_DRIVE_URL || "",
         telegram_configured: telegramConfigured(this.env),
         summary,
         nodes,
