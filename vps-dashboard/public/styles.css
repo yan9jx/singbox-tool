@@ -129,6 +129,34 @@ h1 span { color: var(--muted); }
 .reminder-toggle { color: var(--green); font-size: 9px; cursor: pointer; }
 .reminder-card.disabled .reminder-toggle { color: var(--muted); }
 
+.subscription-section { padding: 68px 0 0; }
+.subscription-panel {
+  padding: 20px; border: 1px solid rgba(86,215,255,.13); border-radius: 20px;
+  background: linear-gradient(145deg, rgba(17,25,40,.72), rgba(10,17,29,.7));
+}
+.subscription-link-row { display: grid; grid-template-columns: 180px minmax(0, 1fr) auto; align-items: center; gap: 14px; }
+.subscription-link-row small { display: block; color: var(--cyan); font-size: 8px; letter-spacing: .14em; }
+.subscription-link-row strong { display: block; margin-top: 5px; font-size: 14px; }
+.subscription-link-row input {
+  width: 100%; height: 40px; padding: 0 13px; border: 1px solid var(--line); border-radius: 10px;
+  color: #b9c5d7; background: rgba(4,9,17,.38); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px;
+}
+.subscription-help { margin: 13px 0 17px; color: var(--muted); font-size: 10px; line-height: 1.7; }
+.subscription-node-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.subscription-empty { grid-column: 1 / -1; padding: 22px; text-align: center; border: 1px dashed var(--line); border-radius: 13px; color: var(--muted); font-size: 10px; }
+.subscription-node-card {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px; min-width: 0; padding: 14px;
+  border: 1px solid var(--line); border-radius: 14px; background: rgba(4,9,17,.25); transition: opacity .2s ease, border-color .2s ease;
+}
+.subscription-node-card:hover { border-color: rgba(86,215,255,.2); }
+.subscription-node-card.disabled { opacity: .55; }
+.subscription-node-card > div { min-width: 0; }
+.subscription-node-card strong, .subscription-node-card span, .subscription-node-card small { display: block; }
+.subscription-node-card strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.subscription-node-card div > span { margin-top: 5px; overflow: hidden; color: var(--cyan); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.subscription-node-card small { margin-top: 4px; overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.subscription-node-toggle { flex: none; }
+
 .node-section { padding: 68px 0 40px; }
 .section-title { display: flex; align-items: end; justify-content: space-between; margin-bottom: 22px; }
 .section-title h2 { margin: 0; font-size: 24px; letter-spacing: -.03em; }
@@ -292,6 +320,7 @@ footer { display: flex; justify-content: space-between; padding: 24px 0 38px; bo
   .summary-grid { grid-template-columns: 1fr 1fr; }
   .node-grid { grid-template-columns: 1fr; }
   .reminder-grid { grid-template-columns: 1fr 1fr; }
+  .subscription-node-grid { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 580px) {
   .shell { width: min(100% - 24px, 1220px); }
@@ -316,6 +345,8 @@ footer { display: flex; justify-content: space-between; padding: 24px 0 38px; bo
   .telegram-row { align-items: flex-start; flex-direction: column; }
   .dialog-actions { flex-direction: column-reverse; }
   .dialog-actions .primary-button, .dialog-actions .secondary-button { width: 100%; }
+  .subscription-link-row { grid-template-columns: 1fr; }
+  .subscription-node-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 580px) {
   .reminder-grid { grid-template-columns: 1fr; }
