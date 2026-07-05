@@ -141,6 +141,9 @@ h1 span { color: var(--muted); }
   width: 100%; height: 40px; padding: 0 13px; border: 1px solid var(--line); border-radius: 10px;
   color: #b9c5d7; background: rgba(4,9,17,.38); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px;
 }
+.subscription-link-actions { display: flex; align-items: center; gap: 8px; }
+.danger-button { color: var(--red); border-color: rgba(255,102,126,.2); background: rgba(255,102,126,.05); }
+.danger-button:hover { border-color: rgba(255,102,126,.38); }
 .subscription-help { margin: 13px 0 17px; color: var(--muted); font-size: 10px; line-height: 1.7; }
 .subscription-node-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .subscription-empty { grid-column: 1 / -1; padding: 22px; text-align: center; border: 1px dashed var(--line); border-radius: 13px; color: var(--muted); font-size: 10px; }
