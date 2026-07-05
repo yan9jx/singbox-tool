@@ -45,6 +45,11 @@ export default {
         return toggleAnyTlsNode(request, env);
       }
 
+      if (url.pathname === "/api/v1/anytls/reset-subscription" && request.method === "POST") {
+        if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
+        return resetAnyTlsSubscription(request, env);
+      }
+
       if (url.pathname === "/api/v1/node-settings" && request.method === "POST") {
         if (!isViewAuthorized(request, env)) return unauthorized("需要查看密码");
         return updateNodeSettings(request, env);
@@ -215,7 +220,7 @@ async function receiveAnyTlsNode(request, env) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) return json({ ok: false, error: "端口格式错误" }, 400);
   if (!password) return json({ ok: false, error: "AnyTLS 密码不能为空" }, 400);
   if (!/^[A-Za-z0-9.-]+$/.test(sni)) return json({ ok: false, error: "SNI 格式错误" }, 400);
-  return statusStore(env).fetch(new Request("https://store/anytls/upsert", {
+  const response = await statusStore(env).fetch(new Request("https://store/anytls/upsert", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -229,6 +234,13 @@ async function receiveAnyTlsNode(request, env) {
       updated_at: Math.floor(Date.now() / 1000),
     }),
   }));
+  if (!response.ok) return response;
+  const result = await response.json();
+  const accessToken = await getAnyTlsAccessToken(env);
+  return json({
+    ...result,
+    subscription_url: accessToken ? `${new URL(request.url).origin}/sub/anytls/${accessToken}` : "",
+  });
 }
 
 async function deleteAnyTlsNode(request, env) {
@@ -250,11 +262,11 @@ async function deleteAnyTlsNode(request, env) {
 async function getAnyTlsInfo(request, env) {
   const response = await statusStore(env).fetch(new Request("https://store/anytls/nodes"));
   const data = await response.json();
-  const accessHash = await sha256Hex(env.INGEST_TOKEN || "");
+  const accessToken = await getAnyTlsAccessToken(env);
   const origin = new URL(request.url).origin;
   return json({
     ok: true,
-    subscription_url: env.INGEST_TOKEN ? `${origin}/sub/anytls/${accessHash}` : "",
+    subscription_url: accessToken ? `${origin}/sub/anytls/${accessToken}` : "",
     nodes: data.nodes || [],
   });
 }
@@ -277,10 +289,31 @@ async function toggleAnyTlsNode(request, env) {
   }));
 }
 
+async function resetAnyTlsSubscription(request, env) {
+  const accessToken = await getAnyTlsAccessToken(env, true);
+  if (!accessToken) return json({ ok: false, error: "订阅服务尚未配置" }, 503);
+  return json({
+    ok: true,
+    subscription_url: `${new URL(request.url).origin}/sub/anytls/${accessToken}`,
+  });
+}
+
+async function getAnyTlsAccessToken(env, reset = false) {
+  if (!env.INGEST_TOKEN) return "";
+  const initialToken = await sha256Hex(env.INGEST_TOKEN);
+  const response = await statusStore(env).fetch(new Request("https://store/anytls/access-token", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ initial_token: initialToken, reset }),
+  }));
+  if (!response.ok) return "";
+  return String((await response.json()).token || "");
+}
+
 async function serveAnyTlsSubscription(url, env) {
   const token = url.pathname.slice("/sub/anytls/".length);
   if (!/^[a-f0-9]{64}$/.test(token) || !env.INGEST_TOKEN) return new Response("Not Found", { status: 404 });
-  const expected = await sha256Hex(env.INGEST_TOKEN);
+  const expected = await getAnyTlsAccessToken(env);
   if (!safeEqual(token, expected)) return new Response("Not Found", { status: 404 });
   return statusStore(env).fetch(new Request("https://store/anytls/subscription"));
 }
@@ -498,6 +531,24 @@ export class VpsStatusStore {
       return json({ ok: true, node_id: input.node_id });
     }
 
+    if (url.pathname === "/anytls/access-token" && request.method === "POST") {
+      const input = await request.json();
+      const tokenKey = "subscription:anytls:access-token";
+      let token = await this.ctx.storage.get(tokenKey);
+      let changed = false;
+      if (input.reset === true) {
+        token = randomHex(32);
+        changed = true;
+      }
+      else if (!/^[a-f0-9]{64}$/.test(token || "")) {
+        token = /^[a-f0-9]{64}$/.test(input.initial_token || "") ? input.initial_token : randomHex(32);
+        changed = true;
+      }
+      if (changed) await this.ctx.storage.put(tokenKey, token);
+      await this.ctx.storage.delete("anytls:access-token");
+      return json({ ok: true, token });
+    }
+
     if (url.pathname === "/anytls/toggle" && request.method === "POST") {
       const input = await request.json();
       const key = `anytls:${input.node_id}`;
@@ -511,6 +562,7 @@ export class VpsStatusStore {
     if (url.pathname === "/anytls/nodes" && request.method === "GET") {
       const records = await this.ctx.storage.list({ prefix: "anytls:" });
       const nodes = [...records.values()]
+        .filter((record) => record && typeof record === "object" && NODE_ID_PATTERN.test(record.node_id || ""))
         .map((record) => ({
           node_id: record.node_id,
           name: record.name,
@@ -527,7 +579,8 @@ export class VpsStatusStore {
     if (url.pathname === "/anytls/subscription" && request.method === "GET") {
       const records = await this.ctx.storage.list({ prefix: "anytls:" });
       const nodes = [...records.values()]
-        .filter((record) => record.enabled !== false)
+        .filter((record) => record && typeof record === "object"
+          && NODE_ID_PATTERN.test(record.node_id || "") && record.enabled !== false)
         .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
       return anyTlsYaml(nodes);
     }
@@ -1272,14 +1325,19 @@ function anyTlsYaml(nodes) {
     ...(proxyLines.length ? ["proxies:", ...proxyLines] : ["proxies: []"]),
     "",
     "proxy-groups:",
-    "  - name: PROXY",
-    "    type: select",
+    "  - name: AUTO",
+    "    type: url-test",
     "    proxies:",
     ...groupNodes,
-    "      - DIRECT",
+    "    url: \"https://cp.cloudflare.com/\"",
+    "    interval: 300",
+    "    tolerance: 50",
+    "    timeout: 5000",
+    "    lazy: false",
+    "    expected-status: 204",
     "",
     "rules:",
-    "  - MATCH,PROXY",
+    "  - MATCH,AUTO",
     "",
   ].join("\n");
   return new Response(body, {
@@ -1300,6 +1358,12 @@ function yamlString(value) {
 async function sha256Hex(value) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value)));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function randomHex(byteLength) {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function clampNumber(value, min, max, fallback) {
