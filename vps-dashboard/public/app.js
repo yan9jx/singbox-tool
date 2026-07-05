@@ -3,6 +3,7 @@ const state = {
   timer: null,
   loading: false,
   nodes: new Map(),
+  anytlsNodes: new Map(),
   reminders: new Map(),
   serverTime: 0,
   telegramConfigured: false,
@@ -86,16 +87,21 @@ const elements = {
   telegramHourlyStart: document.querySelector("#telegramHourlyStart"),
   telegramHourlyEnd: document.querySelector("#telegramHourlyEnd"),
   telegramRepeatError: document.querySelector("#telegramRepeatError"),
+  anytlsSummary: document.querySelector("#anytlsSummary"),
+  anytlsSubscriptionUrl: document.querySelector("#anytlsSubscriptionUrl"),
+  copyAnyTlsSubscription: document.querySelector("#copyAnyTlsSubscription"),
+  anytlsNodeGrid: document.querySelector("#anytlsNodeGrid"),
+  driveHost: document.querySelector("#driveHost"),
 };
 
 const CURRENT_AGENT_VERSION = "1.1.0";
 
 const STATUS_LABELS = {
-  online: "??",
-  degraded: "??",
-  offline: "??",
-  shutdown: "???",
-  maintenance: "???",
+  online: "正常",
+  degraded: "异常",
+  offline: "离线",
+  shutdown: "已关机",
+  maintenance: "维护中",
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -115,23 +121,23 @@ function bindEvents() {
     elements.error.textContent = "";
     const button = elements.form.querySelector("button");
     button.disabled = true;
-    button.textContent = "????";
+    button.textContent = "验证中…";
     try {
       const response = await apiFetch("/api/v1/session", { method: "POST" }, token);
       const result = await response.json();
       if (!response.ok) {
-        const suffix = result.remaining_attempts > 0 ? `????? ${result.remaining_attempts} ??` : "";
-        throw new Error(`${result.error || "???????"}${suffix}`);
+        const suffix = result.remaining_attempts > 0 ? `（还可尝试 ${result.remaining_attempts} 次）` : "";
+        throw new Error(`${result.error || "查看密码不正确"}${suffix}`);
       }
       state.viewToken = token;
       sessionStorage.setItem("ejectors_view_token", token);
       elements.dialog.close();
       await refreshNodes();
     } catch (error) {
-      elements.error.textContent = error.message || "????";
+      elements.error.textContent = error.message || "验证失败";
     } finally {
       button.disabled = false;
-      button.textContent = "??????";
+      button.textContent = "进入状态面板";
     }
   });
 
@@ -194,6 +200,8 @@ function bindEvents() {
   elements.grid.addEventListener("dragover", handleNodeDragOver);
   elements.grid.addEventListener("drop", handleNodeDrop);
   elements.grid.addEventListener("dragend", handleNodeDragEnd);
+  elements.copyAnyTlsSubscription.addEventListener("click", copyAnyTlsSubscription);
+  elements.anytlsNodeGrid.addEventListener("change", handleAnyTlsToggle);
 }
 
 function openLogin() {
@@ -205,7 +213,7 @@ async function refreshNodes() {
   if (state.loading || !state.viewToken) return;
   state.loading = true;
   elements.refresh.classList.add("spinning");
-  setSync("????", "");
+  setSync("正在刷新", "");
 
   try {
     const response = await apiFetch("/api/v1/nodes");
@@ -213,16 +221,16 @@ async function refreshNodes() {
       sessionStorage.removeItem("ejectors_view_token");
       state.viewToken = "";
       openLogin();
-      throw new Error("???????");
+      throw new Error("查看密码已失效");
     }
-    if (!response.ok) throw new Error("?????????");
+    if (!response.ok) throw new Error("状态接口暂时不可用");
     const data = await response.json();
     render(data);
-    await Promise.all([refreshReminders(), refreshDashboardSettings()]);
-    setSync("????", "ok");
+    await Promise.all([refreshReminders(), refreshDashboardSettings(), refreshAnyTls()]);
+    setSync("实时连接", "ok");
     scheduleRefresh((data.refresh_seconds || 15) * 1000);
   } catch (error) {
-    setSync(error.message || "????", "error");
+    setSync(error.message || "刷新失败", "error");
   } finally {
     state.loading = false;
     elements.refresh.classList.remove("spinning");
@@ -231,11 +239,94 @@ async function refreshNodes() {
 
 async function refreshReminders() {
   const response = await apiFetch("/api/v1/reminders");
-  if (!response.ok) throw new Error("?????????");
+  if (!response.ok) throw new Error("备忘接口暂时不可用");
   const data = await response.json();
   state.reminders = new Map(data.reminders.map((item) => [item.id, item]));
   renderReminders(data.reminders);
   updateTelegramCoverage();
+}
+
+async function refreshAnyTls() {
+  const response = await apiFetch("/api/v1/anytls/info");
+  if (!response.ok) throw new Error("AnyTLS 订阅接口暂时不可用");
+  const data = await response.json();
+  state.anytlsNodes = new Map((data.nodes || []).map((node) => [node.node_id, node]));
+  elements.anytlsSubscriptionUrl.value = data.subscription_url || "";
+  elements.copyAnyTlsSubscription.disabled = !data.subscription_url;
+  renderAnyTlsNodes(data.nodes || []);
+}
+
+function renderAnyTlsNodes(nodes) {
+  elements.anytlsNodeGrid.replaceChildren();
+  const enabled = nodes.filter((node) => node.enabled).length;
+  elements.anytlsSummary.textContent = nodes.length ? `已选择 ${enabled} / ${nodes.length} 台 VPS` : "尚未登记节点";
+  if (!nodes.length) {
+    const empty = document.createElement("div");
+    empty.className = "subscription-empty";
+    empty.textContent = "暂无节点，请先在 VPS 运行 AnyTLS 脚本并选择加入聚合订阅。";
+    elements.anytlsNodeGrid.appendChild(empty);
+    return;
+  }
+  for (const node of nodes) {
+    const card = document.createElement("article");
+    card.className = `subscription-node-card ${node.enabled ? "" : "disabled"}`;
+    const info = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = node.name || node.node_id;
+    const endpoint = document.createElement("span");
+    endpoint.textContent = `${node.server}:${node.port}`;
+    const sni = document.createElement("small");
+    sni.textContent = `SNI ${node.sni} · 更新于 ${formatDateTime(node.updated_at)}`;
+    info.append(name, endpoint, sni);
+    const label = document.createElement("label");
+    label.className = "toggle-label subscription-node-toggle";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = node.enabled;
+    input.dataset.nodeId = node.node_id;
+    const toggle = document.createElement("span");
+    toggle.className = "toggle";
+    const text = document.createElement("span");
+    text.textContent = node.enabled ? "已加入" : "未加入";
+    label.append(input, toggle, text);
+    card.append(info, label);
+    elements.anytlsNodeGrid.appendChild(card);
+  }
+}
+
+async function handleAnyTlsToggle(event) {
+  const input = event.target.closest('input[type="checkbox"][data-node-id]');
+  if (!input) return;
+  input.disabled = true;
+  try {
+    const response = await apiFetch("/api/v1/anytls/toggle", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ node_id: input.dataset.nodeId, enabled: input.checked }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "订阅节点设置失败");
+    await refreshAnyTls();
+  } catch (error) {
+    input.checked = !input.checked;
+    alert(error.message || "订阅节点设置失败");
+  } finally {
+    input.disabled = false;
+  }
+}
+
+async function copyAnyTlsSubscription() {
+  const value = elements.anytlsSubscriptionUrl.value;
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch {
+    elements.anytlsSubscriptionUrl.select();
+    document.execCommand("copy");
+    elements.anytlsSubscriptionUrl.setSelectionRange(0, 0);
+  }
+  elements.copyAnyTlsSubscription.textContent = "已复制";
+  setTimeout(() => { elements.copyAnyTlsSubscription.textContent = "复制链接"; }, 1200);
 }
 
 function updateTelegramCoverage() {
@@ -247,21 +338,21 @@ function updateTelegramCoverage() {
       + reminderItems.filter((reminder) => reminder.enabled).length
     : 0;
   elements.telegramCoverage.textContent = state.telegramConfigured
-    ? `Telegram ????????${enabled}/${total}`
-    : `Telegram ????????0/${total}`;
+    ? `Telegram 通知服务已开启：${enabled}/${total}`
+    : `Telegram 通知服务未配置：0/${total}`;
   elements.telegramCoverage.classList.toggle("configured", state.telegramConfigured);
 }
 
 async function refreshDashboardSettings() {
   const response = await apiFetch("/api/v1/dashboard-settings");
-  if (!response.ok) throw new Error("?????????");
+  if (!response.ok) throw new Error("面板设置暂时不可用");
   const data = await response.json();
   elements.autoDeleteDays.value = String(data.settings?.auto_delete_offline_days || 0);
   const interval = Number(data.settings?.telegram_repeat_interval_minutes || 10);
   elements.telegramRepeatInterval.value = String(interval);
   elements.telegramHourlyStart.value = data.settings?.telegram_repeat_start || "09:00";
   elements.telegramHourlyEnd.value = data.settings?.telegram_repeat_end || "18:00";
-  elements.telegramRepeatButton.textContent = `?????? ${interval} ??`;
+  elements.telegramRepeatButton.textContent = `提醒频率：每 ${interval} 分钟`;
 }
 
 async function saveAutoDeleteSetting() {
@@ -273,9 +364,9 @@ async function saveAutoDeleteSetting() {
       body: JSON.stringify({ auto_delete_offline_days: Number(elements.autoDeleteDays.value) }),
     });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "??????????");
+    if (!response.ok) throw new Error(result.error || "自动清理设置保存失败");
   } catch (error) {
-    alert(error.message || "??????????");
+    alert(error.message || "自动清理设置保存失败");
     await refreshDashboardSettings();
   } finally {
     elements.autoDeleteDays.disabled = false;
@@ -286,7 +377,7 @@ async function saveTelegramRepeatSettings(event) {
   event.preventDefault();
   const submit = elements.telegramRepeatForm.querySelector('button[type="submit"]');
   submit.disabled = true;
-  submit.textContent = "????";
+  submit.textContent = "保存中…";
   elements.telegramRepeatError.textContent = "";
   try {
     const response = await apiFetch("/api/v1/dashboard-settings", {
@@ -299,14 +390,14 @@ async function saveTelegramRepeatSettings(event) {
       }),
     });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "????");
+    if (!response.ok) throw new Error(result.error || "保存失败");
     elements.telegramRepeatDialog.close();
     await refreshDashboardSettings();
   } catch (error) {
-    elements.telegramRepeatError.textContent = error.message || "????";
+    elements.telegramRepeatError.textContent = error.message || "保存失败";
   } finally {
     submit.disabled = false;
-    submit.textContent = "??????";
+    submit.textContent = "保存提醒频率";
   }
 }
 
@@ -315,7 +406,7 @@ function renderReminders(reminders) {
   if (!reminders.length) {
     const empty = document.createElement("div");
     empty.className = "reminder-empty";
-    empty.textContent = "?????????????????";
+    empty.textContent = "暂无全局提醒，点击“新建提醒”添加";
     elements.reminderGrid.appendChild(empty);
     return;
   }
@@ -334,26 +425,26 @@ function renderReminders(reminders) {
     titleWrap.append(title, schedule);
     const stateText = document.createElement("span");
     stateText.className = "reminder-toggle";
-    stateText.textContent = reminder.enabled ? "???" : reminder.completed ? "???" : "???";
+    stateText.textContent = reminder.enabled ? "已启用" : reminder.completed ? "已完成" : "已暂停";
     head.append(titleWrap, stateText);
     const content = document.createElement("p");
     content.className = "reminder-content";
-    content.textContent = reminder.content || "?????";
+    content.textContent = reminder.content || "无备注内容";
     const actions = document.createElement("div");
     actions.className = "reminder-card-actions";
     const toggle = document.createElement("button");
     toggle.className = "mini-button";
     toggle.dataset.action = "toggle";
-    toggle.textContent = reminder.enabled ? "??" : "??";
+    toggle.textContent = reminder.enabled ? "暂停" : "启用";
     const buttons = document.createElement("div");
     const edit = document.createElement("button");
     edit.className = "mini-button";
     edit.dataset.action = "edit";
-    edit.textContent = "??";
+    edit.textContent = "编辑";
     const remove = document.createElement("button");
     remove.className = "mini-button delete";
     remove.dataset.action = "delete";
-    remove.textContent = "??";
+    remove.textContent = "删除";
     buttons.append(edit, remove);
     actions.append(toggle, buttons);
     card.append(head, content, actions);
@@ -364,7 +455,7 @@ function renderReminders(reminders) {
 function openReminderDialog(id = "") {
   const reminder = id ? state.reminders.get(id) : null;
   elements.reminderId.value = reminder?.id || "";
-  elements.reminderDialogTitle.textContent = reminder ? "????" : "????";
+  elements.reminderDialogTitle.textContent = reminder ? "编辑提醒" : "新建提醒";
   elements.reminderTitle.value = reminder?.title || "";
   elements.reminderContent.value = reminder?.content || "";
   elements.reminderType.value = reminder?.schedule_type || "once";
@@ -385,7 +476,7 @@ function updateReminderFields() {
   const type = elements.reminderType.value;
   const usesAnchor = ["once", "interval_months"].includes(type);
   elements.onceTimeField.hidden = !usesAnchor;
-  elements.onceTimeField.querySelector("span").textContent = type === "interval_months" ? "??????" : "????";
+  elements.onceTimeField.querySelector("span").textContent = type === "interval_months" ? "首次提醒时间" : "提醒时间";
   elements.repeatTimeField.hidden = usesAnchor;
   elements.intervalMonthsField.hidden = type !== "interval_months";
   elements.weekdayField.hidden = type !== "weekly";
@@ -399,11 +490,11 @@ async function saveReminder(event) {
   const submit = elements.reminderForm.querySelector('button[type="submit"]');
   const onceAt = elements.reminderOnceAt.value ? Math.floor(new Date(elements.reminderOnceAt.value).getTime() / 1000) : 0;
   if (["once", "interval_months"].includes(type) && !onceAt) {
-    elements.reminderError.textContent = type === "interval_months" ? "?????????" : "?????????";
+    elements.reminderError.textContent = type === "interval_months" ? "请选择首次提醒时间" : "请选择单次提醒时间";
     return;
   }
   submit.disabled = true;
-  submit.textContent = "????";
+  submit.textContent = "保存中…";
   try {
     const response = await apiFetch("/api/v1/reminders", {
       method: "POST",
@@ -423,14 +514,14 @@ async function saveReminder(event) {
       }),
     });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "????");
+    if (!response.ok) throw new Error(result.error || "保存失败");
     elements.reminderDialog.close();
     await refreshReminders();
   } catch (error) {
-    elements.reminderError.textContent = error.message || "????";
+    elements.reminderError.textContent = error.message || "保存失败";
   } finally {
     submit.disabled = false;
-    submit.textContent = "????";
+    submit.textContent = "保存提醒";
   }
 }
 
@@ -441,7 +532,7 @@ async function handleReminderAction(event) {
   const reminder = state.reminders.get(card.dataset.id);
   if (!reminder) return;
   if (button.dataset.action === "edit") return openReminderDialog(reminder.id);
-  if (button.dataset.action === "delete" && !confirm(`?????${reminder.title}??`)) return;
+  if (button.dataset.action === "delete" && !confirm(`删除提醒“${reminder.title}”？`)) return;
   const endpoint = button.dataset.action === "delete" ? "delete" : "toggle";
   const response = await apiFetch(`/api/v1/reminders/${endpoint}`, {
     method: "POST",
@@ -452,18 +543,18 @@ async function handleReminderAction(event) {
 }
 
 function reminderScheduleLabel(reminder) {
-  if (reminder.schedule_type === "once") return `?? ? ${formatDateTime(reminder.schedule_at)}`;
-  if (reminder.schedule_type === "daily") return `?? ? ${reminder.schedule_time}`;
-  if (reminder.schedule_type === "weekly") return `??${"???????"[reminder.weekday]} ? ${reminder.schedule_time}`;
-  if (reminder.schedule_type === "monthly") return `?? ${reminder.monthday} ? ? ${reminder.schedule_time}`;
-  if (reminder.schedule_type === "interval_months") return `? ${reminder.interval_months} ?? ? ?? ${formatDateTime(reminder.schedule_at)}`;
-  return `?? ${reminder.schedule_month} ? ${reminder.monthday} ? ? ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "once") return `单次 · ${formatDateTime(reminder.schedule_at)}`;
+  if (reminder.schedule_type === "daily") return `每天 · ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "weekly") return `每周${"日一二三四五六"[reminder.weekday]} · ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "monthly") return `每月 ${reminder.monthday} 日 · ${reminder.schedule_time}`;
+  if (reminder.schedule_type === "interval_months") return `每 ${reminder.interval_months} 个月 · 首次 ${formatDateTime(reminder.schedule_at)}`;
+  return `每年 ${reminder.schedule_month} 月 ${reminder.monthday} 日 · ${reminder.schedule_time}`;
 }
 
 function render(data) {
   state.serverTime = data.server_time;
   state.telegramConfigured = Boolean(data.telegram_configured);
-  elements.globalTelegramStatus.textContent = state.telegramConfigured ? "Telegram ???" : "Telegram ???";
+  elements.globalTelegramStatus.textContent = state.telegramConfigured ? "Telegram 已连接" : "Telegram 未配置";
   elements.globalTelegramStatus.classList.toggle("configured", state.telegramConfigured);
   elements.globalTelegramTest.disabled = !state.telegramConfigured;
   state.nodes = new Map(data.nodes.map((node) => [node.node_id, node]));
@@ -472,15 +563,21 @@ function render(data) {
   document.querySelector("#countOnline").textContent = data.summary.online;
   document.querySelector("#countDegraded").textContent = data.summary.degraded;
   document.querySelector("#countOffline").textContent = data.summary.offline + data.summary.shutdown;
-  elements.updatedAt.textContent = `??? ${formatClock(data.server_time)}`;
-  elements.drive.href = data.cloud_drive_url || "https://disk.example.com";
+  elements.updatedAt.textContent = `更新于 ${formatClock(data.server_time)}`;
+  if (data.cloud_drive_url) {
+    elements.drive.href = data.cloud_drive_url;
+    elements.driveHost.textContent = new URL(data.cloud_drive_url).host;
+    elements.drive.hidden = false;
+  } else {
+    elements.drive.hidden = true;
+  }
 
   elements.grid.replaceChildren();
   if (!data.nodes.length) {
     elements.grid.innerHTML = `
       <div class="empty-state">
-        <strong>??? VPS ??</strong>
-        <p>???????????????????????</p>
+        <strong>还没有 VPS 上报</strong>
+        <p>在服务器运行安装脚本后，节点会自动出现在这里。</p>
       </div>`;
     return;
   }
@@ -490,7 +587,7 @@ function render(data) {
   if (offlineNodes.length) {
     const heading = document.createElement("h3");
     heading.className = "node-group-title offline-group-title";
-    heading.textContent = "?? / ??";
+    heading.textContent = "离线 / 关机";
     elements.grid.appendChild(heading);
     for (const node of offlineNodes) elements.grid.appendChild(renderNode(node, data.server_time));
   }
@@ -498,7 +595,7 @@ function render(data) {
   const grouped = activeNodes.some((node) => node.settings?.group);
   let lastGroup = null;
   for (const node of activeNodes) {
-    const group = node.settings?.group || "???";
+    const group = node.settings?.group || "未分组";
     if (grouped && group !== lastGroup) {
       const heading = document.createElement("h3");
       heading.className = "node-group-title";
@@ -521,17 +618,17 @@ function renderNode(node, serverTime) {
   deleteButton.hidden = !["offline", "shutdown"].includes(node.status);
   text(fragment, ".node-name", node.name || node.node_id);
   fragment.querySelector(".node-edit-button").dataset.nodeId = node.node_id;
-  text(fragment, ".node-location", [node.provider, node.location, node.purpose].filter(Boolean).join(" ? ") || node.hostname || "?????");
+  text(fragment, ".node-location", [node.provider, node.location, node.purpose].filter(Boolean).join(" · ") || node.hostname || "未设置位置");
   text(fragment, ".status-pill", STATUS_LABELS[node.status] || node.status);
-  text(fragment, ".public-ip", node.public_ip || "???");
-  text(fragment, ".uptime", node.status === "shutdown" ? "???" : formatDuration(node.uptime_seconds));
+  text(fragment, ".public-ip", node.public_ip || "未获取");
+  text(fragment, ".uptime", node.status === "shutdown" ? "已关机" : formatDuration(node.uptime_seconds));
   const versionState = compareVersions(node.agent_version || "0", CURRENT_AGENT_VERSION);
   text(fragment, ".agent-version", !node.agent_version
-    ? "Agent ?????"
-    : versionState < 0 ? `Agent v${node.agent_version} ? ???? v${CURRENT_AGENT_VERSION}` : `Agent v${node.agent_version} ? ??`);
+    ? "Agent 未上报版本"
+    : versionState < 0 ? `Agent v${node.agent_version} · 可更新至 v${CURRENT_AGENT_VERSION}` : `Agent v${node.agent_version} · 最新`);
   fragment.querySelector(".agent-version").classList.toggle("outdated", versionState < 0);
 
-  setMetric(fragment, "cpu", node.cpu?.usage_pct, `${fixed(node.cpu?.usage_pct)}%`, `?? ${fixed(node.cpu?.load_1, 2)} ? ${node.cpu?.cores || "?"} ?`);
+  setMetric(fragment, "cpu", node.cpu?.usage_pct, `${fixed(node.cpu?.usage_pct)}%`, `负载 ${fixed(node.cpu?.load_1, 2)} · ${node.cpu?.cores || "—"} 核`);
   setMetric(fragment, "memory", node.memory?.usage_pct, `${fixed(node.memory?.usage_pct)}%`, `${formatBytesFromMB(node.memory?.used_mb)} / ${formatBytesFromMB(node.memory?.total_mb)}`);
   setMetric(fragment, "disk", node.disk?.usage_pct, `${fixed(node.disk?.usage_pct)}%`, `${formatBytes(node.disk?.used_bytes)} / ${formatBytes(node.disk?.total_bytes)}`);
   setMetric(fragment, "swap", node.swap?.usage_pct, `${fixed(node.swap?.usage_pct)}%`, `${formatBytesFromMB(node.swap?.used_mb)} / ${formatBytesFromMB(node.swap?.total_mb)}`);
@@ -544,41 +641,41 @@ function renderNode(node, serverTime) {
   const services = fragment.querySelector(".service-list");
   const installedServices = Array.isArray(node.services) ? node.services.filter((service) => service.installed !== false) : [];
   if (!installedServices.length) {
-    services.innerHTML = '<span class="service-empty">????????????</span>';
+    services.innerHTML = '<span class="service-empty">未检测到已安装的监控服务</span>';
   } else {
     for (const service of installedServices) {
       const chip = document.createElement("span");
       chip.className = `service-chip ${service.running ? "" : "stopped"}`;
       const dot = document.createElement("i");
-      chip.append(dot, document.createTextNode(`${service.name} ? ${service.running ? "??" : "??"}`));
+      chip.append(dot, document.createTextNode(`${service.name} · ${service.running ? "正常" : "停止"}`));
       services.appendChild(chip);
     }
   }
 
   const ports = Array.isArray(node.ports) ? node.ports : [];
-  text(fragment, ".port-count", `${ports.length} ?`);
+  text(fragment, ".port-count", `${ports.length} 个`);
   const portList = fragment.querySelector(".port-list");
   for (const port of ports) {
     const chip = document.createElement("span");
     chip.className = "port-chip";
-    chip.textContent = `${port.port}${port.process ? ` ? ${port.process}` : ""}`;
+    chip.textContent = `${port.port}${port.process ? ` · ${port.process}` : ""}`;
     portList.appendChild(chip);
   }
-  if (!ports.length) portList.innerHTML = '<span class="service-empty">????????</span>';
+  if (!ports.length) portList.innerHTML = '<span class="service-empty">未获取到监听端口</span>';
 
   const lifecycle = fragment.querySelector(".node-settings-button");
   lifecycle.dataset.nodeId = node.node_id;
   const expiry = expiryState(node.settings?.expiry_date, state.serverTime);
   lifecycle.dataset.expiry = expiry.level;
   text(fragment, ".expiry-countdown", expiry.label);
-  text(fragment, ".memo-preview", node.settings?.memo || (node.settings?.reminder_at ? `???${formatDateTime(node.settings.reminder_at)}` : "??????????"));
+  text(fragment, ".memo-preview", node.settings?.memo || (node.settings?.reminder_at ? `提醒：${formatDateTime(node.settings.reminder_at)}` : "可添加续费信息和提醒"));
 
   return fragment;
 }
 
 async function deleteOfflineNode(nodeId) {
   const node = state.nodes.get(nodeId);
-  if (!node || !confirm(`????????????${node.name || nodeId}???`)) return;
+  if (!node || !confirm(`确定从面板删除离线节点“${node.name || nodeId}”吗？`)) return;
   try {
     const response = await apiFetch("/api/v1/nodes/delete", {
       method: "POST",
@@ -586,10 +683,10 @@ async function deleteOfflineNode(nodeId) {
       body: JSON.stringify({ node_id: nodeId }),
     });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "????");
+    if (!response.ok) throw new Error(result.error || "删除失败");
     await refreshNodes();
   } catch (error) {
-    alert(error.message || "????");
+    alert(error.message || "删除失败");
   }
 }
 
@@ -604,7 +701,7 @@ function openNodeSettings(nodeId) {
   elements.nodeMemo.value = settings.memo || "";
   elements.memoCount.textContent = elements.nodeMemo.value.length;
   elements.telegramEnabled.checked = settings.telegram_enabled !== false;
-  elements.telegramStatus.textContent = state.telegramConfigured ? "???" : "???";
+  elements.telegramStatus.textContent = state.telegramConfigured ? "已连接" : "未配置";
   elements.telegramStatus.classList.toggle("configured", state.telegramConfigured);
   elements.telegramTest.disabled = !state.telegramConfigured;
   elements.settingsError.textContent = "";
@@ -618,7 +715,7 @@ async function saveNodeSettings(event) {
     ? Math.floor(new Date(elements.reminderAt.value).getTime() / 1000)
     : 0;
   submit.disabled = true;
-  submit.textContent = "????";
+  submit.textContent = "保存中…";
   elements.settingsError.textContent = "";
 
   try {
@@ -634,14 +731,14 @@ async function saveNodeSettings(event) {
       }),
     });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "????");
+    if (!response.ok) throw new Error(result.error || "保存失败");
     elements.settingsDialog.close();
     await refreshNodes();
   } catch (error) {
-    elements.settingsError.textContent = error.message || "????";
+    elements.settingsError.textContent = error.message || "保存失败";
   } finally {
     submit.disabled = false;
-    submit.textContent = "????";
+    submit.textContent = "保存设置";
   }
 }
 
@@ -669,7 +766,7 @@ async function saveNodeProfile(event) {
     ? Math.floor(new Date(elements.maintenanceUntil.value).getTime() / 1000)
     : 0;
   submit.disabled = true;
-  submit.textContent = "????";
+  submit.textContent = "保存中…";
   elements.profileError.textContent = "";
   try {
     const response = await apiFetch("/api/v1/node-profile", {
@@ -686,14 +783,14 @@ async function saveNodeProfile(event) {
       }),
     });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "????");
+    if (!response.ok) throw new Error(result.error || "保存失败");
     elements.profileDialog.close();
     await refreshNodes();
   } catch (error) {
-    elements.profileError.textContent = error.message || "????";
+    elements.profileError.textContent = error.message || "保存失败";
   } finally {
     submit.disabled = false;
-    submit.textContent = "??????";
+    submit.textContent = "保存节点信息";
   }
 }
 
@@ -736,7 +833,7 @@ function handleNodeDragEnd() {
 
 async function exportDashboardConfig() {
   const response = await apiFetch("/api/v1/config/export");
-  if (!response.ok) return alert("??????");
+  if (!response.ok) return alert("配置导出失败");
   const blob = await response.blob();
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
@@ -748,7 +845,7 @@ async function exportDashboardConfig() {
 async function importDashboardConfig() {
   const file = elements.importConfigFile.files?.[0];
   elements.importConfigFile.value = "";
-  if (!file || !confirm("???????????????????? ID ????????????")) return;
+  if (!file || !confirm("恢复配置会覆盖现有节点设置、面板设置和同 ID 的全局备忘，确定继续吗？")) return;
   try {
     const data = JSON.parse(await file.text());
     const response = await apiFetch("/api/v1/config/import", {
@@ -757,11 +854,11 @@ async function importDashboardConfig() {
       body: JSON.stringify(data),
     });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "????");
-    alert(`?????${result.imported.nodes} ? VPS?${result.imported.reminders} ?????? ${result.skipped_nodes} ???? VPS?`);
+    if (!response.ok) throw new Error(result.error || "恢复失败");
+    alert(`恢复完成：${result.imported.nodes} 台 VPS，${result.imported.reminders} 条备忘；跳过 ${result.skipped_nodes} 台未上报 VPS。`);
     await refreshNodes();
   } catch (error) {
-    alert(error.message || "????????");
+    alert(error.message || "备份文件无法读取");
   }
 }
 
@@ -776,37 +873,37 @@ function compareVersions(left, right) {
 
 async function testTelegram() {
   elements.telegramTest.disabled = true;
-  elements.telegramTest.textContent = "????";
+  elements.telegramTest.textContent = "发送中…";
   elements.settingsError.textContent = "";
   try {
     const response = await apiFetch("/api/v1/telegram/test", { method: "POST" });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "????");
-    elements.telegramStatus.textContent = "????";
+    if (!response.ok) throw new Error(result.error || "发送失败");
+    elements.telegramStatus.textContent = "测试成功";
     elements.telegramStatus.classList.add("configured");
   } catch (error) {
-    elements.settingsError.textContent = error.message || "Telegram ????";
+    elements.settingsError.textContent = error.message || "Telegram 测试失败";
   } finally {
     elements.telegramTest.disabled = !state.telegramConfigured;
-    elements.telegramTest.textContent = "????";
+    elements.telegramTest.textContent = "发送测试";
   }
 }
 
 async function testGlobalTelegram() {
   elements.globalTelegramTest.disabled = true;
-  elements.globalTelegramTest.textContent = "????";
+  elements.globalTelegramTest.textContent = "发送中…";
   try {
     const response = await apiFetch("/api/v1/telegram/test", { method: "POST" });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "????");
-    elements.globalTelegramStatus.textContent = "Telegram ????";
+    if (!response.ok) throw new Error(result.error || "发送失败");
+    elements.globalTelegramStatus.textContent = "Telegram 测试成功";
     elements.globalTelegramStatus.classList.add("configured");
-    alert("???????? Telegram");
+    alert("测试消息已发送到 Telegram");
   } catch (error) {
-    alert(error.message || "Telegram ????");
+    alert(error.message || "Telegram 测试失败");
   } finally {
     elements.globalTelegramTest.disabled = !state.telegramConfigured;
-    elements.globalTelegramTest.textContent = "????";
+    elements.globalTelegramTest.textContent = "发送测试";
   }
 }
 
@@ -860,17 +957,17 @@ function formatDuration(seconds) {
   const value = Number(seconds) || 0;
   const days = Math.floor(value / 86400);
   const hours = Math.floor((value % 86400) / 3600);
-  if (days > 0) return `${days} ? ${hours} ??`;
+  if (days > 0) return `${days} 天 ${hours} 小时`;
   const minutes = Math.floor((value % 3600) / 60);
-  return `${hours} ?? ${minutes} ?`;
+  return `${hours} 小时 ${minutes} 分`;
 }
 
 function relativeTime(timestamp, serverTime) {
   const seconds = Math.max(0, (serverTime || Date.now() / 1000) - timestamp);
-  if (seconds < 70) return "????";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} ???`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} ???`;
-  return `${Math.floor(seconds / 86400)} ??`;
+  if (seconds < 70) return "刚刚在线";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
+  return `${Math.floor(seconds / 86400)} 天前`;
 }
 
 function formatClock(timestamp) {
@@ -883,16 +980,16 @@ function formatClock(timestamp) {
 }
 
 function expiryState(expiryDate, serverTime) {
-  if (!expiryDate) return { level: "none", label: "????????" };
+  if (!expiryDate) return { level: "none", label: "点击设置到期日期" };
   const [year, month, day] = expiryDate.split("-").map(Number);
   const now = new Date(((serverTime || Date.now() / 1000) + 8 * 3600) * 1000);
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const expiry = Date.UTC(year, month - 1, day);
   const days = Math.round((expiry - today) / 86400000);
-  if (days < 0) return { level: "expired", label: `??? ${Math.abs(days)} ? ? ${expiryDate}` };
-  if (days === 0) return { level: "expired", label: `???? ? ${expiryDate}` };
-  if (days <= 30) return { level: "soon", label: `?? ${days} ? ? ${expiryDate}` };
-  return { level: "normal", label: `?? ${days} ? ? ${expiryDate}` };
+  if (days < 0) return { level: "expired", label: `已过期 ${Math.abs(days)} 天 · ${expiryDate}` };
+  if (days === 0) return { level: "expired", label: `今天到期 · ${expiryDate}` };
+  if (days <= 30) return { level: "soon", label: `剩余 ${days} 天 · ${expiryDate}` };
+  return { level: "normal", label: `剩余 ${days} 天 · ${expiryDate}` };
 }
 
 function toDateTimeLocal(timestamp) {
