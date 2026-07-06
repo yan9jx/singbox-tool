@@ -731,7 +731,7 @@ export class VpsStatusStore {
         .map((record) => ({ ...record, protocol: record.protocol || "anytls" }))
         .sort((a, b) => `${a.name}-${a.protocol}`.localeCompare(`${b.name}-${b.protocol}`, "zh-CN"));
       const format = subscriptionFormat(url.searchParams.get("format"), request.headers.get("user-agent"));
-      return format === "uri" ? subscriptionUri(nodes) : subscriptionYaml(nodes);
+      return format === "yaml" ? subscriptionYaml(nodes) : subscriptionUri(nodes, format);
     }
 
     if (url.pathname === "/auth/check" && request.method === "GET") {
@@ -1537,17 +1537,44 @@ function yamlString(value) {
 
 function subscriptionFormat(requested, userAgent) {
   const format = String(requested || "").toLowerCase();
+  if (format === "shadowrocket") return "shadowrocket";
   if (["v2ray", "v2rayng", "v2rayn", "uri", "base64"].includes(format)) return "uri";
   if (["mihomo", "clash", "meta", "yaml"].includes(format)) return "yaml";
+  if (/shadowrocket/i.test(String(userAgent || ""))) return "shadowrocket";
   return /\b(v2rayng|v2rayn)\b/i.test(String(userAgent || "")) ? "uri" : "yaml";
 }
 
-function subscriptionUri(nodes) {
+function subscriptionUri(nodes, format = "uri") {
   const counts = new Map();
   for (const node of nodes) counts.set(node.name, (counts.get(node.name) || 0) + 1);
   const links = nodes
-    .filter((node) => node.protocol === "xhttp")
+    .filter((node) => node.protocol === "xhttp" || (format === "shadowrocket" && node.protocol === "anytls"))
     .map((node) => {
+      const protocolName = String(node.protocol).toUpperCase();
+      const displayName = counts.get(node.name) > 1 ? `${node.name} (${protocolName}-${node.node_id})` : node.name;
+      if (node.protocol === "anytls") {
+        const query = new URLSearchParams({
+          sni: node.sni,
+          insecure: node.insecure !== false ? "1" : "0",
+        });
+        return `anytls://${encodeURIComponent(node.password)}@${node.server}:${node.port}?${query.toString()}#${encodeURIComponent(displayName)}`;
+      }
+      if (format === "shadowrocket") {
+        const userInfo = base64Utf8(`auto:${node.uuid}@${node.server}:${node.port}`);
+        const query = new URLSearchParams({
+          tfo: "1",
+          remark: displayName,
+          tls: "1",
+          allowInsecure: node.insecure === true ? "1" : "0",
+          peer: node.sni,
+          fp: "chrome",
+          obfs: "xhttp",
+          path: node.path,
+          obfsParam: node.host || node.sni,
+          mode: "auto",
+        });
+        return `vless://${userInfo}?${query.toString()}`;
+      }
       const query = new URLSearchParams({
         encryption: "none",
         security: "tls",
@@ -1558,14 +1585,10 @@ function subscriptionUri(nodes) {
         path: node.path,
         mode: "auto",
       });
-      const displayName = counts.get(node.name) > 1 ? `${node.name} (XHTTP-${node.node_id})` : node.name;
       return `vless://${encodeURIComponent(node.uuid)}@${node.server}:${node.port}?${query.toString()}#${encodeURIComponent(displayName)}`;
     });
-  const plainText = links.join("\n");
-  const bytes = new TextEncoder().encode(plainText);
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return new Response(btoa(binary), {
+  const plainText = links.join(format === "shadowrocket" ? "\r\n" : "\n");
+  return new Response(base64Utf8(plainText), {
     headers: {
       "content-type": "text/plain; charset=utf-8",
       "cache-control": "no-store, no-cache, must-revalidate",
@@ -1574,6 +1597,14 @@ function subscriptionUri(nodes) {
       "x-robots-tag": "noindex, nofollow, noarchive",
     },
   });
+}
+
+function base64Utf8(value) {
+  const plainText = String(value ?? "");
+  const bytes = new TextEncoder().encode(plainText);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 async function sha256Hex(value) {
