@@ -145,6 +145,26 @@ export default {
         return deleteAnyTlsNode(request, env);
       }
 
+      if (url.pathname === "/api/v1/xhttp" && request.method === "POST") {
+        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
+        return receiveXhttpNode(request, env);
+      }
+
+      if (url.pathname === "/api/v1/xhttp/delete" && request.method === "POST") {
+        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
+        return deleteProtocolNode(request, env, "xhttp");
+      }
+
+      if (url.pathname === "/api/v1/mieru" && request.method === "POST") {
+        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
+        return receiveMieruNode(request, env);
+      }
+
+      if (url.pathname === "/api/v1/mieru/delete" && request.method === "POST") {
+        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
+        return deleteProtocolNode(request, env, "mieru");
+      }
+
       if (url.pathname.startsWith("/api/")) {
         return json({ ok: false, error: "接口不存在" }, 404);
       }
@@ -259,6 +279,105 @@ async function deleteAnyTlsNode(request, env) {
   }));
 }
 
+async function receiveXhttpNode(request, env) {
+  const input = await readSubscriptionInput(request);
+  if (input instanceof Response) return input;
+  const common = validateSubscriptionCommon(input);
+  if (common instanceof Response) return common;
+  const uuid = cleanText(input?.uuid, 64);
+  const sni = cleanText(input?.sni, 255);
+  const path = cleanText(input?.path, 512);
+  const host = cleanText(input?.host || sni, 255);
+  if (!/^[0-9a-fA-F-]{36}$/.test(uuid)) return json({ ok: false, error: "UUID 格式错误" }, 400);
+  if (!/^[A-Za-z0-9.-]+$/.test(sni)) return json({ ok: false, error: "SNI 格式错误" }, 400);
+  if (!/^[A-Za-z0-9.-]+$/.test(host)) return json({ ok: false, error: "Host 格式错误" }, 400);
+  if (!path.startsWith("/") || /[\s?#]/.test(path)) return json({ ok: false, error: "XHTTP 路径格式错误" }, 400);
+  return upsertProtocolNode(request, env, "xhttp", {
+    ...common,
+    uuid,
+    sni,
+    path,
+    host,
+    insecure: input?.insecure === true,
+  });
+}
+
+async function receiveMieruNode(request, env) {
+  const input = await readSubscriptionInput(request);
+  if (input instanceof Response) return input;
+  const common = validateSubscriptionCommon(input);
+  if (common instanceof Response) return common;
+  const username = cleanText(input?.username, 128);
+  const password = cleanText(input?.password, 512);
+  const transport = String(input?.transport || "").toUpperCase();
+  const multiplexing = cleanText(input?.multiplexing || "MULTIPLEXING_LOW", 32);
+  if (!username) return json({ ok: false, error: "Mieru 用户名不能为空" }, 400);
+  if (!password) return json({ ok: false, error: "Mieru 密码不能为空" }, 400);
+  if (!["TCP", "UDP"].includes(transport)) return json({ ok: false, error: "Mieru 传输协议错误" }, 400);
+  if (!["MULTIPLEXING_OFF", "MULTIPLEXING_LOW", "MULTIPLEXING_MIDDLE", "MULTIPLEXING_HIGH"].includes(multiplexing)) {
+    return json({ ok: false, error: "Mieru 多路复用设置错误" }, 400);
+  }
+  return upsertProtocolNode(request, env, "mieru", {
+    ...common,
+    username,
+    password,
+    transport,
+    multiplexing,
+  });
+}
+
+async function readSubscriptionInput(request) {
+  const contentLength = Number(request.headers.get("content-length") || 0);
+  if (contentLength > MAX_BODY_BYTES) return json({ ok: false, error: "上报数据过大" }, 413);
+  try {
+    return await request.json();
+  } catch {
+    return json({ ok: false, error: "JSON 格式错误" }, 400);
+  }
+}
+
+function validateSubscriptionCommon(input) {
+  const nodeId = String(input?.node_id || "");
+  const name = cleanText(input?.name || nodeId, 80);
+  const server = cleanText(input?.server, 255);
+  const port = Number(input?.port);
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
+  if (!name || !server || /[\s/?#]/.test(server)) return json({ ok: false, error: "节点地址格式错误" }, 400);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return json({ ok: false, error: "端口格式错误" }, 400);
+  return { node_id: nodeId, name, server, port };
+}
+
+async function upsertProtocolNode(request, env, protocol, record) {
+  const response = await statusStore(env).fetch(new Request(`https://store/${protocol}/upsert`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...record, updated_at: Math.floor(Date.now() / 1000) }),
+  }));
+  if (!response.ok) return response;
+  const result = await response.json();
+  const accessToken = await getAnyTlsAccessToken(env);
+  return json({
+    ...result,
+    subscription_url: accessToken ? `${new URL(request.url).origin}/sub/anytls/${accessToken}` : "",
+  });
+}
+
+async function deleteProtocolNode(request, env, protocol) {
+  let input;
+  try {
+    input = await request.json();
+  } catch {
+    return json({ ok: false, error: "JSON 格式错误" }, 400);
+  }
+  const nodeId = String(input?.node_id || "");
+  if (!NODE_ID_PATTERN.test(nodeId)) return json({ ok: false, error: "node_id 格式错误" }, 400);
+  return statusStore(env).fetch(new Request(`https://store/${protocol}/delete`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ node_id: nodeId }),
+  }));
+}
+
 async function getAnyTlsInfo(request, env) {
   const response = await statusStore(env).fetch(new Request("https://store/anytls/nodes"));
   const data = await response.json();
@@ -279,13 +398,15 @@ async function toggleAnyTlsNode(request, env) {
     return json({ ok: false, error: "JSON 格式错误" }, 400);
   }
   const nodeId = String(input?.node_id || "");
-  if (!NODE_ID_PATTERN.test(nodeId) || typeof input?.enabled !== "boolean") {
+  const protocol = String(input?.protocol || "anytls");
+  if (!NODE_ID_PATTERN.test(nodeId) || !["anytls", "xhttp", "mieru"].includes(protocol)
+    || typeof input?.enabled !== "boolean") {
     return json({ ok: false, error: "订阅节点设置错误" }, 400);
   }
   return statusStore(env).fetch(new Request("https://store/anytls/toggle", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ node_id: nodeId, enabled: input.enabled }),
+    body: JSON.stringify({ node_id: nodeId, protocol, enabled: input.enabled }),
   }));
 }
 
@@ -525,10 +646,28 @@ export class VpsStatusStore {
       return json({ ok: true, node_id: record.node_id, updated_at: record.updated_at });
     }
 
+    if ((url.pathname === "/xhttp/upsert" || url.pathname === "/mieru/upsert") && request.method === "POST") {
+      const protocol = url.pathname.split("/")[1];
+      const record = await request.json();
+      const key = `${protocol}:${record.node_id}`;
+      const existing = await this.ctx.storage.get(key);
+      record.enabled = existing?.enabled !== false;
+      record.protocol = protocol;
+      await this.ctx.storage.put(key, record);
+      return json({ ok: true, node_id: record.node_id, protocol, updated_at: record.updated_at });
+    }
+
     if (url.pathname === "/anytls/delete" && request.method === "POST") {
       const input = await request.json();
       await this.ctx.storage.delete(`anytls:${input.node_id}`);
       return json({ ok: true, node_id: input.node_id });
+    }
+
+    if ((url.pathname === "/xhttp/delete" || url.pathname === "/mieru/delete") && request.method === "POST") {
+      const protocol = url.pathname.split("/")[1];
+      const input = await request.json();
+      await this.ctx.storage.delete(`${protocol}:${input.node_id}`);
+      return json({ ok: true, node_id: input.node_id, protocol });
     }
 
     if (url.pathname === "/anytls/access-token" && request.method === "POST") {
@@ -551,38 +690,42 @@ export class VpsStatusStore {
 
     if (url.pathname === "/anytls/toggle" && request.method === "POST") {
       const input = await request.json();
-      const key = `anytls:${input.node_id}`;
+      const protocol = ["anytls", "xhttp", "mieru"].includes(input.protocol) ? input.protocol : "anytls";
+      const key = `${protocol}:${input.node_id}`;
       const record = await this.ctx.storage.get(key);
-      if (!record) return json({ ok: false, error: "AnyTLS 节点不存在" }, 404);
+      if (!record) return json({ ok: false, error: "订阅节点不存在" }, 404);
       record.enabled = input.enabled;
       await this.ctx.storage.put(key, record);
-      return json({ ok: true, node_id: input.node_id, enabled: record.enabled });
+      return json({ ok: true, node_id: input.node_id, protocol, enabled: record.enabled });
     }
 
     if (url.pathname === "/anytls/nodes" && request.method === "GET") {
-      const records = await this.ctx.storage.list({ prefix: "anytls:" });
-      const nodes = [...records.values()]
+      const recordSets = await Promise.all(["anytls", "xhttp", "mieru"]
+        .map((protocol) => this.ctx.storage.list({ prefix: `${protocol}:` })));
+      const nodes = recordSets.flatMap((records) => [...records.values()])
         .filter((record) => record && typeof record === "object" && NODE_ID_PATTERN.test(record.node_id || ""))
         .map((record) => ({
           node_id: record.node_id,
           name: record.name,
           server: record.server,
           port: record.port,
-          sni: record.sni,
+          protocol: record.protocol || "anytls",
           enabled: record.enabled !== false,
           updated_at: record.updated_at,
         }))
-        .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+        .sort((a, b) => `${a.name}-${a.protocol}`.localeCompare(`${b.name}-${b.protocol}`, "zh-CN"));
       return json({ ok: true, nodes });
     }
 
     if (url.pathname === "/anytls/subscription" && request.method === "GET") {
-      const records = await this.ctx.storage.list({ prefix: "anytls:" });
-      const nodes = [...records.values()]
+      const recordSets = await Promise.all(["anytls", "xhttp", "mieru"]
+        .map((protocol) => this.ctx.storage.list({ prefix: `${protocol}:` })));
+      const nodes = recordSets.flatMap((records) => [...records.values()])
         .filter((record) => record && typeof record === "object"
           && NODE_ID_PATTERN.test(record.node_id || "") && record.enabled !== false)
-        .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
-      return anyTlsYaml(nodes);
+        .map((record) => ({ ...record, protocol: record.protocol || "anytls" }))
+        .sort((a, b) => `${a.name}-${a.protocol}`.localeCompare(`${b.name}-${b.protocol}`, "zh-CN"));
+      return subscriptionYaml(nodes);
     }
 
     if (url.pathname === "/auth/check" && request.method === "GET") {
@@ -1297,24 +1440,52 @@ function cleanText(value, maxLength) {
   return String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, "").slice(0, maxLength);
 }
 
-function anyTlsYaml(nodes) {
+function subscriptionYaml(nodes) {
   const counts = new Map();
   for (const node of nodes) counts.set(node.name, (counts.get(node.name) || 0) + 1);
   const normalized = nodes.map((node) => ({
     ...node,
-    display_name: counts.get(node.name) > 1 ? `${node.name} (${node.node_id})` : node.name,
+    display_name: counts.get(node.name) > 1
+      ? `${node.name} (${String(node.protocol).toUpperCase()}-${node.node_id})`
+      : node.name,
   }));
-  const proxyLines = normalized.map((node) => [
-    `  - name: ${yamlString(node.display_name)}`,
-    "    type: anytls",
-    `    server: ${yamlString(node.server)}`,
-    `    port: ${node.port}`,
-    `    password: ${yamlString(node.password)}`,
-    "    client-fingerprint: chrome",
-    "    udp: true",
-    `    sni: ${yamlString(node.sni)}`,
-    `    skip-cert-verify: ${node.insecure !== false}`,
-  ].join("\n"));
+  const proxyLines = normalized.map((node) => {
+    const common = [
+      `  - name: ${yamlString(node.display_name)}`,
+      `    type: ${node.protocol === "xhttp" ? "vless" : node.protocol}`,
+      `    server: ${yamlString(node.server)}`,
+      `    port: ${node.port}`,
+    ];
+    if (node.protocol === "xhttp") {
+      return [...common,
+        `    uuid: ${yamlString(node.uuid)}`,
+        "    network: xhttp",
+        "    tls: true",
+        "    udp: true",
+        `    servername: ${yamlString(node.sni)}`,
+        "    client-fingerprint: chrome",
+        `    skip-cert-verify: ${node.insecure === true}`,
+        "    xhttp-opts:",
+        `      path: ${yamlString(node.path)}`,
+        `      host: ${yamlString(node.host || node.sni)}`,
+      ].join("\n");
+    }
+    if (node.protocol === "mieru") {
+      return [...common,
+        `    transport: ${node.transport}`,
+        `    username: ${yamlString(node.username)}`,
+        `    password: ${yamlString(node.password)}`,
+        `    multiplexing: ${yamlString(node.multiplexing || "MULTIPLEXING_LOW")}`,
+      ].join("\n");
+    }
+    return [...common,
+      `    password: ${yamlString(node.password)}`,
+      "    client-fingerprint: chrome",
+      "    udp: true",
+      `    sni: ${yamlString(node.sni)}`,
+      `    skip-cert-verify: ${node.insecure !== false}`,
+    ].join("\n");
+  });
   const groupNodes = normalized.map((node) => `      - ${yamlString(node.display_name)}`);
   const body = [
     "mixed-port: 7890",
@@ -1327,8 +1498,7 @@ function anyTlsYaml(nodes) {
     "proxy-groups:",
     "  - name: PROXY",
     "    type: select",
-    "    proxies:",
-    ...groupNodes,
+    ...(groupNodes.length ? ["    proxies:", ...groupNodes] : ["    proxies: []"]),
     "    url: \"https://cp.cloudflare.com/\"",
     "    interval: 0",
     "    timeout: 5000",
@@ -1342,7 +1512,7 @@ function anyTlsYaml(nodes) {
     headers: {
       "content-type": "text/yaml; charset=utf-8",
       "cache-control": "no-store, no-cache, must-revalidate",
-      "content-disposition": 'inline; filename="anytls.yaml"',
+      "content-disposition": 'inline; filename="subscription.yaml"',
       "x-content-type-options": "nosniff",
       "x-robots-tag": "noindex, nofollow, noarchive",
     },
@@ -1377,7 +1547,10 @@ function isIngestAuthorized(request, env) {
 
 function requiresViewAuthorization(pathname) {
   return pathname.startsWith("/api/v1/")
-    && !["/api/v1/health", "/api/v1/heartbeat", "/api/v1/shutdown", "/api/v1/anytls", "/api/v1/anytls/delete"].includes(pathname);
+    && !["/api/v1/health", "/api/v1/heartbeat", "/api/v1/shutdown",
+      "/api/v1/anytls", "/api/v1/anytls/delete",
+      "/api/v1/xhttp", "/api/v1/xhttp/delete",
+      "/api/v1/mieru", "/api/v1/mieru/delete"].includes(pathname);
 }
 
 async function enforceViewAuthorization(request, env) {
