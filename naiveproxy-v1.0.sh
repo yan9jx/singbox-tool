@@ -4,7 +4,7 @@
 # 默认尝试 TCP/443；端口被占用时自动选择其他可用端口，不停止现有服务。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.0"
+SCRIPT_VERSION="v1.1"
 INSTALL_DIR="/etc/naiveproxy"
 INFO_FILE="$INSTALL_DIR/node-info.env"
 CADDYFILE="$INSTALL_DIR/Caddyfile"
@@ -220,6 +220,7 @@ write_caddyfile() {
 {
     order forward_proxy before file_server
     admin off
+    auto_https disable_redirects
     log {
         output discard
     }
@@ -387,7 +388,10 @@ disable_auto_update() {
 start_service() {
   local port="$1"
   systemctl daemon-reload
-  systemctl enable --now "$SERVICE_NAME"
+  if ! systemctl enable --now "$SERVICE_NAME"; then
+    journalctl -u "$SERVICE_NAME" -n 80 --no-pager >&2 || true
+    die "NaiveProxy 启动命令失败。"
+  fi
   systemctl is-active --quiet "$SERVICE_NAME" || {
     journalctl -u "$SERVICE_NAME" -n 80 --no-pager >&2 || true
     die "NaiveProxy 启动失败。"
