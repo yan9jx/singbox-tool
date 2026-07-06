@@ -17,7 +17,7 @@ export default {
       }
 
       if (url.pathname.startsWith("/sub/anytls/") && request.method === "GET") {
-        return serveAnyTlsSubscription(url, env);
+        return serveAnyTlsSubscription(request, url, env);
       }
 
       if (requiresViewAuthorization(url.pathname)) {
@@ -431,12 +431,17 @@ async function getAnyTlsAccessToken(env, reset = false) {
   return String((await response.json()).token || "");
 }
 
-async function serveAnyTlsSubscription(url, env) {
+async function serveAnyTlsSubscription(request, url, env) {
   const token = url.pathname.slice("/sub/anytls/".length);
   if (!/^[a-f0-9]{64}$/.test(token) || !env.INGEST_TOKEN) return new Response("Not Found", { status: 404 });
   const expected = await getAnyTlsAccessToken(env);
   if (!safeEqual(token, expected)) return new Response("Not Found", { status: 404 });
-  return statusStore(env).fetch(new Request("https://store/anytls/subscription"));
+  const format = cleanText(url.searchParams.get("format"), 20).toLowerCase();
+  const internalUrl = new URL("https://store/anytls/subscription");
+  if (format) internalUrl.searchParams.set("format", format);
+  return statusStore(env).fetch(new Request(internalUrl, {
+    headers: { "user-agent": request.headers.get("user-agent") || "" },
+  }));
 }
 
 function statusStore(env) {
@@ -725,7 +730,8 @@ export class VpsStatusStore {
           && NODE_ID_PATTERN.test(record.node_id || "") && record.enabled !== false)
         .map((record) => ({ ...record, protocol: record.protocol || "anytls" }))
         .sort((a, b) => `${a.name}-${a.protocol}`.localeCompare(`${b.name}-${b.protocol}`, "zh-CN"));
-      return subscriptionYaml(nodes);
+      const format = subscriptionFormat(url.searchParams.get("format"), request.headers.get("user-agent"));
+      return format === "uri" ? subscriptionUri(nodes) : subscriptionYaml(nodes);
     }
 
     if (url.pathname === "/auth/check" && request.method === "GET") {
@@ -1459,9 +1465,11 @@ function subscriptionYaml(nodes) {
     if (node.protocol === "xhttp") {
       return [...common,
         `    uuid: ${yamlString(node.uuid)}`,
+        '    encryption: ""',
         "    network: xhttp",
         "    tls: true",
         "    udp: true",
+        "    alpn: [h2]",
         `    servername: ${yamlString(node.sni)}`,
         "    client-fingerprint: chrome",
         `    skip-cert-verify: ${node.insecure === true}`,
@@ -1482,7 +1490,11 @@ function subscriptionYaml(nodes) {
       `    password: ${yamlString(node.password)}`,
       "    client-fingerprint: chrome",
       "    udp: true",
+      "    idle-session-check-interval: 30",
+      "    idle-session-timeout: 30",
+      "    min-idle-session: 0",
       `    sni: ${yamlString(node.sni)}`,
+      "    alpn: [h2, http/1.1]",
       `    skip-cert-verify: ${node.insecure !== false}`,
     ].join("\n");
   });
@@ -1521,6 +1533,47 @@ function subscriptionYaml(nodes) {
 
 function yamlString(value) {
   return JSON.stringify(String(value ?? ""));
+}
+
+function subscriptionFormat(requested, userAgent) {
+  const format = String(requested || "").toLowerCase();
+  if (["v2ray", "v2rayng", "v2rayn", "uri", "base64"].includes(format)) return "uri";
+  if (["mihomo", "clash", "meta", "yaml"].includes(format)) return "yaml";
+  return /\b(v2rayng|v2rayn)\b/i.test(String(userAgent || "")) ? "uri" : "yaml";
+}
+
+function subscriptionUri(nodes) {
+  const counts = new Map();
+  for (const node of nodes) counts.set(node.name, (counts.get(node.name) || 0) + 1);
+  const links = nodes
+    .filter((node) => node.protocol === "xhttp")
+    .map((node) => {
+      const query = new URLSearchParams({
+        encryption: "none",
+        security: "tls",
+        sni: node.sni,
+        fp: "chrome",
+        type: "xhttp",
+        host: node.host || node.sni,
+        path: node.path,
+        mode: "auto",
+      });
+      const displayName = counts.get(node.name) > 1 ? `${node.name} (XHTTP-${node.node_id})` : node.name;
+      return `vless://${encodeURIComponent(node.uuid)}@${node.server}:${node.port}?${query.toString()}#${encodeURIComponent(displayName)}`;
+    });
+  const plainText = links.join("\n");
+  const bytes = new TextEncoder().encode(plainText);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return new Response(btoa(binary), {
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store, no-cache, must-revalidate",
+      "content-disposition": 'inline; filename="subscription.txt"',
+      "x-content-type-options": "nosniff",
+      "x-robots-tag": "noindex, nofollow, noarchive",
+    },
+  });
 }
 
 async function sha256Hex(value) {
