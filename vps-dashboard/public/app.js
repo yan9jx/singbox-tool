@@ -250,9 +250,9 @@ async function refreshReminders() {
 
 async function refreshAnyTls() {
   const response = await apiFetch("/api/v1/anytls/info");
-  if (!response.ok) throw new Error("AnyTLS 订阅接口暂时不可用");
+  if (!response.ok) throw new Error("聚合订阅接口暂时不可用");
   const data = await response.json();
-  state.anytlsNodes = new Map((data.nodes || []).map((node) => [node.node_id, node]));
+  state.anytlsNodes = new Map((data.nodes || []).map((node) => [`${node.protocol}:${node.node_id}`, node]));
   elements.anytlsSubscriptionUrl.value = data.subscription_url || "";
   elements.copyAnyTlsSubscription.disabled = !data.subscription_url;
   elements.resetAnyTlsSubscription.disabled = !data.subscription_url;
@@ -262,11 +262,11 @@ async function refreshAnyTls() {
 function renderAnyTlsNodes(nodes) {
   elements.anytlsNodeGrid.replaceChildren();
   const enabled = nodes.filter((node) => node.enabled).length;
-  elements.anytlsSummary.textContent = nodes.length ? `已选择 ${enabled} / ${nodes.length} 台 VPS` : "尚未登记节点";
+  elements.anytlsSummary.textContent = nodes.length ? `已选择 ${enabled} / ${nodes.length} 个节点` : "尚未登记节点";
   if (!nodes.length) {
     const empty = document.createElement("div");
     empty.className = "subscription-empty";
-    empty.textContent = "暂无节点，请先在 VPS 运行 AnyTLS 脚本并选择加入聚合订阅。";
+    empty.textContent = "暂无节点，请先在 VPS 的协议脚本中选择加入聚合订阅。";
     elements.anytlsNodeGrid.appendChild(empty);
     return;
   }
@@ -278,15 +278,16 @@ function renderAnyTlsNodes(nodes) {
     name.textContent = node.name || node.node_id;
     const endpoint = document.createElement("span");
     endpoint.textContent = `${node.server}:${node.port}`;
-    const sni = document.createElement("small");
-    sni.textContent = `SNI ${node.sni} · 更新于 ${formatDateTime(node.updated_at)}`;
-    info.append(name, endpoint, sni);
+    const protocol = document.createElement("small");
+    protocol.textContent = `${String(node.protocol || "anytls").toUpperCase()} · 更新于 ${formatDateTime(node.updated_at)}`;
+    info.append(name, endpoint, protocol);
     const label = document.createElement("label");
     label.className = "toggle-label subscription-node-toggle";
     const input = document.createElement("input");
     input.type = "checkbox";
     input.checked = node.enabled;
     input.dataset.nodeId = node.node_id;
+    input.dataset.protocol = node.protocol || "anytls";
     const toggle = document.createElement("span");
     toggle.className = "toggle";
     const text = document.createElement("span");
@@ -305,7 +306,11 @@ async function handleAnyTlsToggle(event) {
     const response = await apiFetch("/api/v1/anytls/toggle", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ node_id: input.dataset.nodeId, enabled: input.checked }),
+      body: JSON.stringify({
+        node_id: input.dataset.nodeId,
+        protocol: input.dataset.protocol,
+        enabled: input.checked,
+      }),
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "订阅节点设置失败");
