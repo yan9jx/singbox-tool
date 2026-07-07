@@ -1561,16 +1561,21 @@ function subscriptionUri(nodes, format = "uri") {
         return `anytls://${encodeURIComponent(node.password)}@${node.server}:${node.port}?${query.toString()}#${encodeURIComponent(displayName)}`;
       }
       if (node.protocol === "mieru") {
-        const query = new URLSearchParams({
-          transport: String(node.transport || "TCP").toLowerCase(),
-          protocol: String(node.transport || "TCP").toLowerCase(),
-          username: node.username,
-          password: node.password,
-          multiplexing: node.multiplexing || "MULTIPLEXING_LOW",
-          profile: displayName,
-          remark: displayName,
-        });
-        return `mieru://${node.server}:${node.port}?${query.toString()}#${encodeURIComponent(displayName)}`;
+        if (format === "shadowrocket") {
+          return [
+            `${shadowrocketField(displayName)}=mieru`,
+            shadowrocketField(node.server),
+            node.port,
+            `username=${shadowrocketField(node.username)}`,
+            `user=${shadowrocketField(node.username)}`,
+            `password=${shadowrocketField(node.password)}`,
+            `protocol=${shadowrocketField(String(node.transport || "TCP").toLowerCase())}`,
+            `transport=${shadowrocketField(String(node.transport || "TCP").toLowerCase())}`,
+            `multiplexing=${shadowrocketField(node.multiplexing || "MULTIPLEXING_LOW")}`,
+            "udp=1",
+          ].join(",");
+        }
+        return "";
       }
       if (node.protocol === "xhttp" && format === "shadowrocket") {
         const userInfo = base64Utf8(`auto:${node.uuid}@${node.server}:${node.port}`);
@@ -1610,6 +1615,10 @@ function subscriptionUri(nodes, format = "uri") {
       "x-robots-tag": "noindex, nofollow, noarchive",
     },
   });
+}
+
+function shadowrocketField(value) {
+  return String(value ?? "").replace(/[\r\n,=]/g, " ").trim();
 }
 
 function base64Utf8(value) {
