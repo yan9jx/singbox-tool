@@ -4,7 +4,7 @@
 # 如果 TCP/443 已被占用，会自动选择可用的 *443 备用端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.3"
+SCRIPT_VERSION="v1.4"
 INSTALL_DIR="/opt/anytls"
 BIN="$INSTALL_DIR/anytls-server"
 CONFIG_DIR="/etc/anytls"
@@ -325,7 +325,10 @@ install_node() {
   fi
 }
 
-show_link() { require_node_files; info_value LINK; }
+show_link() {
+  require_node_files
+  print_all_formats "$(info_value NODE_NAME)" "$(info_value SERVER_ADDRESS)" "$(info_value PORT)" "$(info_value PASSWORD)" "$(info_value SNI)" "$(info_value LINK)"
+}
 print_link_qr() { echo "$1"; echo; qrencode -t ANSIUTF8 "$1"; }
 print_all_formats() {
   local name="$1" host="$2" port="$3" password="$4" sni="$5" link="$6"
