@@ -1476,6 +1476,7 @@ function subscriptionYaml(nodes) {
         "    xhttp-opts:",
         `      path: ${yamlString(node.path)}`,
         `      host: ${yamlString(node.host || node.sni)}`,
+        "      mode: auto",
       ].join("\n");
     }
     if (node.protocol === "mieru") {
