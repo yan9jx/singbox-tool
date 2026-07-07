@@ -1560,7 +1560,19 @@ function subscriptionUri(nodes, format = "uri") {
         });
         return `anytls://${encodeURIComponent(node.password)}@${node.server}:${node.port}?${query.toString()}#${encodeURIComponent(displayName)}`;
       }
-      if (format === "shadowrocket") {
+      if (node.protocol === "mieru") {
+        const query = new URLSearchParams({
+          transport: String(node.transport || "TCP").toLowerCase(),
+          protocol: String(node.transport || "TCP").toLowerCase(),
+          username: node.username,
+          password: node.password,
+          multiplexing: node.multiplexing || "MULTIPLEXING_LOW",
+          profile: displayName,
+          remark: displayName,
+        });
+        return `mieru://${node.server}:${node.port}?${query.toString()}#${encodeURIComponent(displayName)}`;
+      }
+      if (node.protocol === "xhttp" && format === "shadowrocket") {
         const userInfo = base64Utf8(`auto:${node.uuid}@${node.server}:${node.port}`);
         const query = new URLSearchParams({
           tfo: "1",
@@ -1575,18 +1587,6 @@ function subscriptionUri(nodes, format = "uri") {
           mode: "auto",
         });
         return `vless://${userInfo}?${query.toString()}`;
-      }
-      if (node.protocol === "mieru") {
-        const query = new URLSearchParams({
-          transport: String(node.transport || "TCP").toLowerCase(),
-          protocol: String(node.transport || "TCP").toLowerCase(),
-          username: node.username,
-          password: node.password,
-          multiplexing: node.multiplexing || "MULTIPLEXING_LOW",
-          profile: displayName,
-          remark: displayName,
-        });
-        return `mieru://${node.server}:${node.port}?${query.toString()}#${encodeURIComponent(displayName)}`;
       }
       const query = new URLSearchParams({
         encryption: "none",
