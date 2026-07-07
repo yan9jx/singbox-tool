@@ -1484,6 +1484,7 @@ function subscriptionYaml(nodes) {
         `    username: ${yamlString(node.username)}`,
         `    password: ${yamlString(node.password)}`,
         `    multiplexing: ${yamlString(node.multiplexing || "MULTIPLEXING_LOW")}`,
+        "    udp: true",
       ].join("\n");
     }
     return [...common,
@@ -1548,7 +1549,7 @@ function subscriptionUri(nodes, format = "uri") {
   const counts = new Map();
   for (const node of nodes) counts.set(node.name, (counts.get(node.name) || 0) + 1);
   const links = nodes
-    .filter((node) => node.protocol === "xhttp" || (format === "shadowrocket" && node.protocol === "anytls"))
+    .filter((node) => node.protocol === "xhttp" || (format === "shadowrocket" && ["anytls", "mieru"].includes(node.protocol)))
     .map((node) => {
       const protocolName = String(node.protocol).toUpperCase();
       const displayName = counts.get(node.name) > 1 ? `${node.name} (${protocolName}-${node.node_id})` : node.name;
@@ -1574,6 +1575,18 @@ function subscriptionUri(nodes, format = "uri") {
           mode: "auto",
         });
         return `vless://${userInfo}?${query.toString()}`;
+      }
+      if (node.protocol === "mieru") {
+        const query = new URLSearchParams({
+          transport: String(node.transport || "TCP").toLowerCase(),
+          protocol: String(node.transport || "TCP").toLowerCase(),
+          username: node.username,
+          password: node.password,
+          multiplexing: node.multiplexing || "MULTIPLEXING_LOW",
+          profile: displayName,
+          remark: displayName,
+        });
+        return `mieru://${node.server}:${node.port}?${query.toString()}#${encodeURIComponent(displayName)}`;
       }
       const query = new URLSearchParams({
         encryption: "none",
