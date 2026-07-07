@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.8"
+SCRIPT_VERSION="v1.9"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -475,7 +475,11 @@ generate_subscription() { sync_subscription_node "${1:-false}"; }
 
 show_link() {
   require_node_files
-  info_value LINK
+  local link
+  link="$(info_value LINK)"
+  echo "$link"
+  echo
+  qrencode -t ANSIUTF8 "$link"
   if [[ -f "$SUBSCRIPTION_INFO_FILE" ]]; then
     echo
     echo "统一聚合订阅（Mihomo / Clash Meta）："
@@ -518,7 +522,7 @@ EOF
   read -r -p "请选择：" choice
   case "$choice" in
     1) install_node ;;
-    2) show_link | tee /dev/tty | qrencode -t ANSIUTF8 ;;
+    2) show_link ;;
     3) show_status ;;
     4) show_logs ;;
     5) restart_xray ;;
