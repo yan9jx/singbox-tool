@@ -3,7 +3,7 @@
 # 使用官方 mita 软件包，默认建立 TCP 节点，并可加入统一 Mihomo / Clash Meta 聚合订阅。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.0"
+SCRIPT_VERSION="v1.1"
 INSTALL_DIR="/etc/mieru-script"
 INFO_FILE="$INSTALL_DIR/node-info.env"
 SERVER_CONFIG="$INSTALL_DIR/server-config.json"
@@ -29,12 +29,12 @@ json_escape() {
 install_deps() {
   command -v apt-get >/dev/null 2>&1 || die "仅支持 Debian/Ubuntu（apt-get）。"
   local missing=() cmd
-  for cmd in curl openssl ss dpkg; do
+  for cmd in curl openssl ss dpkg qrencode python3; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   (( ${#missing[@]} == 0 )) && return
   apt-get update -y
-  DEBIAN_FRONTEND=noninteractive apt-get install -y curl openssl ca-certificates iproute2 tzdata
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl openssl ca-certificates iproute2 tzdata qrencode python3
 }
 
 public_ipv4() { curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || true; }
@@ -152,6 +152,33 @@ subscription_info_value() { if [[ -f "$SUBSCRIPTION_INFO_FILE" ]]; then sed -n "
 agent_info_value() { if [[ -f "$DASHBOARD_AGENT_CONF" ]]; then sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$DASHBOARD_AGENT_CONF"; fi; return 0; }
 require_node_files() { [[ -f "$INFO_FILE" && -f "$SERVER_CONFIG" ]] || die "未找到 Mieru 节点，请先安装。"; command -v mita >/dev/null || die "未找到 mita。"; }
 
+urlencode() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
+
+show_share_link() {
+  require_node_files
+  local name server port username password name_enc user_enc pass_enc primary fallback
+  name="$(info_value NODE_NAME)"
+  server="$(info_value SERVER_ADDRESS)"
+  port="$(info_value PORT)"
+  username="$(info_value USERNAME)"
+  password="$(info_value PASSWORD)"
+  name_enc="$(urlencode "$name")"
+  user_enc="$(urlencode "$username")"
+  pass_enc="$(urlencode "$password")"
+  primary="mieru://${user_enc}:${pass_enc}@${server}:${port}?protocol=tcp&transport=tcp#${name_enc}"
+  fallback="mieru://${pass_enc}@${server}:${port}?protocol=tcp&transport=tcp#${name_enc}"
+  echo "Mieru 分享直链（主链，含 username:password）："
+  echo "$primary"
+  echo
+  echo "备用直链（仅 password；若客户端不认用户名字段就试这个）："
+  echo "$fallback"
+  echo
+  echo "二维码（主链）："
+  qrencode -t ANSIUTF8 "$primary"
+}
+
 load_subscription_identity() {
   SUB_DASHBOARD_URL="$(agent_info_value DASHBOARD_URL)"
   SUB_INGEST_TOKEN="$(agent_info_value INGEST_TOKEN)"
@@ -249,6 +276,8 @@ EOF
     echo "统一聚合订阅："
     subscription_info_value SUBSCRIPTION_URL
   fi
+  echo
+  show_share_link
 }
 
 install_node() {
@@ -375,6 +404,7 @@ EOF
     9) uninstall_node ;;
     10) sync_subscription_node ;;
     11) remove_subscription_node ;;
+    12) show_share_link ;;
     0) exit 0 ;;
     *) die "无效选项。" ;;
   esac
@@ -383,7 +413,8 @@ EOF
 require_root
 case "${1:-}" in
   install) install_node ;;
-  config|link) show_config ;;
+  config) show_config ;;
+  link|share|qr) show_share_link ;;
   status) mita status; systemctl status mita --no-pager ;;
   logs) journalctl -u mita -n 100 --no-pager ;;
   restart) restart_node ;;
