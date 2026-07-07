@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.06.27-9"
+APP_VERSION="2026.06.27-10"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -247,6 +247,10 @@ def now_text():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def traffic_month_key():
+    return time.strftime("%Y-%m")
+
+
 def run(cmd, timeout=8):
     try:
         p = subprocess.run(cmd, shell=True, text=True, capture_output=True, timeout=timeout)
@@ -430,6 +434,23 @@ def init_traffic():
         write_int(state_path("traffic_total_tx"), init_tx if init_tx is not None else raw_tx)
         write_int(state_path("traffic_last_rx"), raw_rx)
         write_int(state_path("traffic_last_tx"), raw_tx)
+        write_text(state_path("traffic_month_key"), traffic_month_key())
+
+
+def reset_monthly_traffic_if_needed(raw_rx, raw_tx):
+    current_month = traffic_month_key()
+    month_path = state_path("traffic_month_key")
+    stored_month = read_text(month_path, "")
+    if stored_month == current_month:
+        return False
+
+    write_int(state_path("traffic_total_rx"), 0)
+    write_int(state_path("traffic_total_tx"), 0)
+    write_int(state_path("traffic_last_rx"), raw_rx)
+    write_int(state_path("traffic_last_tx"), raw_tx)
+    write_text(month_path, current_month)
+    log_event(f"monthly traffic counter reset: {stored_month or 'uninitialized'} -> {current_month}")
+    return True
 
 
 def update_traffic():
@@ -438,6 +459,10 @@ def update_traffic():
         fcntl.flock(lf, fcntl.LOCK_EX)
         init_traffic()
         iface, raw_rx, raw_tx = get_raw_traffic()
+
+        if reset_monthly_traffic_if_needed(raw_rx, raw_tx):
+            fcntl.flock(lf, fcntl.LOCK_UN)
+            return
 
         last_rx = read_int(state_path("traffic_last_rx"), raw_rx)
         last_tx = read_int(state_path("traffic_last_tx"), raw_tx)
