@@ -8,7 +8,7 @@ SERVICE_FILE="/etc/systemd/system/sing-box.service"
 DEFAULT_PORT="443"
 SERVER_NAME="www.microsoft.com"
 SCRIPT_TITLE="宇宙监察委员会sing-box部署局"
-SCRIPT_VERSION="v11.0"
+SCRIPT_VERSION="v11.1"
 CADDY_BIN="/usr/local/bin/caddy-naive"
 CADDY_DIR="/etc/caddy-naive"
 CADDYFILE="$CADDY_DIR/Caddyfile"
@@ -1064,6 +1064,26 @@ WantedBy=multi-user.target
 EOF
 }
 
+v10_verify_filebrowser_precedence() {
+  local site domain tmp host_index fallback_index naive_site
+  naive_site="$(find "$CADDY_SITE_DIR" -maxdepth 1 -type f -name "naive-*.caddy" -print -quit 2>/dev/null || true)"
+  [[ -n "$naive_site" ]] || return 0
+  grep -qE '^:443([,[:space:]]|$)' "$naive_site" || return 0
+
+  for site in "$CADDY_SITE_DIR"/filebrowser-*.caddy; do
+    [[ -f "$site" ]] || continue
+    domain="${site##*/filebrowser-}"
+    domain="${domain%.caddy}"
+    tmp="$(mktemp)"
+    "$CADDY_BIN" adapt --config "$CADDYFILE" --adapter caddyfile --pretty >"$tmp" || { rm -f "$tmp"; die "Caddy route priority check failed."; }
+    host_index="$(jq -r --arg domain "$domain" '[.apps.http.servers[]?.routes | to_entries[] | select(any(.value.match[]?; ((.host? // []) | index($domain)))) | .key] | min // empty' "$tmp")"
+    fallback_index="$(jq -r '[.apps.http.servers[]?.routes | to_entries[] | select((.value.match // []) | length == 0) | .key] | min // empty' "$tmp")"
+    rm -f "$tmp"
+    [[ "$host_index" =~ ^[0-9]+$ && "$fallback_index" =~ ^[0-9]+$ && "$host_index" -lt "$fallback_index" ]] ||
+      die "Caddy route priority check failed: File Browser must precede the Naive :443 fallback route."
+  done
+}
+
 v10_restart_shared_caddy() {
   "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >/dev/null ||
     die "shared-caddy config validation failed."
@@ -1078,6 +1098,7 @@ v10_restart_shared_caddy() {
     journalctl -u "$CADDY_SERVICE" --no-pager -n 50 >&2 || true
     die "shared-caddy failed to start."
   }
+  v10_verify_filebrowser_precedence
 }
 
 v10_ensure_shared_caddy_ready() {
