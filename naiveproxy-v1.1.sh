@@ -7,19 +7,24 @@ set -Eeuo pipefail
 SCRIPT_VERSION="v1.1"
 INSTALL_DIR="/etc/naiveproxy"
 INFO_FILE="$INSTALL_DIR/node-info.env"
-CADDYFILE="$INSTALL_DIR/Caddyfile"
+CADDY_DIR="/etc/caddy-naive"
+CADDYFILE="$CADDY_DIR/Caddyfile"
+CADDY_SITE_DIR="$CADDY_DIR/sites"
+CADDY_ROUTE_DIR="$CADDY_DIR/routes"
+CADDY_SERVICE="shared-caddy"
+CADDY_SERVICE_FILE="/etc/systemd/system/${CADDY_SERVICE}.service"
 TLS_DIR="$INSTALL_DIR/tls"
 TLS_CERT="$TLS_DIR/fullchain.pem"
 TLS_KEY="$TLS_DIR/privkey.pem"
 BIN="/usr/local/bin/caddy-naive"
 MANAGER="/usr/local/sbin/naiveproxy-manager"
-SERVICE_FILE="/etc/systemd/system/naiveproxy.service"
+SERVICE_FILE="$CADDY_SERVICE_FILE"
 UPDATE_SERVICE="/etc/systemd/system/naiveproxy-update.service"
 UPDATE_TIMER="/etc/systemd/system/naiveproxy-update.timer"
 RENEW_HOOK="/etc/letsencrypt/renewal-hooks/deploy/naiveproxy.sh"
 WEB_ROOT="/var/www/naiveproxy"
 SERVICE_USER="naiveproxy"
-SERVICE_NAME="naiveproxy"
+SERVICE_NAME="$CADDY_SERVICE"
 RELEASE_API="https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
 RELEASE_ASSET="caddy-forwardproxy-naive.tar.xz"
 
@@ -172,6 +177,11 @@ choose_port() {
   die "找不到可用的 TCP 监听端口。"
 }
 
+shared_filebrowser_site_exists() {
+  local domain="$1"
+  [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" ]]
+}
+
 open_firewall_port() {
   local port="$1"
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
@@ -216,9 +226,11 @@ EOF
 
 write_caddyfile() {
   local domain="$1" port="$2" username="$3" password="$4"
-  cat >"$CADDYFILE" <<EOF
+  install -d -m 755 "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR/$domain"
+  if [[ ! -f "$CADDYFILE" ]]; then
+    cat >"$CADDYFILE" <<EOF
 {
-    order forward_proxy before file_server
+    order forward_proxy before reverse_proxy
     admin off
     auto_https disable_redirects
     log {
@@ -226,8 +238,23 @@ write_caddyfile() {
     }
 }
 
-:$port, $domain:$port {
-    tls $TLS_CERT $TLS_KEY
+import ${CADDY_SITE_DIR}/*.caddy
+EOF
+  fi
+
+  if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" && "$port" == "443" ]]; then
+    cat >"${CADDY_ROUTE_DIR}/${domain}/naive.caddy" <<EOF
+forward_proxy {
+    basic_auth $username $password
+    hide_ip
+    hide_via
+    probe_resistance
+}
+EOF
+  else
+    cat >"${CADDY_SITE_DIR}/naive-${domain}.caddy" <<EOF
+$domain:$port {
+    tls /etc/letsencrypt/live/$domain/fullchain.pem /etc/letsencrypt/live/$domain/privkey.pem
     encode
     forward_proxy {
         basic_auth $username $password
@@ -239,6 +266,7 @@ write_caddyfile() {
     file_server
 }
 EOF
+  fi
   chown root:"$SERVICE_USER" "$CADDYFILE"
   chmod 640 "$CADDYFILE"
 }
@@ -252,8 +280,6 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-User=$SERVICE_USER
-Group=$SERVICE_USER
 Environment=XDG_DATA_HOME=/var/lib/naiveproxy
 Environment=XDG_CONFIG_HOME=/var/lib/naiveproxy
 ExecStart=$BIN run --environ --config $CADDYFILE --adapter caddyfile
@@ -265,8 +291,6 @@ RestartSec=3
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 PrivateTmp=true
-ProtectHome=true
-ProtectSystem=full
 ReadWritePaths=/var/lib/naiveproxy
 NoNewPrivileges=true
 
@@ -388,7 +412,9 @@ disable_auto_update() {
 start_service() {
   local port="$1"
   systemctl daemon-reload
-  if ! systemctl enable --now "$SERVICE_NAME"; then
+  if systemctl is-active --quiet "$SERVICE_NAME"; then
+    systemctl reload "$SERVICE_NAME" || systemctl restart "$SERVICE_NAME"
+  elif ! systemctl enable --now "$SERVICE_NAME"; then
     journalctl -u "$SERVICE_NAME" -n 80 --no-pager >&2 || true
     die "NaiveProxy 启动命令失败。"
   fi
@@ -463,8 +489,12 @@ install_node() {
   check_domain "$domain" "$ip"
   issue_certificate "$domain"
 
-  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-  port="$(choose_port)"
+  systemctl stop naiveproxy 2>/dev/null || true
+  if shared_filebrowser_site_exists "$domain"; then
+    port="443"
+  else
+    port="$(choose_port)"
+  fi
   echo "自动选择 NaiveProxy 监听端口：TCP/$port"
   read -r -p "节点名称 [NaiveProxy]: " name
   name="${name:-NaiveProxy}"; name="${name//\'/}"; name="${name//$'\n'/}"
@@ -554,9 +584,15 @@ restart_node() {
 
 uninstall_node() {
   confirm_yes "是否卸载本脚本创建的 NaiveProxy？" || return 0
-  systemctl disable --now "$SERVICE_NAME" naiveproxy-update.timer 2>/dev/null || true
-  rm -f "$SERVICE_FILE" "$UPDATE_SERVICE" "$UPDATE_TIMER" "$RENEW_HOOK" "$BIN" "$MANAGER"
+  local domain
+  domain="$(info_value DOMAIN 2>/dev/null || true)"
+  systemctl disable --now naiveproxy-update.timer 2>/dev/null || true
+  if [[ -n "$domain" ]]; then
+    rm -f "${CADDY_ROUTE_DIR}/${domain}/naive.caddy" "${CADDY_SITE_DIR}/naive-${domain}.caddy"
+  fi
+  rm -f "$UPDATE_SERVICE" "$UPDATE_TIMER" "$RENEW_HOOK" "$MANAGER"
   rm -rf "$INSTALL_DIR" "$WEB_ROOT" /var/lib/naiveproxy
+  systemctl reload "$SERVICE_NAME" 2>/dev/null || systemctl restart "$SERVICE_NAME" 2>/dev/null || true
   detect_nginx_mode
   if [[ -n "$NGINX_MODE" && -n "$ACME_NGINX_CONF" ]]; then
     rm -f "$ACME_NGINX_CONF"

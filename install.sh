@@ -10,6 +10,15 @@ FB_PORT="8080"
 PUBLIC_PORT="443"
 CREDS_FILE="/root/filebrowser-credentials.txt"
 NGINX_CONF=""
+CADDY_BIN="/usr/local/bin/caddy-naive"
+CADDY_DIR="/etc/caddy-naive"
+CADDYFILE="${CADDY_DIR}/Caddyfile"
+CADDY_SITE_DIR="${CADDY_DIR}/sites"
+CADDY_ROUTE_DIR="${CADDY_DIR}/routes"
+CADDY_SERVICE="shared-caddy"
+CADDY_SERVICE_FILE="/etc/systemd/system/${CADDY_SERVICE}.service"
+CADDY_RELEASE_API="https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
+CADDY_RELEASE_ASSET="caddy-forwardproxy-naive.tar.xz"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -49,6 +58,12 @@ port_is_available() {
   else
     ! netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"
   fi
+}
+
+port_owner_is_shared_caddy() {
+  local port="$1"
+  command -v ss >/dev/null 2>&1 || return 1
+  ss -H -ltnp "sport = :${port}" 2>/dev/null | grep -Eq 'caddy|caddy-naive'
 }
 
 choose_available_port() {
@@ -211,16 +226,45 @@ collect_input() {
 }
 
 install_packages() {
-  info "安装 Nginx、curl 和 Certbot..."
+  info "安装 curl、Certbot 和 Caddy 所需依赖..."
   if [[ $PKG_FAMILY == "debian" ]]; then
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y nginx curl ca-certificates certbot
+    DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates certbot jq xz-utils tar coreutils
   else
-    if ! dnf install -y nginx curl ca-certificates certbot; then
+    if ! dnf install -y curl ca-certificates certbot jq xz tar coreutils; then
       dnf install -y epel-release
-      dnf install -y nginx curl ca-certificates certbot
+      dnf install -y curl ca-certificates certbot jq xz tar coreutils
     fi
   fi
+}
+
+fetch_caddy_release() {
+  local release_json
+  release_json="$(curl -fsSL --max-time 30 "$CADDY_RELEASE_API")" || die "Failed to query Caddy/NaiveProxy release."
+  CADDY_RELEASE_TAG="$(jq -er '.tag_name' <<<"$release_json")" || die "Caddy/NaiveProxy release has no tag."
+  CADDY_RELEASE_URL="$(jq -er --arg name "$CADDY_RELEASE_ASSET" '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json")" ||
+    die "Caddy/NaiveProxy release is missing $CADDY_RELEASE_ASSET."
+  CADDY_RELEASE_DIGEST="$(jq -er --arg name "$CADDY_RELEASE_ASSET" '.assets[] | select(.name == $name) | .digest // ""' <<<"$release_json" |
+    sed 's/^sha256://')" || true
+}
+
+ensure_caddy_binary() {
+  [[ -x "$CADDY_BIN" ]] && return
+
+  local tmp archive binary
+  tmp="$(mktemp -d)"
+  archive="$tmp/$CADDY_RELEASE_ASSET"
+  fetch_caddy_release
+  curl -fL --retry 3 "$CADDY_RELEASE_URL" -o "$archive"
+  if [[ -n "${CADDY_RELEASE_DIGEST:-}" ]]; then
+    printf '%s  %s\n' "$CADDY_RELEASE_DIGEST" "$archive" | sha256sum -c - >/dev/null ||
+      die "Caddy/NaiveProxy archive SHA-256 verification failed."
+  fi
+  tar -xJf "$archive" -C "$tmp"
+  binary="$tmp/caddy-forwardproxy-naive/caddy"
+  [[ -x "$binary" ]] || die "Caddy/NaiveProxy archive is incomplete."
+  install -m 755 "$binary" "$CADDY_BIN"
+  rm -rf "$tmp"
 }
 
 configure_security() {
@@ -303,15 +347,13 @@ EOF
 
 configure_certificate_renewal() {
   install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
-cat > /etc/letsencrypt/renewal-hooks/deploy/reload-filebrowser-nginx.sh <<'EOF'
+cat > /etc/letsencrypt/renewal-hooks/deploy/reload-shared-caddy.sh <<'EOF'
 #!/usr/bin/env bash
-if systemctl is-active --quiet nginx 2>/dev/null; then
-  systemctl reload nginx
-else
-  systemctl restart filebrowser-nginx
+if systemctl is-active --quiet shared-caddy 2>/dev/null; then
+  systemctl reload shared-caddy || systemctl restart shared-caddy
 fi
 EOF
-  chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/reload-filebrowser-nginx.sh
+  chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/reload-shared-caddy.sh
   systemctl enable --now certbot.timer 2>/dev/null || true
 }
 
@@ -553,6 +595,63 @@ EOF
   systemctl enable --now filebrowser-nginx
 }
 
+write_caddy_config() {
+  info "Configuring shared Caddy HTTPS entry for File Browser..."
+  ensure_caddy_binary
+  install -d -m 0755 "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR/${DOMAIN}"
+  cat > "$CADDYFILE" <<EOF
+{
+    order forward_proxy before reverse_proxy
+    admin off
+    auto_https disable_redirects
+    log {
+        output discard
+    }
+}
+
+import ${CADDY_SITE_DIR}/*.caddy
+EOF
+  cat > "${CADDY_SITE_DIR}/filebrowser-${DOMAIN}.caddy" <<EOF
+${DOMAIN}:443 {
+    tls /etc/letsencrypt/live/${DOMAIN}/fullchain.pem /etc/letsencrypt/live/${DOMAIN}/privkey.pem
+    encode gzip
+    request_body {
+        max_size ${UPLOAD_LIMIT}
+    }
+    import ${CADDY_ROUTE_DIR}/${DOMAIN}/*.caddy
+    reverse_proxy 127.0.0.1:${FB_PORT}
+}
+EOF
+  cat > "$CADDY_SERVICE_FILE" <<EOF
+[Unit]
+Description=Shared Caddy reverse proxy and NaiveProxy entry
+After=network-online.target filebrowser.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=${CADDY_BIN} run --environ --config ${CADDYFILE} --adapter caddyfile
+ExecReload=${CADDY_BIN} reload --config ${CADDYFILE} --adapter caddyfile
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >/dev/null ||
+    die "Caddy config validation failed."
+  systemctl disable --now filebrowser-nginx 2>/dev/null || true
+  systemctl daemon-reload
+  systemctl enable --now "$CADDY_SERVICE"
+  systemctl is-active --quiet "$CADDY_SERVICE" || {
+    journalctl -u "$CADDY_SERVICE" --no-pager -n 50 >&2 || true
+    die "Shared Caddy failed to start."
+  }
+}
+
 save_and_show_credentials() {
   local scheme="https"
   local public_address="${DOMAIN}"
@@ -597,7 +696,7 @@ main() {
   install_filebrowser
   write_service
   verify_login
-  write_nginx_config
+  write_caddy_config
   save_and_show_credentials
 }
 
@@ -607,15 +706,14 @@ trap 'printf "${RED}[x] 安装在第 %s 行失败，请检查上方错误信息�
 choose_https_port() {
   PUBLIC_PORT="443"
   if port_is_available "$PUBLIC_PORT"; then
-    NGINX_MODE="standalone"
+    NGINX_MODE="caddy"
     return
   fi
-  if systemctl is-active --quiet nginx 2>/dev/null; then
-    NGINX_MODE="system"
-    info "Detected system Nginx on TCP/443; File Browser will be added as a separate HTTPS virtual host."
+  if systemctl is-active --quiet shared-caddy 2>/dev/null && port_owner_is_shared_caddy "$PUBLIC_PORT"; then
+    NGINX_MODE="caddy"
     return
   fi
-  die "TCP/443 is occupied by a non-system-Nginx service. Stop or move that service first."
+  die "TCP/443 is occupied by a non-Caddy service. Stop or move the old 443 service first."
 }
 
 main "$@"
