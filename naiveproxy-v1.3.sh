@@ -5,7 +5,7 @@
 # Caddy 自动申请和续期证书，支持 NaiveProxy 与 File Browser 使用不同域名共用 443。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.9"
+SCRIPT_VERSION="v1.10"
 INSTALL_DIR="/etc/naiveproxy"
 INFO_FILE="$INSTALL_DIR/node-info.env"
 CADDY_DIR="/etc/caddy-naive"
@@ -187,10 +187,8 @@ write_caddyfile() {
   install -d -m 750 -o root -g "$SERVICE_USER" \
     "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR/$domain"
 
-  if [[ ! -f "$CADDYFILE" ]]; then
-    cat >"$CADDYFILE" <<EOF
+  cat >"$CADDYFILE" <<EOF
 {
-    order forward_proxy before reverse_proxy
     admin off
     auto_https disable_redirects
     log {
@@ -200,7 +198,6 @@ write_caddyfile() {
 
 import ${CADDY_SITE_DIR}/*.caddy
 EOF
-  fi
 
   # 旧版排障时可能加入过该选项；v1.2 必须保留自动证书管理。
   sed -i '/^[[:space:]]*auto_https[[:space:]]\+disable_certs[[:space:]]*$/d' "$CADDYFILE"
@@ -217,14 +214,16 @@ EOF
     cat >"$site_file" <<EOF
 $site_address {
     encode
-    forward_proxy {
-        basic_auth $username $password
-        hide_ip
-        hide_via
-        probe_resistance
+    route {
+        forward_proxy {
+            basic_auth $username $password
+            hide_ip
+            hide_via
+            probe_resistance
+        }
+        root * $WEB_ROOT
+        file_server
     }
-    root * $WEB_ROOT
-    file_server
 }
 EOF
     chown root:"$SERVICE_USER" "$site_file"
