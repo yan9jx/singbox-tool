@@ -5,7 +5,7 @@
 # Caddy 自动申请和续期证书，支持 NaiveProxy 与 File Browser 使用不同域名共用 443。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.2"
+SCRIPT_VERSION="v1.3"
 INSTALL_DIR="/etc/naiveproxy"
 INFO_FILE="$INSTALL_DIR/node-info.env"
 CADDY_DIR="/etc/caddy-naive"
@@ -208,11 +208,12 @@ EOF
   if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" && "$port" == "443" ]]; then
     rm -f "$site_file"
     cat >"$route_file" <<EOF
+# Keep shared-domain browser traffic available for File Browser. probe_resistance
+# short-circuits unauthenticated normal requests before reverse_proxy can run.
 forward_proxy {
     basic_auth $username $password
     hide_ip
     hide_via
-    probe_resistance
 }
 EOF
     chown root:"$SERVICE_USER" "$route_file"
@@ -254,11 +255,10 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-User=$SERVICE_USER
-Group=$SERVICE_USER
 Environment=XDG_DATA_HOME=$CADDY_DATA_DIR
 Environment=XDG_CONFIG_HOME=$CADDY_CONFIG_DIR
 ExecStart=$BIN run --environ --config $CADDYFILE --adapter caddyfile
+ExecReload=$BIN reload --config $CADDYFILE --adapter caddyfile
 TimeoutStopSec=5s
 LimitNOFILE=1048576
 Restart=on-failure
@@ -268,7 +268,6 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 PrivateTmp=true
 ReadWritePaths=$CADDY_STATE_DIR
 NoNewPrivileges=true
-UMask=0077
 
 [Install]
 WantedBy=multi-user.target

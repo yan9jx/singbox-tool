@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.06.22-12"
+SCRIPT_VERSION="2026.07.11-1"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -645,7 +645,12 @@ EOF
     die "Caddy config validation failed."
   systemctl disable --now filebrowser-nginx 2>/dev/null || true
   systemctl daemon-reload
-  systemctl enable --now "$CADDY_SERVICE"
+  systemctl enable "$CADDY_SERVICE" >/dev/null
+  if systemctl is-active --quiet "$CADDY_SERVICE"; then
+    systemctl restart "$CADDY_SERVICE"
+  else
+    systemctl start "$CADDY_SERVICE"
+  fi
   systemctl is-active --quiet "$CADDY_SERVICE" || {
     journalctl -u "$CADDY_SERVICE" --no-pager -n 50 >&2 || true
     die "Shared Caddy failed to start."
