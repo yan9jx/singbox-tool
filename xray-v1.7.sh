@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
 # VLESS + XHTTP + TLS 独立安装脚本，适用于 Debian/Ubuntu。
-# 公网 TCP/443 由 Nginx 持有，可与云盘/File Browser 或其他反代站点共享。
+# 公网 TCP/443 由 shared-caddy 持有，可与云盘/File Browser、NaiveProxy 或其他反代站点共享。
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.9"
+SCRIPT_VERSION="v2.0"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
 XRAY_CONFIG="$XRAY_DIR/config.json"
 XRAY_INFO="$XRAY_DIR/node-info.env"
 XRAY_SERVICE="/etc/systemd/system/xray-xhttp.service"
-NGINX_SYSTEM_CONF="/etc/nginx/conf.d/xray-xhttp.conf"
-NGINX_SHARED_CONF="/etc/nginx/filebrowser-shared/xray-xhttp.conf"
+CADDY_BIN="/usr/local/bin/caddy-naive"
+CADDY_DIR="/etc/caddy-naive"
+CADDYFILE="$CADDY_DIR/Caddyfile"
+CADDY_SITE_DIR="$CADDY_DIR/sites"
+CADDY_ROUTE_DIR="$CADDY_DIR/routes"
+CADDY_SERVICE="shared-caddy"
+CADDY_SERVICE_FILE="/etc/systemd/system/${CADDY_SERVICE}.service"
+CADDY_RELEASE_API="https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
+CADDY_RELEASE_ASSET="caddy-forwardproxy-naive.tar.xz"
 LOCAL_PORT_BASE=10001
 DEFAULT_DASHBOARD_URL="${DEFAULT_DASHBOARD_URL:-}"
 DASHBOARD_AGENT_CONF="${DASHBOARD_AGENT_CONF:-/etc/ejectors-vps-agent.conf}"
@@ -37,12 +44,12 @@ valid_domain() {
 install_deps() {
   command -v apt-get >/dev/null 2>&1 || die "仅支持 Debian/Ubuntu（apt-get）。"
   local missing=() cmd
-  for cmd in curl unzip openssl qrencode nginx certbot getent ss; do
+  for cmd in curl unzip openssl qrencode getent ss jq tar xz sha256sum; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   (( ${#missing[@]} == 0 )) && return
   apt-get update -y
-  DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip openssl qrencode nginx certbot ca-certificates iproute2 libc-bin tzdata
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip openssl qrencode ca-certificates iproute2 libc-bin tzdata jq xz-utils tar coreutils
 }
 
 public_ipv4() { curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || true; }
@@ -118,47 +125,6 @@ install_xray() {
   echo "已安装 Xray：$latest"
 }
 
-detect_nginx_mode() {
-  NGINX_MODE="system"
-  NGINX_CONF="$NGINX_SYSTEM_CONF"
-  NGINX_TEST_ARGS=()
-  if [[ -f /etc/nginx/filebrowser-standalone.conf ]] && systemctl is-active --quiet filebrowser-nginx 2>/dev/null; then
-    grep -qF 'include /etc/nginx/filebrowser-shared/*.conf;' /etc/nginx/filebrowser-standalone.conf ||
-      die "检测到 filebrowser-nginx 正在运行，但未启用共享配置目录。请先更新/重装云盘脚本。"
-    NGINX_MODE="filebrowser-standalone"
-    NGINX_CONF="$NGINX_SHARED_CONF"
-    NGINX_TEST_ARGS=(-c /etc/nginx/filebrowser-standalone.conf)
-  fi
-}
-
-ensure_nginx_ready() {
-  detect_nginx_mode
-  if [[ "$NGINX_MODE" == "filebrowser-standalone" ]]; then
-    return
-  fi
-
-  if systemctl is-active --quiet nginx 2>/dev/null; then
-    return
-  fi
-
-  if ss -H -lntp 'sport = :443' 2>/dev/null | grep -q .; then
-    ss -H -lntp 'sport = :443' >&2 || true
-    die "TCP/443 已被非 Nginx 服务占用。为避免抢云盘或反代端口，已停止安装。"
-  fi
-
-  systemctl enable --now nginx
-  systemctl is-active --quiet nginx || die "Nginx 启动失败。"
-}
-
-reload_nginx() {
-  nginx -t "${NGINX_TEST_ARGS[@]}" || return 1
-  if [[ "$NGINX_MODE" == "filebrowser-standalone" ]]; then
-    systemctl restart filebrowser-nginx
-  else
-    systemctl reload nginx
-  fi
-}
-
 check_domain() {
   local domain="$1" ip="$2" resolved
   resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | head -n1 || true)"
@@ -166,51 +132,114 @@ check_domain() {
   [[ "$resolved" == "$ip" ]] || die "$domain 当前解析到 $resolved，不是本机公网 IPv4 $ip。"
 }
 
-detect_cover_domain() {
-  local xhttp_domain="$1" candidate
-  candidate="$(
-    grep -RhoE 'server_name[[:space:]]+[^;]+' \
-      /etc/nginx/conf.d /etc/nginx/sites-enabled /etc/nginx/filebrowser-standalone.conf \
-      2>/dev/null |
-      sed -E 's/server_name[[:space:]]+//' |
-      tr ' ' '\n' |
-      sed '/^$/d; /^\*/d; /^_/d' |
-      grep -E '^[A-Za-z0-9.-]+$' |
-      grep -Fvx "$xhttp_domain" |
-      head -n1 || true
-  )"
-  printf '%s' "$candidate"
+shared_caddy_owns_port() {
+  local port="$1" pid
+  pid="$(systemctl show "$CADDY_SERVICE" -p MainPID --value 2>/dev/null || true)"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  ss -H -lntp "sport = :$port" 2>/dev/null | grep -q "pid=$pid,"
 }
 
-issue_cert() {
-  local domain="$1" cert_dir="/etc/letsencrypt/live/$1" acme_dir acme_conf
-  [[ -s "$cert_dir/fullchain.pem" && -s "$cert_dir/privkey.pem" ]] &&
-    openssl x509 -checkend 0 -noout -in "$cert_dir/fullchain.pem" >/dev/null 2>&1 && return
-
-  if [[ "$NGINX_MODE" == "filebrowser-standalone" ]]; then
-    ss -H -lnt 'sport = :80' 2>/dev/null | grep -q . && die "TCP/80 已被占用；请先手动申请好证书，再重新运行脚本。"
-    certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email -d "$domain" ||
-      die "证书申请失败。"
+ensure_443_available_for_shared_caddy() {
+  if ! ss -H -lntp 'sport = :443' 2>/dev/null | grep -q .; then
     return
   fi
-
-  acme_dir="/var/lib/xray-xhttp-acme"
-  acme_conf="/etc/nginx/conf.d/xray-xhttp-acme.conf"
-  mkdir -p "$acme_dir/.well-known/acme-challenge"
-  cat >"$acme_conf" <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $domain;
-    location ^~ /.well-known/acme-challenge/ { root $acme_dir; default_type text/plain; }
-    location / { return 404; }
+  shared_caddy_owns_port 443 && return
+  ss -H -lntp 'sport = :443' >&2 || true
+  die "TCP/443 is occupied by a non shared-caddy service. Stop or move that service before installing XHTTP."
 }
+
+fetch_caddy_release() {
+  local release_json
+  release_json="$(curl -fsSL --max-time 30 "$CADDY_RELEASE_API")" || die "Failed to query Caddy/NaiveProxy release."
+  CADDY_RELEASE_TAG="$(jq -er '.tag_name' <<<"$release_json")" || die "Caddy/NaiveProxy release has no tag."
+  CADDY_RELEASE_URL="$(jq -er --arg name "$CADDY_RELEASE_ASSET" '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json")" ||
+    die "Caddy/NaiveProxy release is missing $CADDY_RELEASE_ASSET."
+  CADDY_RELEASE_DIGEST="$(jq -er --arg name "$CADDY_RELEASE_ASSET" '.assets[] | select(.name == $name) | .digest // ""' <<<"$release_json" |
+    sed 's/^sha256://')" || true
+}
+
+ensure_caddy_binary() {
+  [[ -x "$CADDY_BIN" ]] && return
+
+  local tmp archive binary
+  tmp="$(mktemp -d)"
+  archive="$tmp/$CADDY_RELEASE_ASSET"
+  fetch_caddy_release
+  curl -fL --retry 3 "$CADDY_RELEASE_URL" -o "$archive"
+  if [[ -n "${CADDY_RELEASE_DIGEST:-}" ]]; then
+    printf '%s  %s\n' "$CADDY_RELEASE_DIGEST" "$archive" | sha256sum -c - >/dev/null ||
+      die "Caddy/NaiveProxy archive SHA-256 verification failed."
+  fi
+  tar -xJf "$archive" -C "$tmp"
+  binary="$tmp/caddy-forwardproxy-naive/caddy"
+  [[ -x "$binary" ]] || die "Caddy/NaiveProxy archive is incomplete."
+  install -m 755 "$binary" "$CADDY_BIN"
+  rm -rf "$tmp"
+}
+
+ensure_shared_caddy_base() {
+  install -d -m 0755 "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR"
+  if [[ ! -f "$CADDYFILE" ]]; then
+    cat >"$CADDYFILE" <<EOF
+{
+    order forward_proxy before reverse_proxy
+    admin off
+    auto_https disable_redirects
+    log {
+        output discard
+    }
+}
+
+import ${CADDY_SITE_DIR}/*.caddy
 EOF
-  nginx -t && systemctl reload nginx || { rm -f "$acme_conf"; die "无法启用 ACME 验证站点。"; }
-  certbot certonly --webroot -w "$acme_dir" --non-interactive --agree-tos --register-unsafely-without-email -d "$domain" ||
-    { rm -f "$acme_conf"; systemctl reload nginx || true; die "证书申请失败。"; }
-  rm -f "$acme_conf"
-  systemctl reload nginx || true
+  fi
+  grep -qF "import ${CADDY_SITE_DIR}/*.caddy" "$CADDYFILE" ||
+    printf '\nimport %s/*.caddy\n' "$CADDY_SITE_DIR" >>"$CADDYFILE"
+}
+
+write_shared_caddy_service() {
+  cat >"$CADDY_SERVICE_FILE" <<EOF
+[Unit]
+Description=Shared Caddy reverse proxy and NaiveProxy entry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=${CADDY_BIN} run --environ --config ${CADDYFILE} --adapter caddyfile
+ExecReload=${CADDY_BIN} reload --config ${CADDYFILE} --adapter caddyfile
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+restart_shared_caddy() {
+  "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >/dev/null ||
+    die "shared-caddy config validation failed."
+  systemctl daemon-reload
+  systemctl enable "$CADDY_SERVICE" >/dev/null
+  if systemctl is-active --quiet "$CADDY_SERVICE"; then
+    systemctl restart "$CADDY_SERVICE"
+  else
+    systemctl start "$CADDY_SERVICE"
+  fi
+  systemctl is-active --quiet "$CADDY_SERVICE" || {
+    journalctl -u "$CADDY_SERVICE" --no-pager -n 50 >&2 || true
+    die "shared-caddy failed to start."
+  }
+}
+
+ensure_shared_caddy_ready() {
+  ensure_443_available_for_shared_caddy
+  ensure_caddy_binary
+  ensure_shared_caddy_base
+  write_shared_caddy_service
 }
 
 local_port() {
@@ -258,70 +287,58 @@ start_xray_service() {
   wait_for_xray_listener "$port" || die "Xray 未监听 127.0.0.1:$port。"
 }
 
-write_nginx() {
-  local domain="$1" cert="$2" key="$3" port="$4" path="$5" cover_domain="$6" backup=""
-  mkdir -p "$(dirname "$NGINX_CONF")"
-  [[ -f "$NGINX_CONF" ]] && { backup="${NGINX_CONF}.backup.$(date +%Y%m%d-%H%M%S)"; cp -a "$NGINX_CONF" "$backup"; }
-  cat >"$NGINX_CONF" <<EOF
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name $domain;
+write_caddy() {
+  local domain="$1" port="$2" path="$3" cover_domain="$4"
+  local site_file="${CADDY_SITE_DIR}/xray-${domain}.caddy"
+  local route_dir="${CADDY_ROUTE_DIR}/${domain}"
+  local route_file="${route_dir}/xray-xhttp.caddy"
 
-    ssl_certificate $cert;
-    ssl_certificate_key $key;
-    ssl_protocols TLSv1.2 TLSv1.3;
+  install -d -m 0755 "$CADDY_SITE_DIR" "$route_dir"
 
-    location ^~ $path {
-        proxy_pass http://127.0.0.1:$port;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }
-EOF
-
-  if [[ -n "$cover_domain" ]]; then
-    cat >>"$NGINX_CONF" <<EOF
-    location / {
-        proxy_pass https://$cover_domain;
-        proxy_ssl_server_name on;
-        proxy_set_header Host $cover_domain;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-EOF
-  else
-    cat >>"$NGINX_CONF" <<EOF
-    location / { return 404; }
-EOF
-  fi
-
-  cat >>"$NGINX_CONF" <<EOF
+  if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" ]]; then
+    rm -f "$site_file"
+    cat >"$route_file" <<EOF
+handle_path ${path}* {
+    reverse_proxy 127.0.0.1:${port}
 }
 EOF
-  if ! reload_nginx; then
-    [[ -n "$backup" ]] && cp -a "$backup" "$NGINX_CONF" || rm -f "$NGINX_CONF"
-    reload_nginx || true
-    die "Nginx 配置校验失败，已恢复之前的配置。"
+  else
+    rm -f "$route_file"
+    cat >"$site_file" <<EOF
+${domain}:443 {
+    encode gzip
+    handle_path ${path}* {
+        reverse_proxy 127.0.0.1:${port}
+    }
+EOF
+    if [[ -n "$cover_domain" ]]; then
+      cat >>"$site_file" <<EOF
+    reverse_proxy https://${cover_domain} {
+        header_up Host ${cover_domain}
+    }
+EOF
+    else
+      cat >>"$site_file" <<'EOF'
+    respond 404
+EOF
+    fi
+    cat >>"$site_file" <<'EOF'
+}
+EOF
   fi
+
+  restart_shared_caddy
 }
 
 install_node() {
   install_deps
   configure_bbr
   configure_china_time
-  ensure_nginx_ready
+  ensure_shared_caddy_ready
   install_xray
   systemctl stop xray-xhttp 2>/dev/null || true
 
-  local domain ip cert key port uuid path name tmp link cover_domain
+  local domain ip port uuid path name tmp link cover_domain caddy_conf
   read -r -p "请输入已解析到本机的 XHTTP 域名/子域名：" domain
   domain="${domain#https://}"; domain="${domain%%/*}"; domain="${domain,,}"
   valid_domain "$domain" || die "域名格式不正确。"
@@ -334,12 +351,6 @@ install_node() {
     valid_domain "$cover_domain" || die "根路径反代域名格式不正确。"
     [[ "$cover_domain" != "$domain" ]] || die "根路径反代域名不能和 XHTTP 域名相同，否则会形成循环反代。"
   fi
-  issue_cert "$domain"
-
-  cert="/etc/letsencrypt/live/$domain/fullchain.pem"
-  key="/etc/letsencrypt/live/$domain/privkey.pem"
-  [[ -s "$cert" && -s "$key" ]] || die "证书文件不存在。"
-
   port="$(local_port)"
   uuid="$(cat /proc/sys/kernel/random/uuid)"
   path="/$(openssl rand -hex 8)"
@@ -364,7 +375,12 @@ EOF
   install -m 600 "$tmp" "$XRAY_CONFIG"; rm -f "$tmp"
   write_xray_service
   start_xray_service "$port"
-  write_nginx "$domain" "$cert" "$key" "$port" "$path" "$cover_domain"
+  write_caddy "$domain" "$port" "$path" "$cover_domain"
+  if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" ]]; then
+    caddy_conf="${CADDY_ROUTE_DIR}/${domain}/xray-xhttp.caddy"
+  else
+    caddy_conf="${CADDY_SITE_DIR}/xray-${domain}.caddy"
+  fi
 
   link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&type=xhttp&path=${path}&mode=auto#${name}"
   cat >"$XRAY_INFO" <<EOF
@@ -373,13 +389,13 @@ DOMAIN='$domain'
 LOCAL_PORT='$port'
 PATH='$path'
 UUID='$uuid'
-NGINX_CONF='$NGINX_CONF'
+CADDY_CONF='$caddy_conf'
 COVER_DOMAIN='$cover_domain'
 LINK='$link'
 EOF
   chmod 600 "$XRAY_INFO"
   echo
-  echo "XHTTP 节点已创建，公网 TCP/443 通过 Nginx 共享："
+  echo "XHTTP 节点已创建，公网 TCP/443 通过 shared-caddy 共享："
   echo "$link"
   if [[ -n "$cover_domain" ]]; then
     echo
@@ -493,13 +509,18 @@ restart_xray() { require_node_files; local port; port="$(info_value LOCAL_PORT)"
 uninstall_node() {
   confirm_yes "是否卸载本脚本创建的 XHTTP 节点？" || return
   local conf=""
-  [[ -f "$XRAY_INFO" ]] && conf="$(info_value NGINX_CONF || true)"
+  if [[ -f "$XRAY_INFO" ]]; then
+    conf="$(info_value CADDY_CONF || true)"
+    [[ -n "$conf" ]] || conf="$(info_value NGINX_CONF || true)"
+  fi
   remove_subscription_node true || true
   systemctl disable --now xray-xhttp 2>/dev/null || true
   rm -f "$XRAY_SERVICE" "$XRAY_CONFIG" "$XRAY_INFO" "$SUBSCRIPTION_INFO_FILE"
   [[ -n "$conf" ]] && rm -f "$conf"
   systemctl daemon-reload
-  ensure_nginx_ready && reload_nginx || true
+  if [[ -f "$CADDYFILE" && -x "$CADDY_BIN" ]]; then
+    restart_shared_caddy || true
+  fi
   echo "XHTTP 节点已卸载；Xray 二进制保留在 $XRAY_ROOT。"
 }
 

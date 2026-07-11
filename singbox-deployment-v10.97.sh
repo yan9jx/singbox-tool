@@ -8,7 +8,16 @@ SERVICE_FILE="/etc/systemd/system/sing-box.service"
 DEFAULT_PORT="443"
 SERVER_NAME="www.microsoft.com"
 SCRIPT_TITLE="宇宙监察委员会sing-box部署局"
-SCRIPT_VERSION="v10.97"
+SCRIPT_VERSION="v10.98"
+CADDY_BIN="/usr/local/bin/caddy-naive"
+CADDY_DIR="/etc/caddy-naive"
+CADDYFILE="$CADDY_DIR/Caddyfile"
+CADDY_SITE_DIR="$CADDY_DIR/sites"
+CADDY_ROUTE_DIR="$CADDY_DIR/routes"
+CADDY_SERVICE="shared-caddy"
+CADDY_SERVICE_FILE="/etc/systemd/system/${CADDY_SERVICE}.service"
+CADDY_RELEASE_API="https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
+CADDY_RELEASE_ASSET="caddy-forwardproxy-naive.tar.xz"
 
 die() {
   echo "错误：$*" >&2
@@ -80,7 +89,7 @@ find_singbox() {
 install_dependencies() {
   local missing=()
   local command_name
-  for command_name in curl openssl tar qrencode ss; do
+  for command_name in curl openssl tar qrencode ss jq xz sha256sum; do
     command -v "$command_name" >/dev/null || missing+=("$command_name")
   done
 
@@ -88,7 +97,7 @@ install_dependencies() {
     command -v apt-get >/dev/null || die "缺少 ${missing[*]}，且当前系统不支持自动安装。"
     echo "正在安装必要组件..."
     apt-get update -y
-    DEBIAN_FRONTEND=noninteractive apt-get install -y curl openssl tar qrencode ca-certificates iproute2 tzdata
+    DEBIAN_FRONTEND=noninteractive apt-get install -y curl openssl tar qrencode ca-certificates iproute2 tzdata jq xz-utils coreutils
   fi
 }
 
@@ -359,6 +368,13 @@ post_install_check() {
 clean_old_setup() {
   systemctl stop sing-box 2>/dev/null || true
   systemctl disable sing-box 2>/dev/null || true
+  if [[ -d "$CADDY_SITE_DIR" || -d "$CADDY_ROUTE_DIR" ]]; then
+    rm -f "${CADDY_SITE_DIR}"/singbox-sub-*.caddy "${CADDY_SITE_DIR}"/singbox-grpc-*.caddy 2>/dev/null || true
+    find "$CADDY_ROUTE_DIR" -type f -name 'singbox-sub.caddy' -delete 2>/dev/null || true
+    if [[ -f "$CADDYFILE" && -x "$CADDY_BIN" ]]; then
+      v10_restart_shared_caddy || true
+    fi
+  fi
   rm -f "$SERVICE_FILE"
   rm -rf "$CONFIG_DIR"
   rm -f /root/vless.txt
@@ -927,6 +943,116 @@ v10_check_domain_resolution() {
   return 2
 }
 
+v10_shared_caddy_owns_port() {
+  local port="$1" pid
+  pid="$(systemctl show "$CADDY_SERVICE" -p MainPID --value 2>/dev/null || true)"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  ss -H -lntp "sport = :$port" 2>/dev/null | grep -q "pid=$pid,"
+}
+
+v10_ensure_443_for_shared_caddy() {
+  if ! ss -H -lntp 'sport = :443' 2>/dev/null | grep -q .; then
+    return
+  fi
+  v10_shared_caddy_owns_port 443 && return
+  ss -H -lntp 'sport = :443' >&2 || true
+  die "TCP/443 is occupied by a non shared-caddy service. Move that service before creating shared HTTPS routes."
+}
+
+v10_fetch_caddy_release() {
+  local release_json
+  release_json="$(curl -fsSL --max-time 30 "$CADDY_RELEASE_API")" || die "Failed to query Caddy/NaiveProxy release."
+  CADDY_RELEASE_TAG="$(jq -er '.tag_name' <<<"$release_json")" || die "Caddy/NaiveProxy release has no tag."
+  CADDY_RELEASE_URL="$(jq -er --arg name "$CADDY_RELEASE_ASSET" '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json")" ||
+    die "Caddy/NaiveProxy release is missing $CADDY_RELEASE_ASSET."
+  CADDY_RELEASE_DIGEST="$(jq -er --arg name "$CADDY_RELEASE_ASSET" '.assets[] | select(.name == $name) | .digest // ""' <<<"$release_json" |
+    sed 's/^sha256://')" || true
+}
+
+v10_ensure_caddy_binary() {
+  [[ -x "$CADDY_BIN" ]] && return
+
+  local tmp archive binary
+  tmp="$(mktemp -d)"
+  archive="$tmp/$CADDY_RELEASE_ASSET"
+  v10_fetch_caddy_release
+  curl -fL --retry 3 "$CADDY_RELEASE_URL" -o "$archive"
+  if [[ -n "${CADDY_RELEASE_DIGEST:-}" ]]; then
+    printf '%s  %s\n' "$CADDY_RELEASE_DIGEST" "$archive" | sha256sum -c - >/dev/null ||
+      die "Caddy/NaiveProxy archive SHA-256 verification failed."
+  fi
+  tar -xJf "$archive" -C "$tmp"
+  binary="$tmp/caddy-forwardproxy-naive/caddy"
+  [[ -x "$binary" ]] || die "Caddy/NaiveProxy archive is incomplete."
+  install -m 755 "$binary" "$CADDY_BIN"
+  rm -rf "$tmp"
+}
+
+v10_ensure_shared_caddy_base() {
+  install -d -m 0755 "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR"
+  if [[ ! -f "$CADDYFILE" ]]; then
+    cat >"$CADDYFILE" <<EOF
+{
+    order forward_proxy before reverse_proxy
+    admin off
+    auto_https disable_redirects
+    log {
+        output discard
+    }
+}
+
+import ${CADDY_SITE_DIR}/*.caddy
+EOF
+  fi
+  grep -qF "import ${CADDY_SITE_DIR}/*.caddy" "$CADDYFILE" ||
+    printf '\nimport %s/*.caddy\n' "$CADDY_SITE_DIR" >>"$CADDYFILE"
+}
+
+v10_write_shared_caddy_service() {
+  cat >"$CADDY_SERVICE_FILE" <<EOF
+[Unit]
+Description=Shared Caddy reverse proxy and NaiveProxy entry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=${CADDY_BIN} run --environ --config ${CADDYFILE} --adapter caddyfile
+ExecReload=${CADDY_BIN} reload --config ${CADDYFILE} --adapter caddyfile
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+v10_restart_shared_caddy() {
+  "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >/dev/null ||
+    die "shared-caddy config validation failed."
+  systemctl daemon-reload
+  systemctl enable "$CADDY_SERVICE" >/dev/null
+  if systemctl is-active --quiet "$CADDY_SERVICE"; then
+    systemctl restart "$CADDY_SERVICE"
+  else
+    systemctl start "$CADDY_SERVICE"
+  fi
+  systemctl is-active --quiet "$CADDY_SERVICE" || {
+    journalctl -u "$CADDY_SERVICE" --no-pager -n 50 >&2 || true
+    die "shared-caddy failed to start."
+  }
+}
+
+v10_ensure_shared_caddy_ready() {
+  v10_ensure_443_for_shared_caddy
+  v10_ensure_caddy_binary
+  v10_ensure_shared_caddy_base
+  v10_write_shared_caddy_service
+}
+
 v10_build_vless_link() {
   local node_name="$1" link_host="$2" port="$3" uuid="$4" public_key="$5" short_id="$6" server_name="$7"
   printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&flow=xtls-rprx-vision#%s'     "$uuid" "$link_host" "$port" "$server_name" "$public_key" "$short_id" "$node_name"
@@ -934,19 +1060,28 @@ v10_build_vless_link() {
 
 v10_detect_subscription_host() {
   local fallback="$1" host=""
+  if [[ -d "$CADDY_SITE_DIR" ]]; then
+    host="$(find "$CADDY_SITE_DIR" -maxdepth 1 -type f -name 'filebrowser-*.caddy' -printf '%f\n' 2>/dev/null |
+      sed -n 's/^filebrowser-\(.*\)\.caddy$/\1/p' |
+      head -n1 || true)"
+  fi
   if [[ -d /etc/nginx ]]; then
-    host="$(grep -RhsE '^[[:space:]]*server_name[[:space:]]+' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null |
+    host="${host:-$(grep -RhsE '^[[:space:]]*server_name[[:space:]]+' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null |
       sed -E 's/^[[:space:]]*server_name[[:space:]]+//; s/;.*$//' |
       tr ' ' '\n' |
       grep -Ev '^$|^_$|^localhost$|^\*$|^~' |
-      head -n1 || true)"
+      head -n1 || true)}"
   fi
   printf '%s' "${host:-$fallback}"
 }
 
 v10_make_subscription_url() {
   local host="$1" file_name="$2"
-  printf 'http://%s/sub/%s' "$host" "$file_name"
+  if v10_validate_link_host "$host" && ! v10_is_ipv4 "$host" && [[ "$host" != "YOUR_SERVER_IP" ]]; then
+    printf 'https://%s/sub/%s' "$host" "$file_name"
+  else
+    printf 'http://%s/sub/%s' "$host" "$file_name"
+  fi
 }
 
 v10_write_nginx_snippet() {
@@ -1021,31 +1156,48 @@ v10_append_sub_to_existing_site() {
 }
 
 v10_ensure_subscription_nginx_mapping() {
-  local url_host="$1" site_file backup_file
-  if ! command -v nginx >/dev/null; then
-    echo "未检测到 Nginx；已生成订阅 YAML，不会改动 File Browser。"
-    return 0
-  fi
-  v10_write_nginx_snippet
+  local url_host="$1" route_dir route_file site_file standalone_file
+  mkdir -p "$SUBSCRIPTION_WEB_DIR"
   v10_remove_legacy_subscription_server
-  site_file="$(v10_find_existing_nginx_site "$url_host" || true)"
-  if [[ -z "$site_file" ]]; then
-    echo "未检测到可安全追加的 File Browser/Nginx 站点，已保持 Nginx 不变。"
-    echo "订阅文件仍已生成到：${SUBSCRIPTION_WEB_DIR}"
+
+  if ! v10_validate_link_host "$url_host" || v10_is_ipv4 "$url_host" || [[ "$url_host" == "YOUR_SERVER_IP" ]]; then
+    echo "Subscription YAML generated at ${SUBSCRIPTION_WEB_DIR}; no shared-caddy HTTPS route was added for non-domain host ${url_host}."
     return 0
   fi
-  backup_file="${site_file}.backup.$(date +%Y%m%d-%H%M%S)"
-  cp -a "$site_file" "$backup_file"
-  v10_append_sub_to_existing_site "$site_file"
-  if nginx -t >/dev/null 2>&1; then
-    systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || true
-    echo "已向现有 Nginx 站点追加 /sub/ 静态订阅路径：$site_file"
-  else
-    cp -a "$backup_file" "$site_file"
-    echo "Nginx 校验失败，已恢复原 File Browser/Nginx 配置。"
-  fi
-}
 
+  v10_ensure_shared_caddy_ready
+  route_dir="${CADDY_ROUTE_DIR}/${url_host}"
+  route_file="${route_dir}/singbox-sub.caddy"
+  site_file="${CADDY_SITE_DIR}/filebrowser-${url_host}.caddy"
+  standalone_file="${CADDY_SITE_DIR}/singbox-sub-${url_host}.caddy"
+  install -d -m 0755 "$route_dir"
+
+  if [[ -f "$site_file" ]]; then
+    rm -f "$standalone_file"
+    cat >"$route_file" <<EOF
+handle_path /sub/* {
+    root * ${SUBSCRIPTION_WEB_DIR}
+    header Cache-Control "no-store"
+    file_server
+}
+EOF
+  else
+    rm -f "$route_file"
+    cat >"$standalone_file" <<EOF
+${url_host}:443 {
+    handle_path /sub/* {
+        root * ${SUBSCRIPTION_WEB_DIR}
+        header Cache-Control "no-store"
+        file_server
+    }
+    respond 404
+}
+EOF
+  fi
+
+  v10_restart_shared_caddy
+  echo "Subscription /sub/ route is managed by shared-caddy for ${url_host}."
+}
 generate_subscription_link() {
   [[ -f "$INFO_FILE" ]] || die "没有找到节点信息，请先安装/重建节点。"
   local node_name public_ip link_host server_host port uuid public_key short_id server_name sub_name sub_path url_host sub_url
@@ -1464,35 +1616,23 @@ show_menu() {
 generate_grpc_node_filebrowser_shared() {
   [[ -f "$INFO_FILE" && -f "$CONFIG_FILE" ]] || die "Install the sing-box node first."
   find_singbox || die "sing-box core was not found."
-  command -v nginx >/dev/null || die "Nginx is not installed. Install the File Browser script first."
 
   local domain current_ip node_name port uuid private_key public_key short_id server_name
-  local cert_dir cert_file key_file tmp_config backup_file grpc_name grpc_link grpc_sub_path acme_dir acme_conf
-  local grpc_local_port=10000 grpc_nginx_conf nginx_backup="" nginx_mode nginx_test_args=()
-
-  # Support both layouts used by the File Browser installer: the normal system
-  # Nginx service and the older standalone File Browser Nginx service.
-  if systemctl is-active --quiet nginx 2>/dev/null; then
-    nginx_mode="system"
-    grpc_nginx_conf="/etc/nginx/conf.d/singbox-grpc.conf"
-  elif [[ -f /etc/nginx/filebrowser-standalone.conf ]] && systemctl is-active --quiet filebrowser-nginx 2>/dev/null; then
-    nginx_mode="filebrowser-standalone"
-    grpc_nginx_conf="/etc/nginx/filebrowser-shared/singbox-grpc.conf"
-    grep -qF 'include /etc/nginx/filebrowser-shared/*.conf;' /etc/nginx/filebrowser-standalone.conf ||
-      die "File Browser must be reinstalled with the matching shared-443 install.sh first."
-    nginx_test_args=(-c /etc/nginx/filebrowser-standalone.conf)
-  else
-    die "No running Nginx service was found. Start the File Browser Nginx service first."
-  fi
+  local tmp_config backup_file grpc_name grpc_link grpc_sub_path grpc_caddy_conf
+  local grpc_local_port=10000
 
   echo
-  echo "gRPC will share public TCP/443 with File Browser through Nginx."
+  echo "gRPC will share public TCP/443 through shared-caddy."
   read -r -p "gRPC subdomain: " domain
   domain="$(v10_clean_host_input "$domain")"
   v10_validate_link_host "$domain" && ! v10_is_ipv4 "$domain" || die "Enter a valid subdomain, not an IP address."
   current_ip="$(v10_get_current_public_ipv4)"
   [[ -n "$current_ip" ]] || die "Could not determine the public IPv4 address."
   v10_check_domain_resolution "$domain" "$current_ip" || die "The subdomain has not resolved to this VPS; no changes were made."
+
+  v10_ensure_shared_caddy_ready
+  [[ ! -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" ]] ||
+    die "Use a separate gRPC subdomain; this domain is already managed by File Browser."
 
   node_name="$(v10_read_info_value "$INFO_FILE" NODE_NAME)"
   port="$(v10_read_info_value "$INFO_FILE" PORT)"
@@ -1505,90 +1645,6 @@ generate_grpc_node_filebrowser_shared() {
   server_name="${server_name:-$SERVER_NAME}"
   [[ -n "$port" && -n "$uuid" && -n "$private_key" && -n "$public_key" && -n "$short_id" ]] || die "Saved node information is incomplete."
   [[ "$port" != "443" ]] || die "Reality currently occupies TCP/443. Change its port before creating shared-443 gRPC."
-
-  cert_dir="/etc/letsencrypt/live/${domain}"
-  cert_file="${cert_dir}/fullchain.pem"
-  key_file="${cert_dir}/privkey.pem"
-  if [[ ! -s "$cert_file" || ! -s "$key_file" ]] || ! openssl x509 -checkend 0 -noout -in "$cert_file" >/dev/null 2>&1; then
-    command -v certbot >/dev/null || {
-      command -v apt-get >/dev/null || die "certbot is required to issue the gRPC TLS certificate."
-      apt-get update -y
-      DEBIAN_FRONTEND=noninteractive apt-get install -y certbot
-    }
-    if [[ "$nginx_mode" == "system" ]]; then
-      acme_dir="/var/lib/singbox-acme"
-      acme_conf="/etc/nginx/conf.d/singbox-grpc-acme.conf"
-      mkdir -p "$acme_dir"
-      cat >"$acme_conf" <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${domain};
-    location ^~ /.well-known/acme-challenge/ {
-        root ${acme_dir};
-        default_type text/plain;
-    }
-    location / { return 404; }
-}
-EOF
-      if ! nginx -t || ! systemctl reload nginx; then
-        rm -f "$acme_conf"
-        systemctl reload nginx || true
-        die "Could not enable the temporary ACME validation site."
-      fi
-      if ! certbot certonly --webroot -w "$acme_dir" --non-interactive --agree-tos --register-unsafely-without-email -d "$domain"; then
-        rm -f "$acme_conf"
-        systemctl reload nginx || true
-        die "TLS certificate issuance failed; no configuration was changed."
-      fi
-      rm -f "$acme_conf"
-      systemctl reload nginx || true
-    else
-      if ss -H -lnt "sport = :80" 2>/dev/null | grep -q .; then
-        die "TCP/80 is occupied. Obtain the certificate for ${domain} first, then run gRPC generation again."
-      fi
-      certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email -d "$domain" ||
-        die "TLS certificate issuance failed; no configuration was changed."
-    fi
-  fi
-  [[ -s "$cert_file" && -s "$key_file" ]] || die "The TLS certificate files were not found."
-
-  mkdir -p "$(dirname "$grpc_nginx_conf")" "$SUBSCRIPTION_WEB_DIR"
-  [[ -f "$grpc_nginx_conf" ]] && { nginx_backup="${grpc_nginx_conf}.backup.$(date +%Y%m%d-%H%M%S)"; cp -a "$grpc_nginx_conf" "$nginx_backup"; }
-  cat >"$grpc_nginx_conf" <<EOF
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${domain};
-
-    ssl_certificate ${cert_file};
-    ssl_certificate_key ${key_file};
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-    location / {
-        grpc_pass grpc://127.0.0.1:${grpc_local_port};
-        grpc_set_header Host \$host;
-        grpc_set_header X-Real-IP \$remote_addr;
-        grpc_read_timeout 3600s;
-        grpc_send_timeout 3600s;
-    }
-}
-EOF
-  if ! nginx -t "${nginx_test_args[@]}"; then
-    [[ -n "$nginx_backup" ]] && cp -a "$nginx_backup" "$grpc_nginx_conf" || rm -f "$grpc_nginx_conf"
-    die "Nginx validation failed; the File Browser configuration was not changed."
-  fi
-  if [[ "$nginx_mode" == "system" ]]; then
-    if ! systemctl reload nginx; then
-      [[ -n "$nginx_backup" ]] && cp -a "$nginx_backup" "$grpc_nginx_conf" || rm -f "$grpc_nginx_conf"
-      systemctl reload nginx || true
-      die "System Nginx could not reload; its prior gRPC configuration was restored."
-    fi
-  elif ! systemctl restart filebrowser-nginx; then
-    [[ -n "$nginx_backup" ]] && cp -a "$nginx_backup" "$grpc_nginx_conf" || rm -f "$grpc_nginx_conf"
-    systemctl restart filebrowser-nginx || true
-    die "File Browser Nginx could not restart; its prior gRPC configuration was restored."
-  fi
 
   tmp_config="$(mktemp)"
   backup_file="${CONFIG_FILE}.backup.$(date +%Y%m%d-%H%M%S)"
@@ -1636,6 +1692,15 @@ EOF
     die "sing-box could not restart; the previous configuration was restored."
   fi
 
+  install -d -m 0755 "$CADDY_SITE_DIR" "$SUBSCRIPTION_WEB_DIR"
+  grpc_caddy_conf="${CADDY_SITE_DIR}/singbox-grpc-${domain}.caddy"
+  cat >"$grpc_caddy_conf" <<EOF
+${domain}:443 {
+    reverse_proxy h2c://127.0.0.1:${grpc_local_port}
+}
+EOF
+  v10_restart_shared_caddy
+
   grpc_name="${node_name}-gRPC"
   grpc_link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&type=grpc&serviceName=${GRPC_SERVICE_NAME}#${grpc_name}"
   grpc_sub_path="${SUBSCRIPTION_WEB_DIR}/grpc-${uuid:0:8}.yaml"
@@ -1661,16 +1726,15 @@ GRPC_LOCAL_PORT='$grpc_local_port'
 GRPC_SERVICE_NAME='$GRPC_SERVICE_NAME'
 GRPC_LINK='$grpc_link'
 GRPC_SUBSCRIPTION_PATH='$grpc_sub_path'
-GRPC_NGINX_CONF='$grpc_nginx_conf'
+GRPC_CADDY_CONF='$grpc_caddy_conf'
 EOF
   chmod 600 "$GRPC_INFO_FILE"
 
   echo
-  echo "gRPC node created through File Browser Nginx shared TCP/443:"
+  echo "gRPC node created through shared-caddy TCP/443:"
   echo "$grpc_link"
   command -v qrencode >/dev/null || install_dependencies
   qrencode -t ANSIUTF8 "$grpc_link"
   echo "Clash/Mihomo file: $grpc_sub_path"
 }
-
 main "$@"
