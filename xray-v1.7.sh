@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v2.1"
+SCRIPT_VERSION="v2.2"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -149,6 +149,10 @@ ensure_443_available_for_shared_caddy() {
   fi
   shared_caddy_owns_port 443 && return
   ss -H -lntp 'sport = :443' >&2 || true
+  if systemctl is-active --quiet caddy 2>/dev/null ||
+    ss -H -ltnp 'sport = :443' 2>/dev/null | grep -qE 'caddy|caddy-naive'; then
+    die "检测到另一个 Caddy 正在占用 TCP/443。为避免覆盖它的配置，本脚本不会接管；请先迁移为 shared-caddy，或改用空闲端口。"
+  fi
   die "TCP/443 is occupied by a non shared-caddy service. Stop or move that service before installing XHTTP."
 }
 
@@ -201,10 +205,9 @@ ensure_shared_caddy_user() {
 ensure_shared_caddy_base() {
   ensure_shared_caddy_user
   install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR"
-  if [[ ! -f "$CADDYFILE" ]]; then
-    cat >"$CADDYFILE" <<EOF
+  # 所有脚本使用同一主配置；forward_proxy 只能放在 Naive 的 route 内。
+  cat >"$CADDYFILE" <<EOF
 {
-    order forward_proxy before reverse_proxy
     admin off
     auto_https disable_redirects
     log {
@@ -214,9 +217,6 @@ ensure_shared_caddy_base() {
 
 import ${CADDY_SITE_DIR}/*.caddy
 EOF
-  fi
-  grep -qF "import ${CADDY_SITE_DIR}/*.caddy" "$CADDYFILE" ||
-    printf '\nimport %s/*.caddy\n' "$CADDY_SITE_DIR" >>"$CADDYFILE"
   chown root:"$CADDY_SERVICE_USER" "$CADDYFILE"
   chmod 640 "$CADDYFILE"
 }
@@ -237,12 +237,16 @@ Environment=XDG_CONFIG_HOME=${CADDY_CONFIG_DIR}
 ExecStartPre=+/bin/chown -R ${CADDY_SERVICE_USER}:${CADDY_SERVICE_USER} ${CADDY_STATE_DIR}
 ExecStartPre=+/bin/chmod -R u+rwX,go-rwx ${CADDY_STATE_DIR}
 ExecStart=${CADDY_BIN} run --environ --config ${CADDYFILE} --adapter caddyfile
-ExecReload=${CADDY_BIN} reload --config ${CADDYFILE} --adapter caddyfile
+TimeoutStopSec=5s
 Restart=on-failure
 RestartSec=5
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 LimitNOFILE=1048576
+PrivateTmp=true
+ReadWritePaths=${CADDY_STATE_DIR}
+NoNewPrivileges=true
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
@@ -324,6 +328,14 @@ write_caddy() {
   local route_file="${route_dir}/xray-xhttp.caddy"
 
   install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$CADDY_SITE_DIR" "$route_dir"
+
+  [[ ! -f "${CADDY_SITE_DIR}/naive-${domain}.caddy" ]] ||
+    die "XHTTP 与 NaiveProxy 不能使用同一个域名；请为 XHTTP 使用独立子域名。"
+
+  [[ ! -f "${CADDY_SITE_DIR}/singbox-grpc-${domain}.caddy" ]] ||
+    die "XHTTP 与 sing-box gRPC 不能使用同一个域名；请为 XHTTP 使用独立子域名。"
+  [[ ! -f "${CADDY_SITE_DIR}/singbox-sub-${domain}.caddy" ]] ||
+    die "XHTTP 与 sing-box 订阅站点不能使用同一个域名；请为 XHTTP 使用独立子域名。"
 
   if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" ]]; then
     rm -f "$site_file"

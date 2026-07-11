@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.07.11-2"
+SCRIPT_VERSION="2026.07.12-1"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -23,6 +23,10 @@ CADDY_DATA_DIR="${CADDY_STATE_DIR}/data"
 CADDY_CONFIG_DIR="${CADDY_STATE_DIR}/config"
 CADDY_RELEASE_API="https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
 CADDY_RELEASE_ASSET="caddy-forwardproxy-naive.tar.xz"
+NAIVE_INFO_FILE="/etc/naiveproxy/node-info.env"
+NAIVE_WEB_ROOT="/var/www/naiveproxy"
+OLD_FB_ROUTE_MANIFEST="/etc/naiveproxy/filebrowser-routes.tsv"
+OLD_FB_BACKUP_DIR="/etc/naiveproxy/filebrowser-backups"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,11 +38,11 @@ warn() { printf "${YELLOW}[!]${NC} %s\n" "$*"; }
 die() { printf "${RED}[x]${NC} %s\n" "$*" >&2; exit 1; }
 
 require_root() {
-  [[ ${EUID} -eq 0 ]] || die "请使用 root 权限运行此脚本。"
+  [[ ${EUID} -eq 0 ]] || die "璇蜂娇鐢?root 鏉冮檺杩愯姝よ剼鏈€?
 }
 
 require_interactive_terminal() {
-  [[ -t 0 ]] || die "此脚本需要交互输入，请先下载后执行，不要使用 curl | bash。"
+  [[ -t 0 ]] || die "姝よ剼鏈渶瑕佷氦浜掕緭鍏ワ紝璇峰厛涓嬭浇鍚庢墽琛岋紝涓嶈浣跨敤 curl | bash銆?
 }
 
 valid_domain() {
@@ -77,39 +81,16 @@ choose_available_port() {
     return
   fi
 
-  warn "端口 ${FB_PORT} 已被其他程序占用，正在寻找空闲端口..."
+  warn "绔彛 ${FB_PORT} 宸茶鍏朵粬绋嬪簭鍗犵敤锛屾鍦ㄥ鎵剧┖闂茬鍙?.."
   for port in $(seq 8081 8999); do
     if port_is_available "$port"; then
       FB_PORT="$port"
-      info "将使用空闲后端端口：${FB_PORT}"
+      info "灏嗕娇鐢ㄧ┖闂插悗绔鍙ｏ細${FB_PORT}"
       return
     fi
   done
 
-  die "未能在 8081-8999 范围内找到空闲端口。"
-}
-
-choose_https_port() {
-  local port
-  if systemctl is-active --quiet filebrowser-nginx 2>/dev/null; then
-    warn "检测到已有 File Browser 独立 Nginx，暂时停止以重新检测端口。"
-    systemctl stop filebrowser-nginx
-  fi
-
-  if port_is_available "$PUBLIC_PORT"; then
-    return
-  fi
-
-  warn "标准 HTTPS 端口 ${PUBLIC_PORT} 已被其他服务占用，正在寻找空闲备用端口..."
-  for port in $(seq 8443 8499); do
-    if [[ $port != "$FB_PORT" ]] && port_is_available "$port"; then
-      PUBLIC_PORT="$port"
-      info "将使用备用 HTTPS 端口：${PUBLIC_PORT}"
-      return
-    fi
-  done
-
-  die "443 和 8443-8499 范围内均未找到空闲 HTTPS 端口。"
+  die "鏈兘鍦?8081-8999 鑼冨洿鍐呮壘鍒扮┖闂茬鍙ｃ€?
 }
 
 cleanup_legacy_filebrowser_https() {
@@ -117,7 +98,7 @@ cleanup_legacy_filebrowser_https() {
   local backup_dir="/root/filebrowser-nginx-backup-$(date +%Y%m%d-%H%M%S)"
   local cleaned="false"
 
-  info "检查旧版 File Browser HTTPS/Nginx 残留..."
+  info "妫€鏌ユ棫鐗?File Browser HTTPS/Nginx 娈嬬暀..."
   for config in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
     [[ -f "$config" ]] || continue
 
@@ -133,19 +114,19 @@ cleanup_legacy_filebrowser_https() {
         mv "$config" "${config}.disabled-filebrowser-https"
       fi
 
-      warn "已备份并禁用旧 File Browser HTTPS 配置：$config"
+      warn "宸插浠藉苟绂佺敤鏃?File Browser HTTPS 閰嶇疆锛?config"
       cleaned="true"
     fi
   done
 
   if [[ $cleaned == "true" ]]; then
-    info "旧配置备份目录：${backup_dir}"
-    warn "Let's Encrypt 证书文件已保留；File Browser 将使用标准 HTTPS 443，sing-box 的 2443 不受影响。"
+    info "鏃ч厤缃浠界洰褰曪細${backup_dir}"
+    warn "Let's Encrypt 璇佷功鏂囦欢宸蹭繚鐣欙紱File Browser 灏嗕娇鐢ㄦ爣鍑?HTTPS 443锛宻ing-box 鐨?2443 涓嶅彈褰卞搷銆?
 
     if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
       nginx -t
       systemctl reload nginx
-      info "Nginx 已重载，旧 File Browser 443 监听已清理。"
+      info "Nginx 宸查噸杞斤紝鏃?File Browser 443 鐩戝惉宸叉竻鐞嗐€?
     fi
   fi
 }
@@ -155,7 +136,7 @@ cleanup_legacy_filebrowser_http() {
   local backup_dir="/root/filebrowser-nginx-backup-$(date +%Y%m%d-%H%M%S)"
   local cleaned="false"
 
-  info "检查旧版 File Browser HTTP/Nginx 残留..."
+  info "妫€鏌ユ棫鐗?File Browser HTTP/Nginx 娈嬬暀..."
   for config in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
     [[ -f "$config" ]] || continue
 
@@ -171,13 +152,13 @@ cleanup_legacy_filebrowser_http() {
         mv "$config" "${config}.disabled-filebrowser-http"
       fi
 
-      warn "已备份并禁用旧 File Browser HTTP 配置：$config"
+      warn "宸插浠藉苟绂佺敤鏃?File Browser HTTP 閰嶇疆锛?config"
       cleaned="true"
     fi
   done
 
   if [[ $cleaned == "true" ]]; then
-    info "旧配置备份目录：${backup_dir}"
+    info "鏃ч厤缃浠界洰褰曪細${backup_dir}"
     if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
       nginx -t
       systemctl reload nginx
@@ -186,7 +167,7 @@ cleanup_legacy_filebrowser_http() {
 }
 
 detect_os() {
-  [[ -r /etc/os-release ]] || die "无法识别系统。仅支持 Debian/Ubuntu 和 RHEL 系发行版。"
+  [[ -r /etc/os-release ]] || die "鏃犳硶璇嗗埆绯荤粺銆備粎鏀寔 Debian/Ubuntu 鍜?RHEL 绯诲彂琛岀増銆?
   # shellcheck disable=SC1091
   . /etc/os-release
 
@@ -200,37 +181,37 @@ detect_os() {
       NGINX_CONF="/etc/nginx/conf.d/filebrowser.conf"
       ;;
     *)
-      die "不支持当前系统：${PRETTY_NAME:-unknown}"
+      die "涓嶆敮鎸佸綋鍓嶇郴缁燂細${PRETTY_NAME:-unknown}"
       ;;
   esac
 }
 
 collect_input() {
   echo
-  read -r -p "请输入绑定域名（例如 cloud.example.com）: " DOMAIN
-  valid_domain "$DOMAIN" || die "域名格式不正确。请输入不带 http:// 或路径的完整域名。"
+  read -r -p "璇疯緭鍏ョ粦瀹氬煙鍚嶏紙渚嬪 cloud.example.com锛? " DOMAIN
+  valid_domain "$DOMAIN" || die "鍩熷悕鏍煎紡涓嶆纭€傝杈撳叆涓嶅甫 http:// 鎴栬矾寰勭殑瀹屾暣鍩熷悕銆?
 
-  read -r -p "请输入上传文件大小限制 [默认 10G，可用示例：500M、20G]: " UPLOAD_LIMIT
+  read -r -p "璇疯緭鍏ヤ笂浼犳枃浠跺ぇ灏忛檺鍒?[榛樿 10G锛屽彲鐢ㄧず渚嬶細500M銆?0G]: " UPLOAD_LIMIT
   UPLOAD_LIMIT="${UPLOAD_LIMIT:-10G}"
-  valid_size "$UPLOAD_LIMIT" || die "上传限制格式不正确，仅支持正整数加 M/G，例如 500M 或 20G。"
+  valid_size "$UPLOAD_LIMIT" || die "涓婁紶闄愬埗鏍煎紡涓嶆纭紝浠呮敮鎸佹鏁存暟鍔?M/G锛屼緥濡?500M 鎴?20G銆?
 
-  read -r -p "请输入管理员账号 [默认 admin]: " ADMIN_USER
+  read -r -p "璇疯緭鍏ョ鐞嗗憳璐﹀彿 [榛樿 admin]: " ADMIN_USER
   ADMIN_USER="${ADMIN_USER:-admin}"
-  [[ $ADMIN_USER =~ ^[A-Za-z0-9_.-]{3,32}$ ]] || die "账号仅允许 3-32 位字母、数字、下划线、点和横线。"
+  [[ $ADMIN_USER =~ ^[A-Za-z0-9_.-]{3,32}$ ]] || die "璐﹀彿浠呭厑璁?3-32 浣嶅瓧姣嶃€佹暟瀛椼€佷笅鍒掔嚎銆佺偣鍜屾í绾裤€?
 
-  read -r -p "请输入云盘存储目录 [回车使用默认目录]: " INPUT_ROOT
+  read -r -p "璇疯緭鍏ヤ簯鐩樺瓨鍌ㄧ洰褰?[鍥炶溅浣跨敤榛樿鐩綍]: " INPUT_ROOT
   FB_ROOT="${INPUT_ROOT:-$FB_ROOT}"
-  [[ $FB_ROOT == /* ]] || die "存储目录必须是绝对路径。"
-  [[ $FB_ROOT != "/" ]] || die "不能将系统根目录作为云盘目录。"
+  [[ $FB_ROOT == /* ]] || die "瀛樺偍鐩綍蹇呴』鏄粷瀵硅矾寰勩€?
+  [[ $FB_ROOT != "/" ]] || die "涓嶈兘灏嗙郴缁熸牴鐩綍浣滀负浜戠洏鐩綍銆?
 
-  read -r -p "请输入用于 Let's Encrypt 通知的邮箱（已有证书时可留空）: " CERT_EMAIL
+  read -r -p "璇疯緭鍏ョ敤浜?Let's Encrypt 閫氱煡鐨勯偖绠憋紙宸叉湁璇佷功鏃跺彲鐣欑┖锛? " CERT_EMAIL
 
   ADMIN_PASS="$(random_password)"
-  [[ ${#ADMIN_PASS} -eq 24 ]] || die "生成随机密码失败。"
+  [[ ${#ADMIN_PASS} -eq 24 ]] || die "鐢熸垚闅忔満瀵嗙爜澶辫触銆?
 }
 
 install_packages() {
-  info "安装 curl、Certbot 和 Caddy 所需依赖..."
+  info "瀹夎 curl銆丆ertbot 鍜?Caddy 鎵€闇€渚濊禆..."
   if [[ $PKG_FAMILY == "debian" ]]; then
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates certbot jq xz-utils tar coreutils
@@ -288,8 +269,135 @@ ensure_shared_caddy_user() {
   chmod -R u+rwX,go-rwx "$CADDY_STATE_DIR"
 }
 
+naive_info_value() {
+  local key="$1"
+  sed -n "s/^${key}='\\(.*\\)'$/\\1/p" "$NAIVE_INFO_FILE" 2>/dev/null || true
+}
+
+write_shared_caddyfile() {
+  # forward_proxy 浠呮斁鍦?Naive 鐙珛绔欑偣鐨?route 鍐呫€?  # 涓婚厤缃笉鑳借缃叏灞€ order forward_proxy锛屽惁鍒欑綉鐩?reverse_proxy 浼氳鎻愬墠鎴幏銆?  cat >"$CADDYFILE" <<EOF
+  cat >"$CADDYFILE" <<EOF
+{
+    admin off
+    auto_https disable_redirects
+    log {
+        output discard
+    }
+}
+
+import ${CADDY_SITE_DIR}/*.caddy
+EOF
+  chown root:"$CADDY_SERVICE_USER" "$CADDYFILE"
+  chmod 640 "$CADDYFILE"
+}
+
+migrate_v12_filebrowser_merge() {
+  local manifest="$OLD_FB_ROUTE_MANIFEST"
+  local backup_dir="$OLD_FB_BACKUP_DIR"
+  local archive="/root/filebrowser-naive-v1.2-merge-backup-$(date +%Y%m%d-%H%M%S)-$$"
+  local fb_domain fb_upstream fb_original fb_backup backup base original restored=false
+
+  if [[ -f "$manifest" || -d "$backup_dir" ]]; then
+    install -d -m 700 "$archive"
+    [[ -f "$manifest" ]] && cp -a "$manifest" "$archive/"
+    [[ -d "$backup_dir" ]] && cp -a "$backup_dir" "$archive/"
+  fi
+
+  if [[ -f "$manifest" ]]; then
+    while IFS=$'\t' read -r fb_domain fb_upstream fb_original fb_backup; do
+      [[ -n "$fb_original" && -n "$fb_backup" ]] || continue
+      if [[ ! -f "$fb_original" && -f "$fb_backup" ]]; then
+        install -D -m 640 -o root -g "$CADDY_SERVICE_USER" "$fb_backup" "$fb_original"
+        restored=true
+      fi
+    done <"$manifest"
+  fi
+
+  if [[ -d "$backup_dir" ]]; then
+    shopt -s nullglob
+    for backup in "$backup_dir"/filebrowser-*.caddy.original; do
+      base="$(basename "$backup")"
+      base="${base%.original}"
+      original="$CADDY_SITE_DIR/$base"
+      if [[ ! -f "$original" ]]; then
+        install -D -m 640 -o root -g "$CADDY_SERVICE_USER" "$backup" "$original"
+        restored=true
+      fi
+    done
+    shopt -u nullglob
+  fi
+
+  rm -f "$manifest"
+  rm -rf "$backup_dir"
+  find "$CADDY_ROUTE_DIR" -type f -name 'naive.caddy' -delete 2>/dev/null || true
+  find "$CADDY_ROUTE_DIR" -depth -type d -empty -delete 2>/dev/null || true
+
+  [[ "$restored" == true ]] && info "宸叉仮澶嶆棫鐗堢Щ璧扮殑 File Browser 鐙珛绔欑偣閰嶇疆銆?
+  [[ -d "$archive" ]] && warn "鏃у悎骞堕厤缃凡澶囦唤鍒帮細$archive"
+}
+
+ensure_distinct_naive_domain() {
+  [[ -f "$NAIVE_INFO_FILE" ]] || return 0
+  local naive_domain
+  naive_domain="$(naive_info_value DOMAIN)"
+  if [[ -n "$naive_domain" && "$naive_domain" == "$DOMAIN" ]]; then
+    die "File Browser 涓?NaiveProxy 蹇呴』浣跨敤涓嶅悓鍩熷悕锛涗袱涓煙鍚嶅彲浠ヨВ鏋愬埌鍚屼竴涓?VPS IP銆?
+  fi
+}
+
+ensure_domain_not_owned_by_standalone_site() {
+  local prefix
+  for prefix in naive xray singbox-grpc singbox-sub; do
+    [[ ! -f "${CADDY_SITE_DIR}/${prefix}-${DOMAIN}.caddy" ]] ||
+      die "${DOMAIN} 已被 ${prefix} 的独立 Caddy 站点使用。请为 File Browser 使用独立子域名，避免覆盖现有服务。"
+  done
+}
+
+repair_existing_naive_site() {
+  [[ -f "$NAIVE_INFO_FILE" ]] || return 0
+
+  local naive_domain naive_port naive_username naive_password site_address site_file
+  naive_domain="$(naive_info_value DOMAIN)"
+  naive_port="$(naive_info_value PORT)"
+  naive_username="$(naive_info_value USERNAME)"
+  naive_password="$(naive_info_value PASSWORD)"
+
+  valid_domain "$naive_domain" || return 0
+  [[ "$naive_port" =~ ^[0-9]+$ ]] || return 0
+  [[ -n "$naive_username" && -n "$naive_password" ]] || return 0
+  [[ "$naive_domain" != "$DOMAIN" ]] || die "File Browser 涓?NaiveProxy 涓嶈兘浣跨敤鍚屼竴涓煙鍚嶃€?
+
+  if [[ "$naive_port" == "443" ]]; then
+    site_address=":443, $naive_domain"
+  else
+    site_address="$naive_domain:$naive_port"
+  fi
+  site_file="${CADDY_SITE_DIR}/naive-${naive_domain}.caddy"
+
+  cat >"$site_file" <<EOF
+$site_address {
+    encode
+
+    route {
+        forward_proxy {
+            basic_auth $naive_username $naive_password
+            hide_ip
+            hide_via
+            probe_resistance
+        }
+    }
+
+    root * $NAIVE_WEB_ROOT
+    file_server
+}
+EOF
+  chown root:"$CADDY_SERVICE_USER" "$site_file"
+  chmod 640 "$site_file"
+  info "宸叉妸鐜版湁 NaiveProxy 绔欑偣淇涓虹嫭绔?route 閰嶇疆銆?
+}
+
 configure_security() {
-  info "检查防火墙与 SELinux..."
+  info "妫€鏌ラ槻鐏涓?SELinux..."
 
   if command -v getenforce >/dev/null 2>&1 && [[ $(getenforce) == "Enforcing" ]]; then
     setsebool -P httpd_can_network_connect 1
@@ -317,7 +425,7 @@ ensure_certificate() {
   fi
 
   if [[ -s "${cert_dir}/fullchain.pem" && -s "${cert_dir}/privkey.pem" ]]; then
-    info "检测到已有 HTTPS 证书，将直接复用。"
+    info "妫€娴嬪埌宸叉湁 HTTPS 璇佷功锛屽皢鐩存帴澶嶇敤銆?
     return
   fi
 
@@ -329,16 +437,16 @@ ensure_certificate() {
   fi
 
   if port_is_available 80; then
-    info "使用临时端口 80 申请 Let's Encrypt 证书..."
+    info "浣跨敤涓存椂绔彛 80 鐢宠 Let's Encrypt 璇佷功..."
     certbot "${certbot_args[@]}" --standalone
     return
   fi
 
   if ! command -v ss >/dev/null 2>&1 || ! ss -H -ltnp "sport = :80" 2>/dev/null | grep -q 'nginx'; then
-    die "未找到已有证书，且端口 80 被非 Nginx 服务占用，无法安全完成 Let's Encrypt 验证。"
+    die "鏈壘鍒板凡鏈夎瘉涔︼紝涓旂鍙?80 琚潪 Nginx 鏈嶅姟鍗犵敤锛屾棤娉曞畨鍏ㄥ畬鎴?Let's Encrypt 楠岃瘉銆?
   fi
 
-  info "通过现有 Nginx 的临时 ACME 路由申请 Let's Encrypt 证书..."
+  info "閫氳繃鐜版湁 Nginx 鐨勪复鏃?ACME 璺敱鐢宠 Let's Encrypt 璇佷功..."
   install -d -m 0755 "${acme_root}/.well-known/acme-challenge"
   if [[ $PKG_FAMILY == "debian" ]]; then
     acme_conf="/etc/nginx/sites-available/filebrowser-acme"
@@ -363,7 +471,7 @@ EOF
     rm -f "$acme_conf"
     nginx -t
     systemctl reload nginx
-    die "Let's Encrypt 证书申请失败，请确认域名解析和端口 80 可访问。"
+    die "Let's Encrypt 璇佷功鐢宠澶辫触锛岃纭鍩熷悕瑙ｆ瀽鍜岀鍙?80 鍙闂€?
   fi
   [[ $PKG_FAMILY == "debian" ]] && rm -f /etc/nginx/sites-enabled/filebrowser-acme
   rm -f "$acme_conf"
@@ -390,18 +498,18 @@ install_filebrowser() {
   local existing_port=""
 
   if systemctl is-active --quiet filebrowser 2>/dev/null; then
-    warn "检测到正在运行的 File Browser，暂时停止服务以安全修改数据库。"
+    warn "妫€娴嬪埌姝ｅ湪杩愯鐨?File Browser锛屾殏鏃跺仠姝㈡湇鍔′互瀹夊叏淇敼鏁版嵁搴撱€?
     systemctl stop filebrowser
   fi
 
   if command -v filebrowser >/dev/null 2>&1; then
-    warn "检测到已安装 File Browser，将复用现有程序。"
+    warn "妫€娴嬪埌宸插畨瑁?File Browser锛屽皢澶嶇敤鐜版湁绋嬪簭銆?
   else
-    info "从 File Browser 官方安装脚本安装程序..."
+    info "浠?File Browser 瀹樻柟瀹夎鑴氭湰瀹夎绋嬪簭..."
     curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
   fi
 
-  command -v filebrowser >/dev/null 2>&1 || die "File Browser 安装失败。"
+  command -v filebrowser >/dev/null 2>&1 || die "File Browser 瀹夎澶辫触銆?
   install -d -m 0755 /etc/filebrowser "$FB_ROOT"
 
   if [[ -f $FB_DB ]]; then
@@ -409,19 +517,19 @@ install_filebrowser() {
     existing_port="$(filebrowser config cat --database "$FB_DB" 2>/dev/null | awk '/^[[:space:]]*Port:/ {print $2; exit}' || true)"
     if [[ $existing_port =~ ^[0-9]+$ ]]; then
       FB_PORT="$existing_port"
-      info "检测到已有 File Browser 后端端口：${FB_PORT}"
+      info "妫€娴嬪埌宸叉湁 File Browser 鍚庣绔彛锛?{FB_PORT}"
     fi
     choose_available_port
     BACKUP="${FB_DB}.bak.$(date +%Y%m%d-%H%M%S)"
     cp -a "$FB_DB" "$BACKUP"
-    warn "已有数据库已备份到：$BACKUP"
+    warn "宸叉湁鏁版嵁搴撳凡澶囦唤鍒帮細$BACKUP"
   else
     choose_available_port
     filebrowser config init --database "$FB_DB"
   fi
 
   if [[ $existing_database == "true" ]]; then
-    warn "检测到已有数据库，将保留原云盘根目录配置。"
+    warn "妫€娴嬪埌宸叉湁鏁版嵁搴擄紝灏嗕繚鐣欏師浜戠洏鏍圭洰褰曢厤缃€?
     filebrowser config set \
       --database "$FB_DB" \
       --address 127.0.0.1 \
@@ -449,7 +557,7 @@ install_filebrowser() {
 }
 
 write_service() {
-  info "配置 systemd 服务..."
+  info "閰嶇疆 systemd 鏈嶅姟..."
   cat > /etc/systemd/system/filebrowser.service <<EOF
 [Unit]
 Description=File Browser
@@ -474,7 +582,7 @@ EOF
   systemctl enable --now filebrowser
   systemctl is-active --quiet filebrowser || {
     journalctl -u filebrowser --no-pager -n 30 >&2
-    die "File Browser 服务启动失败。"
+    die "File Browser 鏈嶅姟鍚姩澶辫触銆?
   }
 }
 
@@ -482,7 +590,7 @@ verify_login() {
   local http_code
   local attempt
 
-  info "等待 File Browser 启动并验证管理员账号密码..."
+  info "绛夊緟 File Browser 鍚姩骞堕獙璇佺鐞嗗憳璐﹀彿瀵嗙爜..."
   for attempt in $(seq 1 30); do
     http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
       -H 'Content-Type: application/json' \
@@ -490,24 +598,24 @@ verify_login() {
       "http://127.0.0.1:${FB_PORT}/api/login" 2>/dev/null || true)"
 
     if [[ $http_code == "200" ]]; then
-      info "管理员登录验证成功。"
+      info "绠＄悊鍛樼櫥褰曢獙璇佹垚鍔熴€?
       return
     fi
 
     if ! systemctl is-active --quiet filebrowser; then
       journalctl -u filebrowser --no-pager -n 30 >&2 || true
-      die "File Browser 服务已退出，已输出服务日志。"
+      die "File Browser 鏈嶅姟宸查€€鍑猴紝宸茶緭鍑烘湇鍔℃棩蹇椼€?
     fi
 
     sleep 1
   done
 
   journalctl -u filebrowser --no-pager -n 30 >&2 || true
-  die "管理员登录验证失败（HTTP ${http_code:-unknown}），已输出 File Browser 服务日志。"
+  die "绠＄悊鍛樼櫥褰曢獙璇佸け璐ワ紙HTTP ${http_code:-unknown}锛夛紝宸茶緭鍑?File Browser 鏈嶅姟鏃ュ織銆?
 }
 
 write_nginx_config() {
-  info "配置隔离的 Nginx HTTPS 反向代理与上传限制..."
+  info "閰嶇疆闅旂鐨?Nginx HTTPS 鍙嶅悜浠ｇ悊涓庝笂浼犻檺鍒?.."
   if [[ "${NGINX_MODE:-standalone}" == "system" ]]; then
     NGINX_CONF="/etc/nginx/conf.d/filebrowser-${DOMAIN}.conf"
     cat > "$NGINX_CONF" <<EOF
@@ -623,35 +731,36 @@ EOF
 }
 
 write_caddy_config() {
-  info "Configuring shared Caddy HTTPS entry for File Browser..."
+  info "閰嶇疆 File Browser 涓?NaiveProxy 鍏辩敤鐨?Caddy HTTPS 鍏ュ彛..."
   ensure_caddy_binary
   ensure_shared_caddy_user
-  install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR/${DOMAIN}"
-  cat > "$CADDYFILE" <<EOF
-{
-    order forward_proxy before reverse_proxy
-    admin off
-    auto_https disable_redirects
-    log {
-        output discard
-    }
-}
+  install -d -m 750 -o root -g "$CADDY_SERVICE_USER" \
+    "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR"
 
-import ${CADDY_SITE_DIR}/*.caddy
-EOF
-  cat > "${CADDY_SITE_DIR}/filebrowser-${DOMAIN}.caddy" <<EOF
-${DOMAIN}:443 {
+  migrate_v12_filebrowser_merge
+  ensure_distinct_naive_domain
+  ensure_domain_not_owned_by_standalone_site
+  write_shared_caddyfile
+  repair_existing_naive_site
+
+  # File Browser 濮嬬粓淇濈暀涓虹嫭绔嬪煙鍚嶇珯鐐癸紱涓嶈鎶婂畠鍚堝苟杩?Naive 鐨?:443 绔欑偣鍧椼€?  rm -f "${CADDY_ROUTE_DIR}/${DOMAIN}/naive.caddy"
+  rm -f "${CADDY_ROUTE_DIR}/${DOMAIN}/naive.caddy"
+  rmdir "${CADDY_ROUTE_DIR}/${DOMAIN}" 2>/dev/null || true
+  cat >"${CADDY_SITE_DIR}/filebrowser-${DOMAIN}.caddy" <<EOF
+${DOMAIN} {
     encode gzip
     request_body {
         max_size ${UPLOAD_LIMIT}
     }
+    # 仅导入同一域名的路径路由（如 XHTTP、订阅）；Naive 必须使用独立域名和独立站点。
     import ${CADDY_ROUTE_DIR}/${DOMAIN}/*.caddy
     reverse_proxy 127.0.0.1:${FB_PORT}
 }
 EOF
   chown root:"$CADDY_SERVICE_USER" "$CADDYFILE" "${CADDY_SITE_DIR}/filebrowser-${DOMAIN}.caddy"
   chmod 640 "$CADDYFILE" "${CADDY_SITE_DIR}/filebrowser-${DOMAIN}.caddy"
-  cat > "$CADDY_SERVICE_FILE" <<EOF
+
+  cat >"$CADDY_SERVICE_FILE" <<EOF
 [Unit]
 Description=Shared Caddy reverse proxy and NaiveProxy entry
 After=network-online.target filebrowser.service
@@ -666,18 +775,23 @@ Environment=XDG_CONFIG_HOME=${CADDY_CONFIG_DIR}
 ExecStartPre=+/bin/chown -R ${CADDY_SERVICE_USER}:${CADDY_SERVICE_USER} ${CADDY_STATE_DIR}
 ExecStartPre=+/bin/chmod -R u+rwX,go-rwx ${CADDY_STATE_DIR}
 ExecStart=${CADDY_BIN} run --environ --config ${CADDYFILE} --adapter caddyfile
-ExecReload=${CADDY_BIN} reload --config ${CADDYFILE} --adapter caddyfile
+TimeoutStopSec=5s
 Restart=on-failure
 RestartSec=5
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 LimitNOFILE=1048576
+PrivateTmp=true
+ReadWritePaths=${CADDY_STATE_DIR}
+NoNewPrivileges=true
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
   "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >/dev/null ||
-    die "Caddy config validation failed."
+    die "Caddy 閰嶇疆鏍￠獙澶辫触銆?
   systemctl disable --now filebrowser-nginx 2>/dev/null || true
   systemctl daemon-reload
   systemctl enable "$CADDY_SERVICE" >/dev/null
@@ -688,7 +802,7 @@ EOF
   fi
   systemctl is-active --quiet "$CADDY_SERVICE" || {
     journalctl -u "$CADDY_SERVICE" --no-pager -n 50 >&2 || true
-    die "Shared Caddy failed to start."
+    die "Shared Caddy 鍚姩澶辫触銆?
   }
 }
 
@@ -709,21 +823,21 @@ EOF
 
   echo
   printf "${GREEN}============================================================${NC}\n"
-  printf "${GREEN} File Browser 安装完成${NC}\n"
+  printf "${GREEN} File Browser 瀹夎瀹屾垚${NC}\n"
   printf "${GREEN}============================================================${NC}\n"
-  printf "访问地址：%s://%s\n" "$scheme" "$public_address"
-  printf "管理员账号：%s\n" "$ADMIN_USER"
-  printf "管理员密码：%s\n" "$ADMIN_PASS"
-  printf "存储目录：%s\n" "$FB_ROOT"
-  printf "上传限制：%s\n" "$UPLOAD_LIMIT"
-  printf "凭据备份：%s（仅 root 可读）\n" "$CREDS_FILE"
+  printf "璁块棶鍦板潃锛?s://%s\n" "$scheme" "$public_address"
+  printf "绠＄悊鍛樿处鍙凤細%s\n" "$ADMIN_USER"
+  printf "绠＄悊鍛樺瘑鐮侊細%s\n" "$ADMIN_PASS"
+  printf "瀛樺偍鐩綍锛?s\n" "$FB_ROOT"
+  printf "涓婁紶闄愬埗锛?s\n" "$UPLOAD_LIMIT"
+  printf "鍑嵁澶囦唤锛?s锛堜粎 root 鍙锛塡n" "$CREDS_FILE"
   printf "${GREEN}============================================================${NC}\n"
 }
 
 main() {
   require_root
   require_interactive_terminal
-  info "File Browser 安装脚本版本：${SCRIPT_VERSION}"
+  info "File Browser 瀹夎鑴氭湰鐗堟湰锛?{SCRIPT_VERSION}"
   detect_os
   collect_input
   cleanup_legacy_filebrowser_https
@@ -740,9 +854,8 @@ main() {
   save_and_show_credentials
 }
 
-trap 'printf "${RED}[x] 安装在第 %s 行失败，请检查上方错误信息。${NC}\n" "$LINENO" >&2' ERR
-# Public 443 is deliberately reserved for the standalone File Browser Nginx.
-# If Reality was installed first, choose a non-443 Reality port before running this installer.
+trap 'printf "${RED}[x] 瀹夎鍦ㄧ %s 琛屽け璐ワ紝璇锋鏌ヤ笂鏂归敊璇俊鎭€?{NC}\n" "$LINENO" >&2' ERR
+# File Browser 涓?NaiveProxy 鐢卞悓涓€涓?shared-caddy 鎸変笉鍚屽煙鍚嶅叡鐢ㄥ叕缃?443銆?choose_https_port() {
 choose_https_port() {
   PUBLIC_PORT="443"
   if port_is_available "$PUBLIC_PORT"; then
@@ -752,6 +865,10 @@ choose_https_port() {
   if systemctl is-active --quiet shared-caddy 2>/dev/null && port_owner_is_shared_caddy "$PUBLIC_PORT"; then
     NGINX_MODE="caddy"
     return
+  fi
+  if systemctl is-active --quiet caddy 2>/dev/null ||
+    ss -H -ltnp 'sport = :443' 2>/dev/null | grep -qE 'caddy|caddy-naive'; then
+    die "检测到另一个 Caddy 正在占用 TCP/443。为避免覆盖现有站点，本脚本不会接管；请先迁移为 shared-caddy 或释放 443。"
   fi
   die "TCP/443 is occupied by a non-Caddy service. Stop or move the old 443 service first."
 }
