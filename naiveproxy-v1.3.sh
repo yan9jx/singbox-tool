@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NaiveProxy 鐙珛瀹夎涓庣淮鎶よ剼鏈紝閫傜敤浜?Debian/Ubuntu銆?# 鑺傜偣淇℃伅淇濆瓨鍦?/etc/naiveproxy/node-info.env锛岃濡ュ杽淇濇姢銆?# 浼樺厛澶嶇敤 shared-caddy 鐨?TCP/443锛涜嫢 443 琚叾浠栨湇鍔″崰鐢紝鍐嶈嚜鍔ㄩ€夋嫨澶囩敤绔彛銆?# Caddy 鑷姩鐢宠鍜岀画鏈熻瘉涔︼紝鏀寔 NaiveProxy 涓?File Browser 浣跨敤涓嶅悓鍩熷悕鍏辩敤 443銆?# v1.6锛氫慨澶?set -e 瀵艰嚧瀹夎/淇娴佺▼闈欓粯閫€鍑猴紝骞跺寮洪敊璇彁绀恒€?set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.7"
+SCRIPT_VERSION="v1.8"
 INSTALL_DIR="/etc/naiveproxy"
 INFO_FILE="$INSTALL_DIR/node-info.env"
 CADDY_DIR="/etc/caddy-naive"
@@ -390,6 +390,26 @@ validate_caddy() {
     die "Caddy/NaiveProxy 閰嶇疆鏍￠獙澶辫触銆?
 }
 
+verify_filebrowser_precedence() {
+  local port="$1" site domain tmp host_index fallback_index naive_site
+  [[ "$port" == "443" ]] || return 0
+  naive_site="$(find "$CADDY_SITE_DIR" -maxdepth 1 -type f -name "naive-*.caddy" -print -quit 2>/dev/null || true)"
+  [[ -n "$naive_site" ]] || return 0
+
+  for site in "$CADDY_SITE_DIR"/filebrowser-*.caddy; do
+    [[ -f "$site" ]] || continue
+    domain="${site##*/filebrowser-}"
+    domain="${domain%.caddy}"
+    tmp="$(mktemp)"
+    "$BIN" adapt --config "$CADDYFILE" --adapter caddyfile --pretty >"$tmp" || { rm -f "$tmp"; die "Caddy route priority check failed."; }
+    host_index="$(jq -r --arg domain "$domain" '[.apps.http.servers[]?.routes | to_entries[] | select(any(.value.match[]?; ((.host? // []) | index($domain)))) | .key] | min // empty' "$tmp")"
+    fallback_index="$(jq -r '[.apps.http.servers[]?.routes | to_entries[] | select((.value.match // []) | length == 0) | .key] | min // empty' "$tmp")"
+    rm -f "$tmp"
+    [[ "$host_index" =~ ^[0-9]+$ && "$fallback_index" =~ ^[0-9]+$ && "$host_index" -lt "$fallback_index" ]] ||
+      die "Caddy route priority check failed: File Browser must precede the Naive :443 fallback route."
+  done
+}
+
 make_uri() {
   local domain="$1" port="$2" username="$3" password="$4" name="$5"
   printf 'naive+https://%s:%s@%s:%s?sni=%s#%s' \
@@ -467,6 +487,7 @@ start_service() {
     journalctl -u "$SERVICE_NAME" -n 80 --no-pager >&2 || true
     die "NaiveProxy 鍚姩澶辫触銆?
   }
+  verify_filebrowser_precedence "$port"
   local n
   for ((n = 0; n < 10; n++)); do
     port_is_listening "$port" && return 0
@@ -643,6 +664,7 @@ restart_node() {
   local port
   port="$(info_value PORT)"
   validate_caddy "$BIN"
+  verify_filebrowser_precedence "$port"
   systemctl restart "$SERVICE_NAME"
   if ! systemctl is-active --quiet "$SERVICE_NAME" || ! port_is_listening "$port"; then
     die "NaiveProxy 閲嶅惎澶辫触銆?
@@ -751,4 +773,3 @@ case "${1:-}" in
   repair) repair_shared_caddy ;;
   *) menu ;;
 esac
-

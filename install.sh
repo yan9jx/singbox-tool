@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.07.12-1"
+SCRIPT_VERSION="2026.07.12-2"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -289,6 +289,27 @@ import ${CADDY_SITE_DIR}/*.caddy
 EOF
   chown root:"$CADDY_SERVICE_USER" "$CADDYFILE"
   chmod 640 "$CADDYFILE"
+}
+
+verify_naive_filebrowser_precedence() {
+  local naive_port site domain tmp host_index fallback_index naive_site
+  naive_port="$(naive_info_value PORT)"
+  [[ "$naive_port" == "443" ]] || return 0
+  naive_site="$(find "$CADDY_SITE_DIR" -maxdepth 1 -type f -name "naive-*.caddy" -print -quit 2>/dev/null || true)"
+  [[ -n "$naive_site" ]] || return 0
+
+  for site in "$CADDY_SITE_DIR"/filebrowser-*.caddy; do
+    [[ -f "$site" ]] || continue
+    domain="${site##*/filebrowser-}"
+    domain="${domain%.caddy}"
+    tmp="$(mktemp)"
+    "$CADDY_BIN" adapt --config "$CADDYFILE" --adapter caddyfile --pretty >"$tmp" || { rm -f "$tmp"; die "Caddy route priority check failed."; }
+    host_index="$(jq -r --arg domain "$domain" '[.apps.http.servers[]?.routes | to_entries[] | select(any(.value.match[]?; ((.host? // []) | index($domain)))) | .key] | min // empty' "$tmp")"
+    fallback_index="$(jq -r '[.apps.http.servers[]?.routes | to_entries[] | select((.value.match // []) | length == 0) | .key] | min // empty' "$tmp")"
+    rm -f "$tmp"
+    [[ "$host_index" =~ ^[0-9]+$ && "$fallback_index" =~ ^[0-9]+$ && "$host_index" -lt "$fallback_index" ]] ||
+      die "Caddy route priority check failed: File Browser must precede the Naive :443 fallback route."
+  done
 }
 
 migrate_v12_filebrowser_merge() {
@@ -804,6 +825,7 @@ EOF
     journalctl -u "$CADDY_SERVICE" --no-pager -n 50 >&2 || true
     die "Shared Caddy 鍚姩澶辫触銆?
   }
+  verify_naive_filebrowser_precedence
 }
 
 save_and_show_credentials() {
