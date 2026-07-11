@@ -8,7 +8,7 @@ SERVICE_FILE="/etc/systemd/system/sing-box.service"
 DEFAULT_PORT="443"
 SERVER_NAME="www.microsoft.com"
 SCRIPT_TITLE="宇宙监察委员会sing-box部署局"
-SCRIPT_VERSION="v10.98"
+SCRIPT_VERSION="v10.99"
 CADDY_BIN="/usr/local/bin/caddy-naive"
 CADDY_DIR="/etc/caddy-naive"
 CADDYFILE="$CADDY_DIR/Caddyfile"
@@ -16,6 +16,10 @@ CADDY_SITE_DIR="$CADDY_DIR/sites"
 CADDY_ROUTE_DIR="$CADDY_DIR/routes"
 CADDY_SERVICE="shared-caddy"
 CADDY_SERVICE_FILE="/etc/systemd/system/${CADDY_SERVICE}.service"
+CADDY_SERVICE_USER="naiveproxy"
+CADDY_STATE_DIR="/var/lib/shared-caddy"
+CADDY_DATA_DIR="${CADDY_STATE_DIR}/data"
+CADDY_CONFIG_DIR="${CADDY_STATE_DIR}/config"
 CADDY_RELEASE_API="https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
 CADDY_RELEASE_ASSET="caddy-forwardproxy-naive.tar.xz"
 
@@ -988,8 +992,26 @@ v10_ensure_caddy_binary() {
   rm -rf "$tmp"
 }
 
+v10_ensure_shared_caddy_user() {
+  getent group "$CADDY_SERVICE_USER" >/dev/null 2>&1 ||
+    groupadd --system "$CADDY_SERVICE_USER"
+  id "$CADDY_SERVICE_USER" >/dev/null 2>&1 ||
+    useradd --system --gid "$CADDY_SERVICE_USER" --home-dir "$CADDY_STATE_DIR" \
+      --no-create-home --shell /usr/sbin/nologin "$CADDY_SERVICE_USER"
+
+  install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR"
+  install -d -m 700 -o "$CADDY_SERVICE_USER" -g "$CADDY_SERVICE_USER" \
+    "$CADDY_STATE_DIR" "$CADDY_DATA_DIR" "$CADDY_CONFIG_DIR"
+  find "$CADDY_DIR" -type d -exec chgrp "$CADDY_SERVICE_USER" {} + -exec chmod g+rx {} +
+  find "$CADDY_DIR" -type f \( -name 'Caddyfile' -o -name '*.caddy' \) \
+    -exec chgrp "$CADDY_SERVICE_USER" {} + -exec chmod g+r {} +
+  chown -R "$CADDY_SERVICE_USER:$CADDY_SERVICE_USER" "$CADDY_STATE_DIR"
+  chmod -R u+rwX,go-rwx "$CADDY_STATE_DIR"
+}
+
 v10_ensure_shared_caddy_base() {
-  install -d -m 0755 "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR"
+  v10_ensure_shared_caddy_user
+  install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR"
   if [[ ! -f "$CADDYFILE" ]]; then
     cat >"$CADDYFILE" <<EOF
 {
@@ -1006,6 +1028,8 @@ EOF
   fi
   grep -qF "import ${CADDY_SITE_DIR}/*.caddy" "$CADDYFILE" ||
     printf '\nimport %s/*.caddy\n' "$CADDY_SITE_DIR" >>"$CADDYFILE"
+  chown root:"$CADDY_SERVICE_USER" "$CADDYFILE"
+  chmod 640 "$CADDYFILE"
 }
 
 v10_write_shared_caddy_service() {
@@ -1017,6 +1041,12 @@ Wants=network-online.target
 
 [Service]
 Type=notify
+User=${CADDY_SERVICE_USER}
+Group=${CADDY_SERVICE_USER}
+Environment=XDG_DATA_HOME=${CADDY_DATA_DIR}
+Environment=XDG_CONFIG_HOME=${CADDY_CONFIG_DIR}
+ExecStartPre=+/bin/chown -R ${CADDY_SERVICE_USER}:${CADDY_SERVICE_USER} ${CADDY_STATE_DIR}
+ExecStartPre=+/bin/chmod -R u+rwX,go-rwx ${CADDY_STATE_DIR}
 ExecStart=${CADDY_BIN} run --environ --config ${CADDYFILE} --adapter caddyfile
 ExecReload=${CADDY_BIN} reload --config ${CADDYFILE} --adapter caddyfile
 Restart=on-failure
@@ -1170,7 +1200,7 @@ v10_ensure_subscription_nginx_mapping() {
   route_file="${route_dir}/singbox-sub.caddy"
   site_file="${CADDY_SITE_DIR}/filebrowser-${url_host}.caddy"
   standalone_file="${CADDY_SITE_DIR}/singbox-sub-${url_host}.caddy"
-  install -d -m 0755 "$route_dir"
+  install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$route_dir"
 
   if [[ -f "$site_file" ]]; then
     rm -f "$standalone_file"
@@ -1194,6 +1224,9 @@ ${url_host}:443 {
 }
 EOF
   fi
+
+  chown root:"$CADDY_SERVICE_USER" "$route_file" "$standalone_file" 2>/dev/null || true
+  chmod 640 "$route_file" "$standalone_file" 2>/dev/null || true
 
   v10_restart_shared_caddy
   echo "Subscription /sub/ route is managed by shared-caddy for ${url_host}."
@@ -1692,13 +1725,17 @@ EOF
     die "sing-box could not restart; the previous configuration was restored."
   fi
 
-  install -d -m 0755 "$CADDY_SITE_DIR" "$SUBSCRIPTION_WEB_DIR"
+  v10_ensure_shared_caddy_ready
+  install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$CADDY_SITE_DIR"
+  install -d -m 0755 "$SUBSCRIPTION_WEB_DIR"
   grpc_caddy_conf="${CADDY_SITE_DIR}/singbox-grpc-${domain}.caddy"
   cat >"$grpc_caddy_conf" <<EOF
 ${domain}:443 {
     reverse_proxy h2c://127.0.0.1:${grpc_local_port}
 }
 EOF
+  chown root:"$CADDY_SERVICE_USER" "$grpc_caddy_conf"
+  chmod 640 "$grpc_caddy_conf"
   v10_restart_shared_caddy
 
   grpc_name="${node_name}-gRPC"

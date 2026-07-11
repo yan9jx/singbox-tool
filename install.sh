@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.07.11-1"
+SCRIPT_VERSION="2026.07.11-2"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -17,6 +17,10 @@ CADDY_SITE_DIR="${CADDY_DIR}/sites"
 CADDY_ROUTE_DIR="${CADDY_DIR}/routes"
 CADDY_SERVICE="shared-caddy"
 CADDY_SERVICE_FILE="/etc/systemd/system/${CADDY_SERVICE}.service"
+CADDY_SERVICE_USER="naiveproxy"
+CADDY_STATE_DIR="/var/lib/shared-caddy"
+CADDY_DATA_DIR="${CADDY_STATE_DIR}/data"
+CADDY_CONFIG_DIR="${CADDY_STATE_DIR}/config"
 CADDY_RELEASE_API="https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
 CADDY_RELEASE_ASSET="caddy-forwardproxy-naive.tar.xz"
 
@@ -267,6 +271,23 @@ ensure_caddy_binary() {
   rm -rf "$tmp"
 }
 
+ensure_shared_caddy_user() {
+  getent group "$CADDY_SERVICE_USER" >/dev/null 2>&1 ||
+    groupadd --system "$CADDY_SERVICE_USER"
+  id "$CADDY_SERVICE_USER" >/dev/null 2>&1 ||
+    useradd --system --gid "$CADDY_SERVICE_USER" --home-dir "$CADDY_STATE_DIR" \
+      --no-create-home --shell /usr/sbin/nologin "$CADDY_SERVICE_USER"
+
+  install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR"
+  install -d -m 700 -o "$CADDY_SERVICE_USER" -g "$CADDY_SERVICE_USER" \
+    "$CADDY_STATE_DIR" "$CADDY_DATA_DIR" "$CADDY_CONFIG_DIR"
+  find "$CADDY_DIR" -type d -exec chgrp "$CADDY_SERVICE_USER" {} + -exec chmod g+rx {} +
+  find "$CADDY_DIR" -type f \( -name 'Caddyfile' -o -name '*.caddy' \) \
+    -exec chgrp "$CADDY_SERVICE_USER" {} + -exec chmod g+r {} +
+  chown -R "$CADDY_SERVICE_USER:$CADDY_SERVICE_USER" "$CADDY_STATE_DIR"
+  chmod -R u+rwX,go-rwx "$CADDY_STATE_DIR"
+}
+
 configure_security() {
   info "检查防火墙与 SELinux..."
 
@@ -289,6 +310,11 @@ ensure_certificate() {
   local certbot_args
   local acme_root="/var/lib/filebrowser-acme"
   local acme_conf
+
+  if [[ "${NGINX_MODE:-}" == "caddy" ]]; then
+    info "Shared Caddy will manage HTTPS certificates automatically; skipping certbot."
+    return
+  fi
 
   if [[ -s "${cert_dir}/fullchain.pem" && -s "${cert_dir}/privkey.pem" ]]; then
     info "检测到已有 HTTPS 证书，将直接复用。"
@@ -346,6 +372,7 @@ EOF
 }
 
 configure_certificate_renewal() {
+  [[ "${NGINX_MODE:-}" == "caddy" ]] && return
   install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
 cat > /etc/letsencrypt/renewal-hooks/deploy/reload-shared-caddy.sh <<'EOF'
 #!/usr/bin/env bash
@@ -598,7 +625,8 @@ EOF
 write_caddy_config() {
   info "Configuring shared Caddy HTTPS entry for File Browser..."
   ensure_caddy_binary
-  install -d -m 0755 "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR/${DOMAIN}"
+  ensure_shared_caddy_user
+  install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR/${DOMAIN}"
   cat > "$CADDYFILE" <<EOF
 {
     order forward_proxy before reverse_proxy
@@ -613,7 +641,6 @@ import ${CADDY_SITE_DIR}/*.caddy
 EOF
   cat > "${CADDY_SITE_DIR}/filebrowser-${DOMAIN}.caddy" <<EOF
 ${DOMAIN}:443 {
-    tls /etc/letsencrypt/live/${DOMAIN}/fullchain.pem /etc/letsencrypt/live/${DOMAIN}/privkey.pem
     encode gzip
     request_body {
         max_size ${UPLOAD_LIMIT}
@@ -622,6 +649,8 @@ ${DOMAIN}:443 {
     reverse_proxy 127.0.0.1:${FB_PORT}
 }
 EOF
+  chown root:"$CADDY_SERVICE_USER" "$CADDYFILE" "${CADDY_SITE_DIR}/filebrowser-${DOMAIN}.caddy"
+  chmod 640 "$CADDYFILE" "${CADDY_SITE_DIR}/filebrowser-${DOMAIN}.caddy"
   cat > "$CADDY_SERVICE_FILE" <<EOF
 [Unit]
 Description=Shared Caddy reverse proxy and NaiveProxy entry
@@ -630,6 +659,12 @@ Wants=network-online.target
 
 [Service]
 Type=notify
+User=${CADDY_SERVICE_USER}
+Group=${CADDY_SERVICE_USER}
+Environment=XDG_DATA_HOME=${CADDY_DATA_DIR}
+Environment=XDG_CONFIG_HOME=${CADDY_CONFIG_DIR}
+ExecStartPre=+/bin/chown -R ${CADDY_SERVICE_USER}:${CADDY_SERVICE_USER} ${CADDY_STATE_DIR}
+ExecStartPre=+/bin/chmod -R u+rwX,go-rwx ${CADDY_STATE_DIR}
 ExecStart=${CADDY_BIN} run --environ --config ${CADDYFILE} --adapter caddyfile
 ExecReload=${CADDY_BIN} reload --config ${CADDYFILE} --adapter caddyfile
 Restart=on-failure

@@ -5,7 +5,7 @@
 # Caddy 自动申请和续期证书，支持 NaiveProxy 与 File Browser 使用不同域名共用 443。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.3"
+SCRIPT_VERSION="v1.4"
 INSTALL_DIR="/etc/naiveproxy"
 INFO_FILE="$INSTALL_DIR/node-info.env"
 CADDY_DIR="/etc/caddy-naive"
@@ -255,8 +255,12 @@ Wants=network-online.target
 
 [Service]
 Type=notify
+User=$SERVICE_USER
+Group=$SERVICE_USER
 Environment=XDG_DATA_HOME=$CADDY_DATA_DIR
 Environment=XDG_CONFIG_HOME=$CADDY_CONFIG_DIR
+ExecStartPre=+/bin/chown -R $SERVICE_USER:$SERVICE_USER $CADDY_STATE_DIR
+ExecStartPre=+/bin/chmod -R u+rwX,go-rwx $CADDY_STATE_DIR
 ExecStart=$BIN run --environ --config $CADDYFILE --adapter caddyfile
 ExecReload=$BIN reload --config $CADDYFILE --adapter caddyfile
 TimeoutStopSec=5s

@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v2.0"
+SCRIPT_VERSION="v2.1"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -18,6 +18,10 @@ CADDY_SITE_DIR="$CADDY_DIR/sites"
 CADDY_ROUTE_DIR="$CADDY_DIR/routes"
 CADDY_SERVICE="shared-caddy"
 CADDY_SERVICE_FILE="/etc/systemd/system/${CADDY_SERVICE}.service"
+CADDY_SERVICE_USER="naiveproxy"
+CADDY_STATE_DIR="/var/lib/shared-caddy"
+CADDY_DATA_DIR="${CADDY_STATE_DIR}/data"
+CADDY_CONFIG_DIR="${CADDY_STATE_DIR}/config"
 CADDY_RELEASE_API="https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
 CADDY_RELEASE_ASSET="caddy-forwardproxy-naive.tar.xz"
 LOCAL_PORT_BASE=10001
@@ -177,8 +181,26 @@ ensure_caddy_binary() {
   rm -rf "$tmp"
 }
 
+ensure_shared_caddy_user() {
+  getent group "$CADDY_SERVICE_USER" >/dev/null 2>&1 ||
+    groupadd --system "$CADDY_SERVICE_USER"
+  id "$CADDY_SERVICE_USER" >/dev/null 2>&1 ||
+    useradd --system --gid "$CADDY_SERVICE_USER" --home-dir "$CADDY_STATE_DIR" \
+      --no-create-home --shell /usr/sbin/nologin "$CADDY_SERVICE_USER"
+
+  install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR"
+  install -d -m 700 -o "$CADDY_SERVICE_USER" -g "$CADDY_SERVICE_USER" \
+    "$CADDY_STATE_DIR" "$CADDY_DATA_DIR" "$CADDY_CONFIG_DIR"
+  find "$CADDY_DIR" -type d -exec chgrp "$CADDY_SERVICE_USER" {} + -exec chmod g+rx {} +
+  find "$CADDY_DIR" -type f \( -name 'Caddyfile' -o -name '*.caddy' \) \
+    -exec chgrp "$CADDY_SERVICE_USER" {} + -exec chmod g+r {} +
+  chown -R "$CADDY_SERVICE_USER:$CADDY_SERVICE_USER" "$CADDY_STATE_DIR"
+  chmod -R u+rwX,go-rwx "$CADDY_STATE_DIR"
+}
+
 ensure_shared_caddy_base() {
-  install -d -m 0755 "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR"
+  ensure_shared_caddy_user
+  install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR"
   if [[ ! -f "$CADDYFILE" ]]; then
     cat >"$CADDYFILE" <<EOF
 {
@@ -195,6 +217,8 @@ EOF
   fi
   grep -qF "import ${CADDY_SITE_DIR}/*.caddy" "$CADDYFILE" ||
     printf '\nimport %s/*.caddy\n' "$CADDY_SITE_DIR" >>"$CADDYFILE"
+  chown root:"$CADDY_SERVICE_USER" "$CADDYFILE"
+  chmod 640 "$CADDYFILE"
 }
 
 write_shared_caddy_service() {
@@ -206,6 +230,12 @@ Wants=network-online.target
 
 [Service]
 Type=notify
+User=${CADDY_SERVICE_USER}
+Group=${CADDY_SERVICE_USER}
+Environment=XDG_DATA_HOME=${CADDY_DATA_DIR}
+Environment=XDG_CONFIG_HOME=${CADDY_CONFIG_DIR}
+ExecStartPre=+/bin/chown -R ${CADDY_SERVICE_USER}:${CADDY_SERVICE_USER} ${CADDY_STATE_DIR}
+ExecStartPre=+/bin/chmod -R u+rwX,go-rwx ${CADDY_STATE_DIR}
 ExecStart=${CADDY_BIN} run --environ --config ${CADDYFILE} --adapter caddyfile
 ExecReload=${CADDY_BIN} reload --config ${CADDYFILE} --adapter caddyfile
 Restart=on-failure
@@ -293,7 +323,7 @@ write_caddy() {
   local route_dir="${CADDY_ROUTE_DIR}/${domain}"
   local route_file="${route_dir}/xray-xhttp.caddy"
 
-  install -d -m 0755 "$CADDY_SITE_DIR" "$route_dir"
+  install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$CADDY_SITE_DIR" "$route_dir"
 
   if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" ]]; then
     rm -f "$site_file"
@@ -326,6 +356,9 @@ EOF
 }
 EOF
   fi
+
+  chown root:"$CADDY_SERVICE_USER" "$site_file" "$route_file" 2>/dev/null || true
+  chmod 640 "$site_file" "$route_file" 2>/dev/null || true
 
   restart_shared_caddy
 }
