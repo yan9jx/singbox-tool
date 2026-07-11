@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.06.27-10"
+APP_VERSION="2026.07.11-1"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -342,7 +342,7 @@ def keyboard():
                 {"text": "🔄 重启节点", "callback_data": "restart_node"},
             ],
             [
-                {"text": "🌐 重启Nginx", "callback_data": "restart_nginx"},
+                {"text": "🌐 重启反代", "callback_data": "restart_proxy"},
                 {"text": "♻️ 重启VPS", "callback_data": "reboot_ask"},
             ],
         ]
@@ -361,7 +361,7 @@ def keyboard():
             ],
             [
                 {"text": "🔄 重启节点", "callback_data": "restart_node"},
-                {"text": "🌐 重启 Nginx", "callback_data": "restart_nginx"},
+                {"text": "🌐 重启反代", "callback_data": "restart_proxy"},
             ],
             [
                 {"text": "♻️ 重启 VPS", "callback_data": "reboot_ask"},
@@ -867,9 +867,48 @@ def nginx_public_ports():
     return {row["port"] for row in ss_listeners() if not row["loopback"] and "nginx" in row["line"]}
 
 
+def systemd_active(service):
+    code, _, _ = run(f"systemctl is-active --quiet {service}", timeout=2)
+    return code == 0
+
+
+def caddy_filebrowser_site_exists():
+    site_dirs = (Path("/etc/caddy-naive/sites"), Path("/etc/caddy/sites"))
+    for site_dir in site_dirs:
+        if any(site_dir.glob("filebrowser-*.caddy")):
+            return True
+    for path in (Path("/etc/caddy-naive/Caddyfile"), Path("/etc/caddy/Caddyfile")):
+        if path.exists():
+            text = path.read_text(errors="ignore").lower()
+            if "filebrowser" in text or "127.0.0.1:8080" in text:
+                return True
+    return False
+
+
+def shared_caddy_active():
+    if systemd_active("shared-caddy") or systemd_active("caddy"):
+        return True
+    return any(
+        not row["loopback"] and row["port"] == "443" and "caddy" in row["line"].lower()
+        for row in ss_listeners()
+    )
+
+
+def filebrowser_reverse_proxy_active():
+    if shared_caddy_active() and caddy_filebrowser_site_exists():
+        return True
+    if systemd_active("nginx") or systemd_active("filebrowser-nginx"):
+        return True
+    return False
+
+
 def label_for_listener(row):
     line = row["line"].lower()
     proc = row["process"].lower()
+    if "caddy" in line:
+        if row["port"] == "443" and caddy_filebrowser_site_exists():
+            return "Caddy(\u7f51\u76d8/Naive)"
+        return "Caddy"
     if "nginx" in line:
         return "Nginx"
     if "anytls" in line:
@@ -885,6 +924,8 @@ def label_for_listener(row):
     if "tuic" in line:
         return "TUIC"
     if "naive" in line:
+        if row["port"] == "443" and shared_caddy_active() and caddy_filebrowser_site_exists():
+            return "Caddy(\u7f51\u76d8/Naive)"
         return "NaiveProxy"
     if "sshd" in line or proc == "ssh":
         return "SSH"
@@ -1000,8 +1041,7 @@ def unit_exists(service):
 
 
 def unit_active(service):
-    code, _, _ = run(f"systemctl is-active --quiet {service}", timeout=2)
-    return code == 0
+    return systemd_active(service)
 
 
 def service_running():
@@ -1065,9 +1105,7 @@ def filebrowser_status():
     fb_code, _, _ = run("systemctl is-active --quiet filebrowser", timeout=3)
     if fb_code != 0:
         return "已关闭"
-    nginx_code, _, _ = run("systemctl is-active --quiet nginx", timeout=3)
-    standalone_code, _, _ = run("systemctl is-active --quiet filebrowser-nginx", timeout=3)
-    if nginx_code != 0 and standalone_code != 0:
+    if not filebrowser_reverse_proxy_active():
         return "反代已关闭"
     db = Path("/etc/filebrowser/filebrowser.db")
     if db.exists():
@@ -1360,6 +1398,23 @@ def try_restart_node(auto=True):
         send_message(f"❌ 节点重启失败\n[{CFG['server_name']}]\n\n请手动检查 VPS。")
 
 
+def restart_reverse_proxy():
+    candidates = [
+        ("shared-caddy", "Caddy(shared)"),
+        ("caddy", "Caddy"),
+        ("nginx", "Nginx"),
+        ("filebrowser-nginx", "FileBrowser Nginx"),
+    ]
+    for service, label in candidates:
+        if unit_exists(service):
+            run(f"systemctl restart {service}", timeout=20)
+            time.sleep(1)
+            if unit_active(service):
+                return True, f"{label} 已重启"
+            return False, f"{label} 重启后未运行"
+    return False, "未检测到 shared-caddy/caddy/nginx/filebrowser-nginx 服务"
+
+
 def clean_cache(manual=False):
     before = mem_info()
     run("sync", timeout=5)
@@ -1466,14 +1521,11 @@ def handle_callback(cb):
     elif data == "restart_node":
         send_message(f"🔄 正在重启节点...\n[{CFG['server_name']}]")
         try_restart_node(auto=False)
-    elif data == "restart_nginx":
-        send_message(f"🌐 正在重启 Nginx...\n[{CFG['server_name']}]")
-        code, _, _ = run("systemctl list-unit-files nginx.service --no-legend 2>/dev/null | grep -q nginx", timeout=4)
-        if code == 0:
-            run("systemctl restart nginx", timeout=15)
-            send_message("🌐 Nginx 已重启", keyboard())
-        else:
-            send_message("未检测到 nginx.service", keyboard())
+    elif data in ("restart_proxy", "restart_nginx"):
+        send_message(f"🌐 正在重启反代...\n[{CFG['server_name']}]")
+        ok, detail = restart_reverse_proxy()
+        icon = "✅" if ok else "⚠️"
+        send_message(f"{icon} {detail}", keyboard())
     elif data == "reboot_ask":
         send_message("⚠️ 确认重启 VPS 请发送：确认重启VPS", keyboard())
     elif data == "clean":
