@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.07.12-4"
+SCRIPT_VERSION="2026.07.12-5"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -23,6 +23,7 @@ CADDY_DATA_DIR="${CADDY_STATE_DIR}/data"
 CADDY_CONFIG_DIR="${CADDY_STATE_DIR}/config"
 CADDY_RELEASE_API="https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
 CADDY_RELEASE_ASSET="caddy-forwardproxy-naive.tar.xz"
+NAIVE_INFO_FILE="/etc/naiveproxy/node-info.env"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -640,6 +641,7 @@ verify_naive_fallback_precedence() {
 }
 
 write_caddy_config() {
+  local naive_port naive_username naive_password naive_connect=""
   info "Configuring shared Caddy HTTPS entry for File Browser..."
   ensure_caddy_binary
   ensure_shared_caddy_user
@@ -658,14 +660,45 @@ write_caddy_config() {
 
 import ${CADDY_SITE_DIR}/*.caddy
 EOF
+  if [[ -f "$NAIVE_INFO_FILE" ]]; then
+    naive_port="$(sed -n "s/^PORT='\\(.*\\)'$/\\1/p" "$NAIVE_INFO_FILE")"
+    naive_username="$(sed -n "s/^USERNAME='\\(.*\\)'$/\\1/p" "$NAIVE_INFO_FILE")"
+    naive_password="$(sed -n "s/^PASSWORD='\\(.*\\)'$/\\1/p" "$NAIVE_INFO_FILE")"
+    if [[ "$naive_port" == "443" && -n "$naive_username" && -n "$naive_password" ]]; then
+      grep -qw "$DOMAIN" /etc/hosts || echo "127.0.0.1 $DOMAIN # shared-caddy-local" >>/etc/hosts
+      naive_connect=$(cat <<EOF
+    @naive_connect method CONNECT
+    handle @naive_connect {
+        forward_proxy {
+            basic_auth $naive_username $naive_password
+            hide_ip
+            hide_via
+            probe_resistance
+            acl {
+                allow $DOMAIN
+                allow 127.0.0.1/32
+                deny 10.0.0.0/8 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 ::1/128 fe80::/10
+                allow all
+            }
+        }
+    }
+EOF
+)
+    fi
+  fi
+
   cat > "${CADDY_SITE_DIR}/filebrowser-${DOMAIN}.caddy" <<EOF
 ${DOMAIN}:443 {
     encode gzip
-    request_body {
-        max_size ${UPLOAD_LIMIT}
+
+$naive_connect
+    handle {
+        request_body {
+            max_size ${UPLOAD_LIMIT}
+        }
+        import ${CADDY_ROUTE_DIR}/${DOMAIN}/*.caddy
+        reverse_proxy 127.0.0.1:${FB_PORT}
     }
-    import ${CADDY_ROUTE_DIR}/${DOMAIN}/*.caddy
-    reverse_proxy 127.0.0.1:${FB_PORT}
 }
 EOF
   chown root:"$CADDY_SERVICE_USER" "$CADDYFILE" "${CADDY_SITE_DIR}/filebrowser-${DOMAIN}.caddy"

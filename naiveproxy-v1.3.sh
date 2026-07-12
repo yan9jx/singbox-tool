@@ -5,7 +5,7 @@
 # Caddy 自动申请和续期证书，支持 NaiveProxy 与 File Browser 使用不同域名共用 443。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.11"
+SCRIPT_VERSION="v1.13"
 INSTALL_DIR="/etc/naiveproxy"
 INFO_FILE="$INSTALL_DIR/node-info.env"
 CADDY_DIR="/etc/caddy-naive"
@@ -187,6 +187,10 @@ write_caddyfile() {
   install -d -m 750 -o root -g "$SERVICE_USER" \
     "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR/$domain"
 
+  if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" && "$port" == "443" ]]; then
+    die "NaiveProxy and File Browser cannot use the same hostname on shared TCP/443. Use separate subdomains."
+  fi
+
   cat >"$CADDYFILE" <<EOF
 {
     admin off
@@ -205,16 +209,13 @@ EOF
   # 旧版排障时可能加入过该选项；v1.2 必须保留自动证书管理。
   sed -i '/^[[:space:]]*auto_https[[:space:]]\+disable_certs[[:space:]]*$/d' "$CADDYFILE"
 
-  if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" && "$port" == "443" ]]; then
-    die "NaiveProxy and File Browser cannot use the same hostname on shared TCP/443. Use separate subdomains."
+  rm -f "$route_file"
+  if [[ "$port" == "443" ]]; then
+    site_address=":443, $domain"
   else
-    rm -f "$route_file"
-    if [[ "$port" == "443" ]]; then
-      site_address=":443, $domain"
-    else
-      site_address="$domain:$port"
-    fi
-    cat >"$site_file" <<EOF
+    site_address="$domain:$port"
+  fi
+  cat >"$site_file" <<EOF
 $site_address {
     encode
     route {
@@ -229,12 +230,58 @@ $site_address {
     }
 }
 EOF
-    chown root:"$SERVICE_USER" "$site_file"
-    chmod 640 "$site_file"
-  fi
+  chown root:"$SERVICE_USER" "$site_file"
+  chmod 640 "$site_file"
 
   chown root:"$SERVICE_USER" "$CADDYFILE"
   chmod 640 "$CADDYFILE"
+}
+
+configure_filebrowser_naive_connect() {
+  local username="$1" password="$2" site domain upstream limit
+  for site in "$CADDY_SITE_DIR"/filebrowser-*.caddy; do
+    [[ -f "$site" ]] || continue
+    domain="${site##*/filebrowser-}"
+    domain="${domain%.caddy}"
+    upstream="$(sed -n 's/^[[:space:]]*reverse_proxy[[:space:]]\+127\.0\.0\.1:\([0-9]\+\).*$/\1/p' "$site" | head -n1)"
+    limit="$(sed -n 's/^[[:space:]]*max_size[[:space:]]\+\([^[:space:]]\+\).*$/\1/p' "$site" | head -n1)"
+    [[ "$upstream" =~ ^[0-9]+$ ]] || die "Cannot determine the File Browser upstream port for $domain."
+    limit="${limit:-10G}"
+
+    grep -qw "$domain" /etc/hosts || echo "127.0.0.1 $domain # shared-caddy-local" >>/etc/hosts
+
+    cat >"$site" <<EOF
+$domain:443 {
+    encode gzip
+
+    @naive_connect method CONNECT
+    handle @naive_connect {
+        forward_proxy {
+            basic_auth $username $password
+            hide_ip
+            hide_via
+            probe_resistance
+            acl {
+                allow $domain
+                allow 127.0.0.1/32
+                deny 10.0.0.0/8 127.0.0.0/8 172.16.0.0/12 192.168.0.0/16 ::1/128 fe80::/10
+                allow all
+            }
+        }
+    }
+
+    handle {
+        request_body {
+            max_size $limit
+        }
+        import ${CADDY_ROUTE_DIR}/$domain/*.caddy
+        reverse_proxy 127.0.0.1:$upstream
+    }
+}
+EOF
+    chown root:"$SERVICE_USER" "$site"
+    chmod 640 "$site"
+  done
 }
 
 write_service() {
@@ -317,6 +364,18 @@ verify_filebrowser_precedence() {
     rm -f "$tmp"
     [[ "$host_index" =~ ^[0-9]+$ && "$fallback_index" =~ ^[0-9]+$ && "$host_index" -lt "$fallback_index" ]] ||
       die "Caddy route order is unsafe: File Browser must precede the NaiveProxy :443 fallback route."
+  done
+}
+
+verify_filebrowser_via_naive() {
+  local port="$1" domain="$2" username="$3" password="$4" site filebrowser_domain status
+  [[ "$port" == "443" ]] || return 0
+  for site in "$CADDY_SITE_DIR"/filebrowser-*.caddy; do
+    [[ -f "$site" ]] || continue
+    filebrowser_domain="${site##*/filebrowser-}"
+    filebrowser_domain="${filebrowser_domain%.caddy}"
+    status="$(curl -4ksS --proxy-insecure --noproxy '' --proxy "https://${username}:${password}@${domain}:${port}" --connect-timeout 15 --max-time 30 -o /dev/null -w '%{http_code}' "https://${filebrowser_domain}/login?redirect=/files" || true)"
+    [[ "$status" =~ ^(200|301|302|303|307|308)$ ]] || return 1
   done
 }
 
@@ -479,6 +538,7 @@ install_node() {
 
   write_decoy_site
   write_caddyfile "$domain" "$port" "$username" "$password"
+  configure_filebrowser_naive_connect "$username" "$password"
   write_service
 
   tmp="$(mktemp -d)"
@@ -490,6 +550,8 @@ install_node() {
   write_info "$name" "$domain" "$port" "$username" "$password" "$RELEASE_TAG"
   open_firewall_port "$port"
   start_service "$port"
+  verify_filebrowser_via_naive "$port" "$domain" "$username" "$password" ||
+    die "NaiveProxy cannot reach File Browser through the shared Caddy configuration. The new configuration was not accepted."
   enable_auto_update
 
   echo
@@ -536,10 +598,13 @@ reset_password() {
   version="$(info_value SERVER_VERSION)"
   password="$(openssl rand -hex 24)"
   write_caddyfile "$domain" "$port" "$username" "$password"
+  configure_filebrowser_naive_connect "$username" "$password"
   validate_caddy "$BIN"
   systemctl restart "$SERVICE_NAME"
   systemctl is-active --quiet "$SERVICE_NAME" || die "重置密码后服务启动失败。"
   write_info "$name" "$domain" "$port" "$username" "$password" "$version"
+  verify_filebrowser_via_naive "$port" "$domain" "$username" "$password" ||
+    die "NaiveProxy cannot reach File Browser through the shared Caddy configuration."
   echo "密码已重置，请在客户端更新节点。"
   show_config
 }
@@ -569,6 +634,7 @@ repair_shared_caddy() {
   ensure_service_user
   write_decoy_site
   write_caddyfile "$domain" "$port" "$username" "$password"
+  configure_filebrowser_naive_connect "$username" "$password"
   write_service
   validate_caddy "$BIN"
   systemctl daemon-reload
@@ -577,6 +643,8 @@ repair_shared_caddy() {
   systemctl is-active --quiet "$SERVICE_NAME" || die "shared-caddy did not start after repair."
   verify_filebrowser_precedence "$port"
   port_is_listening "$port" || die "shared-caddy is not listening on TCP/$port after repair."
+  verify_filebrowser_via_naive "$port" "$domain" "$username" "$password" ||
+    die "NaiveProxy cannot reach File Browser through the shared Caddy configuration."
   echo "shared-caddy repair completed."
 }
 
