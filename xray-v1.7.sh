@@ -210,6 +210,9 @@ ensure_shared_caddy_base() {
 {
     admin off
     auto_https disable_redirects
+    servers {
+        protocols h1 h2
+    }
     log {
         output discard
     }

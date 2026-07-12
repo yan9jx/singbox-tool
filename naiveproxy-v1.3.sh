@@ -5,7 +5,7 @@
 # Caddy 自动申请和续期证书，支持 NaiveProxy 与 File Browser 使用不同域名共用 443。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.10"
+SCRIPT_VERSION="v1.11"
 INSTALL_DIR="/etc/naiveproxy"
 INFO_FILE="$INSTALL_DIR/node-info.env"
 CADDY_DIR="/etc/caddy-naive"
@@ -191,6 +191,9 @@ write_caddyfile() {
 {
     admin off
     auto_https disable_redirects
+    servers {
+        protocols h1 h2
+    }
     log {
         output discard
     }

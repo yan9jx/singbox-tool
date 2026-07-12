@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.07.12-3"
+SCRIPT_VERSION="2026.07.12-4"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -646,9 +646,11 @@ write_caddy_config() {
   install -d -m 750 -o root -g "$CADDY_SERVICE_USER" "$CADDY_DIR" "$CADDY_SITE_DIR" "$CADDY_ROUTE_DIR/${DOMAIN}"
   cat > "$CADDYFILE" <<EOF
 {
-    order forward_proxy before reverse_proxy
     admin off
     auto_https disable_redirects
+    servers {
+        protocols h1 h2
+    }
     log {
         output discard
     }
