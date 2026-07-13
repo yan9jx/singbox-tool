@@ -641,7 +641,7 @@ verify_naive_fallback_precedence() {
 }
 
 write_caddy_config() {
-  local naive_port naive_username naive_password naive_connect=""
+  local naive_port naive_username naive_password
   info "Configuring shared Caddy HTTPS entry for File Browser..."
   ensure_caddy_binary
   ensure_shared_caddy_user
@@ -666,9 +666,9 @@ EOF
     naive_password="$(sed -n "s/^PASSWORD='\\(.*\\)'$/\\1/p" "$NAIVE_INFO_FILE")"
     if [[ "$naive_port" == "443" && -n "$naive_username" && -n "$naive_password" ]]; then
       grep -qw "$DOMAIN" /etc/hosts || echo "127.0.0.1 $DOMAIN # shared-caddy-local" >>/etc/hosts
-      naive_connect=$(cat <<EOF
-    @naive_connect method CONNECT
-    handle @naive_connect {
+      cat > "${CADDY_ROUTE_DIR}/${DOMAIN}/naive-connect.caddy" <<EOF
+@naive_connect method CONNECT
+handle @naive_connect {
         forward_proxy {
             basic_auth $naive_username $naive_password
             hide_ip
@@ -681,9 +681,12 @@ EOF
                 allow all
             }
         }
-    }
+}
 EOF
-)
+      chown root:"$CADDY_SERVICE_USER" "${CADDY_ROUTE_DIR}/${DOMAIN}/naive-connect.caddy"
+      chmod 640 "${CADDY_ROUTE_DIR}/${DOMAIN}/naive-connect.caddy"
+    else
+      rm -f "${CADDY_ROUTE_DIR}/${DOMAIN}/naive-connect.caddy"
     fi
   fi
 
@@ -691,7 +694,6 @@ EOF
 ${DOMAIN}:443 {
     encode gzip
 
-$naive_connect
     handle {
         request_body {
             max_size ${UPLOAD_LIMIT}

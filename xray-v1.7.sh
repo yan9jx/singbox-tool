@@ -430,7 +430,7 @@ install_node() {
     echo "检测到 File Browser 正在共用 ${domain}:443；保留网盘根路径，XHTTP 只添加随机路径路由。"
     cover_domain=""
   else
-    read -r -p "反代伪装网站域名（例如 www.example.com；留空则根路径返回 404）: " cover_domain
+    read -r -p "反代伪装网站域名（例如 www.example.com；直接回车不使用，根路径返回 404）: " cover_domain
     cover_domain="${cover_domain#https://}"; cover_domain="${cover_domain#http://}"; cover_domain="${cover_domain%%/*}"; cover_domain="${cover_domain,,}"
     [[ "$cover_domain" == "0" || "$cover_domain" == "none" || "$cover_domain" == "no" ]] && cover_domain=""
     if [[ -n "$cover_domain" ]]; then
