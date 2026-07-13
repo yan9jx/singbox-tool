@@ -288,16 +288,19 @@ async function receiveXhttpNode(request, env) {
   const sni = cleanText(input?.sni, 255);
   const path = cleanText(input?.path, 512);
   const host = cleanText(input?.host || sni, 255);
+  const encryption = cleanText(input?.encryption || "none", 4096);
   if (!/^[0-9a-fA-F-]{36}$/.test(uuid)) return json({ ok: false, error: "UUID 格式错误" }, 400);
   if (!/^[A-Za-z0-9.-]+$/.test(sni)) return json({ ok: false, error: "SNI 格式错误" }, 400);
   if (!/^[A-Za-z0-9.-]+$/.test(host)) return json({ ok: false, error: "Host 格式错误" }, 400);
   if (!path.startsWith("/") || /[\s?#]/.test(path)) return json({ ok: false, error: "XHTTP 路径格式错误" }, 400);
+  if (!/^[A-Za-z0-9._-]+$/.test(encryption)) return json({ ok: false, error: "VLESS Encryption 参数格式错误" }, 400);
   return upsertProtocolNode(request, env, "xhttp", {
     ...common,
     uuid,
     sni,
     path,
     host,
+    encryption,
     insecure: input?.insecure === true,
   });
 }
@@ -1465,7 +1468,7 @@ function subscriptionYaml(nodes) {
     if (node.protocol === "xhttp") {
       return [...common,
         `    uuid: ${yamlString(node.uuid)}`,
-        '    encryption: ""',
+        `    encryption: ${yamlString(node.encryption || "none")}`,
         "    network: xhttp",
         "    tls: true",
         "    udp: true",
@@ -1591,11 +1594,12 @@ function subscriptionUri(nodes, format = "uri") {
           path: node.path,
           obfsParam: node.host || node.sni,
           mode: "auto",
+          encryption: node.encryption || "none",
         });
         return `vless://${userInfo}?${query.toString()}`;
       }
       const query = new URLSearchParams({
-        encryption: "none",
+        encryption: node.encryption || "none",
         security: "tls",
         sni: node.sni,
         fp: "chrome",
