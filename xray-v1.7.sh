@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v2.3"
+SCRIPT_VERSION="v2.4"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -39,6 +39,18 @@ json_escape() {
   value="${value//$'\r'/\\r}"
   value="${value//$'\t'/\\t}"
   printf '%s' "$value"
+}
+
+urlencode() { jq -nr --arg value "$1" '$value|@uri'; }
+
+generate_vless_encryption_pair() {
+  local pair decryption_type encryption_type
+  pair="$("$XRAY_BIN" vlessenc)" || die "VLESS Encryption 参数生成失败。"
+  decryption_type="$(jq -er '.decryption | type' <<<"$pair")" || die "VLESS Encryption 服务端参数格式错误。"
+  encryption_type="$(jq -er '.encryption | type' <<<"$pair")" || die "VLESS Encryption 客户端参数格式错误。"
+  [[ "$decryption_type" == "string" && "$encryption_type" == "string" ]] ||
+    die "当前 Xray-core 返回的 VLESS Encryption 参数格式不受此脚本支持。"
+  jq -er '[.decryption, .encryption] | @tsv' <<<"$pair"
 }
 
 valid_domain() {
@@ -408,17 +420,28 @@ install_node() {
   systemctl stop xray-xhttp 2>/dev/null || true
 
   local domain ip port uuid path name tmp link cover_domain caddy_conf
+  local vless_decryption="none" vless_encryption="none" encryption_pair
   read -r -p "请输入已解析到本机的 XHTTP 域名/子域名：" domain
   domain="${domain#https://}"; domain="${domain%%/*}"; domain="${domain,,}"
   valid_domain "$domain" || die "域名格式不正确。"
   ip="$(public_ipv4)"; [[ -n "$ip" ]] || die "无法检测本机公网 IPv4。"
   check_domain "$domain" "$ip"
-  cover_domain=""
-  cover_domain="${cover_domain#https://}"; cover_domain="${cover_domain#http://}"; cover_domain="${cover_domain%%/*}"; cover_domain="${cover_domain,,}"
-  [[ "$cover_domain" == "0" || "$cover_domain" == "none" || "$cover_domain" == "no" ]] && cover_domain=""
-  if [[ -n "$cover_domain" ]]; then
-    valid_domain "$cover_domain" || die "根路径反代域名格式不正确。"
-    [[ "$cover_domain" != "$domain" ]] || die "根路径反代域名不能和 XHTTP 域名相同，否则会形成循环反代。"
+  if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" ]]; then
+    echo "检测到 File Browser 正在共用 ${domain}:443；保留网盘根路径，XHTTP 只添加随机路径路由。"
+    cover_domain=""
+  else
+    read -r -p "反代伪装网站域名（例如 www.example.com；留空则根路径返回 404）: " cover_domain
+    cover_domain="${cover_domain#https://}"; cover_domain="${cover_domain#http://}"; cover_domain="${cover_domain%%/*}"; cover_domain="${cover_domain,,}"
+    [[ "$cover_domain" == "0" || "$cover_domain" == "none" || "$cover_domain" == "no" ]] && cover_domain=""
+    if [[ -n "$cover_domain" ]]; then
+      valid_domain "$cover_domain" || die "根路径反代域名格式不正确。"
+      [[ "$cover_domain" != "$domain" ]] || die "根路径反代域名不能和 XHTTP 域名相同，否则会形成循环反代。"
+    fi
+  fi
+  if confirm_yes "是否启用 VLESS Encryption（默认开启；输入 n 关闭；需要兼容的新版 Xray 客户端）?"; then
+    encryption_pair="$(generate_vless_encryption_pair)"
+    IFS=$'\t' read -r vless_decryption vless_encryption <<<"$encryption_pair"
+    [[ -n "$vless_decryption" && -n "$vless_encryption" ]] || die "VLESS Encryption 参数读取失败。"
   fi
   port="$(local_port)"
   uuid="$(cat /proc/sys/kernel/random/uuid)"
@@ -434,7 +457,7 @@ install_node() {
     "listen": "127.0.0.1",
     "port": $port,
     "protocol": "vless",
-    "settings": { "clients": [{ "id": "$uuid", "email": "xhttp" }], "decryption": "none" },
+    "settings": { "clients": [{ "id": "$uuid", "email": "xhttp" }], "decryption": "$(json_escape "$vless_decryption")" },
     "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "$path", "mode": "auto" } }
   }],
   "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
@@ -451,7 +474,7 @@ EOF
     caddy_conf="${CADDY_SITE_DIR}/xray-${domain}.caddy"
   fi
 
-  link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&type=xhttp&path=${path}&mode=auto#${name}"
+  link="vless://${uuid}@${domain}:443?encryption=$(urlencode "$vless_encryption")&security=tls&sni=${domain}&fp=chrome&type=xhttp&path=${path}&mode=auto#${name}"
   cat >"$XRAY_INFO" <<EOF
 NODE_NAME='$name'
 DOMAIN='$domain'
@@ -460,6 +483,7 @@ PATH='$path'
 UUID='$uuid'
 CADDY_CONF='$caddy_conf'
 COVER_DOMAIN='$cover_domain'
+VLESS_ENCRYPTION='$vless_encryption'
 LINK='$link'
 EOF
   chmod 600 "$XRAY_INFO"
