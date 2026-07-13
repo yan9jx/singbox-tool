@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v2.5"
+SCRIPT_VERSION="v2.6"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -376,7 +376,7 @@ write_caddy() {
   if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" ]]; then
     rm -f "$site_file"
     cat >"$route_file" <<EOF
-handle_path ${path}* {
+handle ${path}* {
     reverse_proxy 127.0.0.1:${port}
 }
 EOF
@@ -385,7 +385,7 @@ EOF
     cat >"$site_file" <<EOF
 ${domain}:443 {
     encode gzip
-    handle_path ${path}* {
+    handle ${path}* {
         reverse_proxy 127.0.0.1:${port}
     }
 EOF
