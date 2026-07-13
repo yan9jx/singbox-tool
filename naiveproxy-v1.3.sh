@@ -5,7 +5,7 @@
 # Caddy 自动申请和续期证书，支持 NaiveProxy 与 File Browser 使用不同域名共用 443。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.13"
+SCRIPT_VERSION="v1.14"
 INSTALL_DIR="/etc/naiveproxy"
 INFO_FILE="$INSTALL_DIR/node-info.env"
 CADDY_DIR="/etc/caddy-naive"
@@ -180,7 +180,7 @@ EOF
 }
 
 write_caddyfile() {
-  local domain="$1" port="$2" username="$3" password="$4" site_file route_file site_address
+  local domain="$1" port="$2" username="$3" password="$4" cover_domain="$5" site_file route_file site_address
   site_file="${CADDY_SITE_DIR}/naive-${domain}.caddy"
   route_file="${CADDY_ROUTE_DIR}/${domain}/naive.caddy"
 
@@ -225,8 +225,20 @@ $site_address {
             hide_via
             probe_resistance
         }
+EOF
+  if [[ -n "$cover_domain" ]]; then
+    cat >>"$site_file" <<EOF
+        reverse_proxy https://${cover_domain} {
+            header_up Host ${cover_domain}
+        }
+EOF
+  else
+    cat >>"$site_file" <<EOF
         root * $WEB_ROOT
         file_server
+EOF
+  fi
+  cat >>"$site_file" <<'EOF'
     }
 }
 EOF
@@ -238,24 +250,28 @@ EOF
 }
 
 configure_filebrowser_naive_connect() {
-  local username="$1" password="$2" site domain upstream limit
+  local username="$1" password="$2" site domain route_dir route_file
+
+  # Refuse before touching any route if an older File Browser site lacks the shared-route hook.
   for site in "$CADDY_SITE_DIR"/filebrowser-*.caddy; do
     [[ -f "$site" ]] || continue
     domain="${site##*/filebrowser-}"
     domain="${domain%.caddy}"
-    upstream="$(sed -n 's/^[[:space:]]*reverse_proxy[[:space:]]\+127\.0\.0\.1:\([0-9]\+\).*$/\1/p' "$site" | head -n1)"
-    limit="$(sed -n 's/^[[:space:]]*max_size[[:space:]]\+\([^[:space:]]\+\).*$/\1/p' "$site" | head -n1)"
-    [[ "$upstream" =~ ^[0-9]+$ ]] || die "Cannot determine the File Browser upstream port for $domain."
-    limit="${limit:-10G}"
+    grep -Fq "import ${CADDY_ROUTE_DIR}/${domain}/*.caddy" "$site" ||
+      die "File Browser site $domain does not support shared Caddy route fragments; it was left unchanged."
+  done
 
+  for site in "$CADDY_SITE_DIR"/filebrowser-*.caddy; do
+    [[ -f "$site" ]] || continue
+    domain="${site##*/filebrowser-}"
+    domain="${domain%.caddy}"
     grep -qw "$domain" /etc/hosts || echo "127.0.0.1 $domain # shared-caddy-local" >>/etc/hosts
-
-    cat >"$site" <<EOF
-$domain:443 {
-    encode gzip
-
-    @naive_connect method CONNECT
-    handle @naive_connect {
+    route_dir="${CADDY_ROUTE_DIR}/${domain}"
+    route_file="${route_dir}/naive-connect.caddy"
+    install -d -m 750 -o root -g "$SERVICE_USER" "$route_dir"
+    cat >"$route_file" <<EOF
+@naive_connect method CONNECT
+handle @naive_connect {
         forward_proxy {
             basic_auth $username $password
             hide_ip
@@ -268,19 +284,10 @@ $domain:443 {
                 allow all
             }
         }
-    }
-
-    handle {
-        request_body {
-            max_size $limit
-        }
-        import ${CADDY_ROUTE_DIR}/$domain/*.caddy
-        reverse_proxy 127.0.0.1:$upstream
-    }
 }
 EOF
-    chown root:"$SERVICE_USER" "$site"
-    chmod 640 "$site"
+    chown root:"$SERVICE_USER" "$route_file"
+    chmod 640 "$route_file"
   done
 }
 
@@ -387,7 +394,7 @@ make_uri() {
 }
 
 write_info() {
-  local name="$1" domain="$2" port="$3" username="$4" password="$5" version="$6" uri
+  local name="$1" domain="$2" port="$3" username="$4" password="$5" version="$6" cover_domain="$7" uri
   uri="$(make_uri "$domain" "$port" "$username" "$password" "$name")"
   cat >"$INFO_FILE" <<EOF
 NODE_NAME='$name'
@@ -396,6 +403,7 @@ PORT='$port'
 USERNAME='$username'
 PASSWORD='$password'
 SERVER_VERSION='$version'
+COVER_DOMAIN='$cover_domain'
 URI='$uri'
 EOF
   chmod 600 "$INFO_FILE"
@@ -515,13 +523,21 @@ install_node() {
   configure_bbr
   install_self
 
-  local domain ip port name username password tmp
+  local domain ip port name username password cover_domain tmp
   read -r -p "请输入已解析到本机的 NaiveProxy 域名：" domain
   domain="${domain#https://}"; domain="${domain%%/*}"; domain="${domain,,}"
   valid_domain "$domain" || die "域名格式不正确。"
   ip="$(public_ipv4)"
   [[ -n "$ip" ]] || die "无法检测本机公网 IPv4。"
   check_domain "$domain" "$ip"
+
+  read -r -p "反代伪装网站域名（例如 www.example.com；直接回车不使用）: " cover_domain
+  cover_domain="${cover_domain#https://}"; cover_domain="${cover_domain#http://}"
+  cover_domain="${cover_domain%%/*}"; cover_domain="${cover_domain,,}"
+  if [[ -n "$cover_domain" ]]; then
+    valid_domain "$cover_domain" || die "伪装网站域名格式不正确。"
+    [[ "$cover_domain" != "$domain" ]] || die "伪装网站不能与 NaiveProxy 域名相同，以免形成反向代理循环。"
+  fi
 
   systemctl stop naiveproxy 2>/dev/null || true
   ensure_service_user
@@ -537,7 +553,7 @@ install_node() {
   password="$(openssl rand -hex 24)"
 
   write_decoy_site
-  write_caddyfile "$domain" "$port" "$username" "$password"
+  write_caddyfile "$domain" "$port" "$username" "$password" "$cover_domain"
   configure_filebrowser_naive_connect "$username" "$password"
   write_service
 
@@ -547,7 +563,7 @@ install_node() {
   install -m 755 "$RELEASE_BINARY" "$BIN"
   rm -rf "$tmp"
 
-  write_info "$name" "$domain" "$port" "$username" "$password" "$RELEASE_TAG"
+  write_info "$name" "$domain" "$port" "$username" "$password" "$RELEASE_TAG" "$cover_domain"
   open_firewall_port "$port"
   start_service "$port"
   verify_filebrowser_via_naive "$port" "$domain" "$username" "$password" ||
@@ -590,19 +606,20 @@ update_server() {
 
 reset_password() {
   require_install
-  local name domain port username password version
+  local name domain port username password version cover_domain
   name="$(info_value NODE_NAME)"
   domain="$(info_value DOMAIN)"
   port="$(info_value PORT)"
   username="$(info_value USERNAME)"
   version="$(info_value SERVER_VERSION)"
+  cover_domain="$(info_value COVER_DOMAIN)"
   password="$(openssl rand -hex 24)"
-  write_caddyfile "$domain" "$port" "$username" "$password"
+  write_caddyfile "$domain" "$port" "$username" "$password" "$cover_domain"
   configure_filebrowser_naive_connect "$username" "$password"
   validate_caddy "$BIN"
   systemctl restart "$SERVICE_NAME"
   systemctl is-active --quiet "$SERVICE_NAME" || die "重置密码后服务启动失败。"
-  write_info "$name" "$domain" "$port" "$username" "$password" "$version"
+  write_info "$name" "$domain" "$port" "$username" "$password" "$version" "$cover_domain"
   verify_filebrowser_via_naive "$port" "$domain" "$username" "$password" ||
     die "NaiveProxy cannot reach File Browser through the shared Caddy configuration."
   echo "密码已重置，请在客户端更新节点。"
@@ -623,17 +640,18 @@ restart_node() {
 
 repair_shared_caddy() {
   require_install
-  local domain port username password
+  local domain port username password cover_domain
   domain="$(info_value DOMAIN)"
   port="$(info_value PORT)"
   username="$(info_value USERNAME)"
   password="$(info_value PASSWORD)"
+  cover_domain="$(info_value COVER_DOMAIN)"
   valid_domain "$domain" || die "Saved NaiveProxy domain is invalid."
   validate_port "$port" || die "Saved NaiveProxy port is invalid."
 
   ensure_service_user
   write_decoy_site
-  write_caddyfile "$domain" "$port" "$username" "$password"
+  write_caddyfile "$domain" "$port" "$username" "$password" "$cover_domain"
   configure_filebrowser_naive_connect "$username" "$password"
   write_service
   validate_caddy "$BIN"
@@ -650,13 +668,19 @@ repair_shared_caddy() {
 
 uninstall_node() {
   confirm_yes "是否卸载本脚本创建的 NaiveProxy？" || return 0
-  local domain other_sites=false
+  local domain site filebrowser_domain other_sites=false
   domain="$(info_value DOMAIN 2>/dev/null || true)"
 
   systemctl disable --now naiveproxy-update.timer 2>/dev/null || true
   if [[ -n "$domain" ]]; then
     rm -f "${CADDY_ROUTE_DIR}/${domain}/naive.caddy" "${CADDY_SITE_DIR}/naive-${domain}.caddy"
   fi
+  for site in "$CADDY_SITE_DIR"/filebrowser-*.caddy; do
+    [[ -f "$site" ]] || continue
+    filebrowser_domain="${site##*/filebrowser-}"
+    filebrowser_domain="${filebrowser_domain%.caddy}"
+    rm -f "${CADDY_ROUTE_DIR}/${filebrowser_domain}/naive-connect.caddy"
+  done
   rm -f "$UPDATE_SERVICE" "$UPDATE_TIMER" "$MANAGER"
   rm -rf "$INSTALL_DIR" "$WEB_ROOT"
 
