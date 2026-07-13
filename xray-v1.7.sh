@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v2.4"
+SCRIPT_VERSION="v2.5"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -44,13 +44,13 @@ json_escape() {
 urlencode() { jq -nr --arg value "$1" '$value|@uri'; }
 
 generate_vless_encryption_pair() {
-  local pair decryption_type encryption_type
-  pair="$("$XRAY_BIN" vlessenc)" || die "VLESS Encryption 参数生成失败。"
-  decryption_type="$(jq -er '.decryption | type' <<<"$pair")" || die "VLESS Encryption 服务端参数格式错误。"
-  encryption_type="$(jq -er '.encryption | type' <<<"$pair")" || die "VLESS Encryption 客户端参数格式错误。"
-  [[ "$decryption_type" == "string" && "$encryption_type" == "string" ]] ||
+  local output decryption encryption
+  output="$("$XRAY_BIN" vlessenc)" || die "VLESS Encryption 参数生成失败。"
+  decryption="$(sed -n 's/^[[:space:]]*"decryption":[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' <<<"$output" | head -n1)"
+  encryption="$(sed -n 's/^[[:space:]]*"encryption":[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' <<<"$output" | head -n1)"
+  [[ "$decryption" =~ ^[A-Za-z0-9._-]+$ && "$encryption" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die "当前 Xray-core 返回的 VLESS Encryption 参数格式不受此脚本支持。"
-  jq -er '[.decryption, .encryption] | @tsv' <<<"$pair"
+  printf '%s\t%s\n' "$decryption" "$encryption"
 }
 
 valid_domain() {
@@ -531,15 +531,19 @@ load_subscription_identity() {
 
 sync_subscription_node() {
   require_node_files
-  local quiet="${1:-false}" name domain uuid path payload response subscription_url
+  local quiet="${1:-false}" name domain uuid path encryption payload response subscription_url
   name="$(info_value NODE_NAME)"
   domain="$(info_value DOMAIN)"
   uuid="$(info_value UUID)"
   path="$(info_value PATH)"
+  encryption="$(info_value VLESS_ENCRYPTION)"
+  encryption="${encryption:-none}"
+  [[ "$encryption" =~ ^[A-Za-z0-9._-]+$ ]] || die "保存的 VLESS Encryption 客户端参数格式错误。"
   load_subscription_identity
-  payload="$(printf '{"node_id":"%s","name":"%s","server":"%s","port":443,"uuid":"%s","sni":"%s","host":"%s","path":"%s","insecure":false}' \
+  payload="$(printf '{"node_id":"%s","name":"%s","server":"%s","port":443,"uuid":"%s","sni":"%s","host":"%s","path":"%s","encryption":"%s","insecure":false}' \
     "$(json_escape "$SUB_NODE_ID")" "$(json_escape "$name")" "$(json_escape "$domain")" \
-    "$(json_escape "$uuid")" "$(json_escape "$domain")" "$(json_escape "$domain")" "$(json_escape "$path")")"
+    "$(json_escape "$uuid")" "$(json_escape "$domain")" "$(json_escape "$domain")" "$(json_escape "$path")" \
+    "$(json_escape "$encryption")")"
   if ! response="$(curl -fsS --max-time 20 -X POST "${SUB_DASHBOARD_URL}/api/v1/xhttp" \
     -H "Authorization: Bearer ${SUB_INGEST_TOKEN}" -H "Content-Type: application/json" --data "$payload")"; then
     echo "警告：XHTTP 节点未能登记到聚合订阅服务。" >&2

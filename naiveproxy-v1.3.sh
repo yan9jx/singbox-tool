@@ -5,7 +5,7 @@
 # Caddy 自动申请和续期证书，支持 NaiveProxy 与 File Browser 使用不同域名共用 443。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.14"
+SCRIPT_VERSION="v1.15"
 INSTALL_DIR="/etc/naiveproxy"
 INFO_FILE="$INSTALL_DIR/node-info.env"
 CADDY_DIR="/etc/caddy-naive"
@@ -249,6 +249,54 @@ EOF
   chmod 640 "$CADDYFILE"
 }
 
+remove_legacy_filebrowser_naive_connect() {
+  local site="$1" tmp
+  grep -qE '^[[:space:]]*@naive_connect[[:space:]]+method[[:space:]]+CONNECT[[:space:]]*$' "$site" || return 0
+
+  tmp="$(mktemp)"
+  if ! awk '
+    BEGIN { state = 0; depth = 0; removed = 0; failed = 0 }
+    state == 0 && $0 ~ /^[[:space:]]*@naive_connect[[:space:]]+method[[:space:]]+CONNECT[[:space:]]*$/ {
+      state = 1
+      removed = 1
+      next
+    }
+    state == 1 {
+      if ($0 ~ /^[[:space:]]*$/) next
+      if ($0 ~ /^[[:space:]]*handle[[:space:]]+@naive_connect[[:space:]]*\{[[:space:]]*$/) {
+        line = $0
+        depth = gsub(/\{/, "{", line) - gsub(/\}/, "}", line)
+        state = depth > 0 ? 2 : 0
+        next
+      }
+      failed = 1
+      exit
+    }
+    state == 2 {
+      line = $0
+      depth += gsub(/\{/, "{", line) - gsub(/\}/, "}", line)
+      if (depth <= 0) state = 0
+      next
+    }
+    { print }
+    END {
+      if (failed) exit 2
+      if (state != 0 || !removed) exit 3
+    }
+  ' "$site" >"$tmp"; then
+    rm -f "$tmp"
+    die "无法安全迁移 File Browser 旧版 Naive CONNECT 配置：$site"
+  fi
+
+  grep -qE '^[[:space:]]*@naive_connect[[:space:]]+method[[:space:]]+CONNECT[[:space:]]*$' "$tmp" && {
+    rm -f "$tmp"
+    die "File Browser 旧版 Naive CONNECT 配置未清理完整：$site"
+  }
+  install -m 640 -o root -g "$SERVICE_USER" "$tmp" "$site"
+  rm -f "$tmp"
+  echo "已将 $site 中的旧版 Naive CONNECT 规则迁移到独立路由片段。"
+}
+
 configure_filebrowser_naive_connect() {
   local username="$1" password="$2" site domain route_dir route_file
 
@@ -265,6 +313,7 @@ configure_filebrowser_naive_connect() {
     [[ -f "$site" ]] || continue
     domain="${site##*/filebrowser-}"
     domain="${domain%.caddy}"
+    remove_legacy_filebrowser_naive_connect "$site"
     grep -qw "$domain" /etc/hosts || echo "127.0.0.1 $domain # shared-caddy-local" >>/etc/hosts
     route_dir="${CADDY_ROUTE_DIR}/${domain}"
     route_file="${route_dir}/naive-connect.caddy"
