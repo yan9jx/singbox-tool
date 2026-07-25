@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # Pure-IPv6 VPS: route IPv4 through Cloudflare WARP on demand while leaving
 # every IPv6 route, address, DNS setting, and firewall rule untouched.
 
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.0.3"
 NAME="warp-ipv4"
 WG_IF="warp-ipv4"
 WG_CONF="/etc/wireguard/${WG_IF}.conf"
@@ -19,7 +19,6 @@ ROLLBACK_UNIT="${NAME}-rollback"
 ROLLBACK_SECONDS=180
 WARP_ROUTE_METRIC=5
 TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
-IPV6_CHECK_URL="https://api64.ipify.org"
 WARP_API="https://api.cloudflareclient.com/v0a1922/reg"
 WARP_ENDPOINT_HOST="engage.cloudflareclient.com"
 WARP_ENDPOINT_PORT="2408"
@@ -108,7 +107,8 @@ check_wireguard_kernel() {
 }
 
 native_ipv6() {
-  curl -6 --proto '=https' --tlsv1.2 -fsS --max-time 15 "$IPV6_CHECK_URL"
+  ip -6 route get 2606:4700:4700::1111 2>/dev/null \
+    | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}'
 }
 
 check_native_ipv6() {
@@ -120,7 +120,7 @@ check_native_ipv6() {
   ip -6 route get 2606:4700:4700::1111 >/dev/null 2>&1 \
     || die "IPv6 路由不可达，拒绝继续。"
 
-  public_v6="$(native_ipv6)" || die "无法通过原生 IPv6 访问 $IPV6_CHECK_URL。"
+  public_v6="$(native_ipv6)" || die "无法读取原生 IPv6 出口地址。"
   [[ "$public_v6" == *:* ]] || die "IPv6 公网地址检查结果异常：$public_v6"
 }
 
@@ -355,8 +355,19 @@ verify_ipv6_unchanged() {
 }
 
 warp_trace() {
-  curl -4 --interface "$WG_IF" \
-    --proto '=https' --tlsv1.2 -fsS --max-time 20 "$TRACE_URL"
+  local trace
+
+  for _ in 1 2 3; do
+    if trace="$(
+      curl -4 --interface "$WG_IF" \
+        --proto '=https' --tlsv1.2 -fsS --max-time 20 "$TRACE_URL" 2>/dev/null
+    )"; then
+      printf '%s\n' "$trace"
+      return
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 verify_warp_ipv4() {
