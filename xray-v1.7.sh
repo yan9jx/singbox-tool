@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v2.8"
+SCRIPT_VERSION="v2.9"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -120,18 +120,23 @@ EOF
 }
 
 install_xray() {
-  local machine asset latest tmp zip binary
+  local machine asset digest tmp zip binary latest="v26.3.27"
   [[ -x "$XRAY_BIN" ]] && return
   machine="$(uname -m)"
   case "$machine" in
-    x86_64|amd64) asset="Xray-linux-64.zip" ;;
-    aarch64|arm64) asset="Xray-linux-arm64-v8a.zip" ;;
+    x86_64|amd64)
+      asset="Xray-linux-64.zip"
+      digest="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
+      ;;
+    aarch64|arm64)
+      asset="Xray-linux-arm64-v8a.zip"
+      digest="4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
+      ;;
     *) die "不支持的 CPU 架构：$machine" ;;
   esac
-  latest="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
-  [[ -n "$latest" ]] || die "无法获取 Xray 最新版本。"
   tmp="$(mktemp -d)"; zip="$tmp/xray.zip"
-  curl -fL "https://github.com/XTLS/Xray-core/releases/download/${latest}/${asset}" -o "$zip"
+  curl -fL --retry 3 "https://github.com/XTLS/Xray-core/releases/download/${latest}/${asset}" -o "$zip"
+  printf '%s  %s\n' "$digest" "$zip" | sha256sum -c - >/dev/null || die "Xray 安装包 SHA-256 校验失败。"
   unzip -q "$zip" -d "$tmp"
   binary="$tmp/xray"
   [[ -x "$binary" ]] || die "Xray 安装包不完整。"
