@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # GitHub-ready interactive File Browser installer for Debian/Ubuntu and RHEL-compatible VPSes.
 
-SCRIPT_VERSION="2026.07.12-5"
+SCRIPT_VERSION="2026.07.25-6"
 FB_DB="/etc/filebrowser/filebrowser.db"
 FB_ROOT="/srv/filebrowser"
 FB_PORT="8080"
@@ -244,13 +244,9 @@ install_packages() {
 }
 
 fetch_caddy_release() {
-  local release_json
-  release_json="$(curl -fsSL --max-time 30 "$CADDY_RELEASE_API")" || die "Failed to query Caddy/NaiveProxy release."
-  CADDY_RELEASE_TAG="$(jq -er '.tag_name' <<<"$release_json")" || die "Caddy/NaiveProxy release has no tag."
-  CADDY_RELEASE_URL="$(jq -er --arg name "$CADDY_RELEASE_ASSET" '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json")" ||
-    die "Caddy/NaiveProxy release is missing $CADDY_RELEASE_ASSET."
-  CADDY_RELEASE_DIGEST="$(jq -er --arg name "$CADDY_RELEASE_ASSET" '.assets[] | select(.name == $name) | .digest // ""' <<<"$release_json" |
-    sed 's/^sha256://')" || true
+  CADDY_RELEASE_TAG="v2.11.2-naive"
+  CADDY_RELEASE_URL="https://github.com/klzgrad/forwardproxy/releases/download/${CADDY_RELEASE_TAG}/${CADDY_RELEASE_ASSET}"
+  CADDY_RELEASE_DIGEST="19eccb7321dd877a5fb4a3dba6ef1b745185188b616c96cc6201f1a1fc0380a8"
 }
 
 ensure_caddy_binary() {
