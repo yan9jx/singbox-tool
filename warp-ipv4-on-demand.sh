@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # Pure-IPv6 VPS: route IPv4 through Cloudflare WARP on demand while leaving
 # every IPv6 route, address, DNS setting, and firewall rule untouched.
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 NAME="warp-ipv4"
 WG_IF="warp-ipv4"
 WG_CONF="/etc/wireguard/${WG_IF}.conf"
@@ -124,12 +124,43 @@ check_native_ipv6() {
   [[ "$public_v6" == *:* ]] || die "IPv6 公网地址检查结果异常：$public_v6"
 }
 
+is_private_ipv4() {
+  local address="$1"
+  local second_octet
+
+  case "$address" in
+    10.*|192.168.*|169.254.*) return 0 ;;
+    172.*)
+      second_octet="${address#172.}"
+      second_octet="${second_octet%%.*}"
+      (( second_octet >= 16 && second_octet <= 31 ))
+      return
+      ;;
+    100.*)
+      second_octet="${address#100.}"
+      second_octet="${second_octet%%.*}"
+      (( second_octet >= 64 && second_octet <= 127 ))
+      return
+      ;;
+  esac
+  return 1
+}
+
 check_pure_ipv6_host() {
-  local default_v4
+  local default_v4 route_probe source_v4
 
   default_v4="$(ip -4 route show default)"
-  [[ -z "$default_v4" ]] || die \
-    "检测到原生 IPv4 默认路由；本脚本只允许用于纯 IPv6 VPS，拒绝改动：$default_v4"
+  [[ -n "$default_v4" ]] || return
+
+  route_probe="$(ip -4 route get 1.1.1.1 2>/dev/null || true)"
+  source_v4="$(awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}' <<< "$route_probe")"
+
+  if [[ -n "$source_v4" ]] && is_private_ipv4 "$source_v4"; then
+    info "检测到云厂商内网 IPv4（$source_v4），没有把它当作公网 IPv4；允许继续。"
+    return
+  fi
+
+  die "检测到可能承载 SSH 的公网 IPv4 默认路由，拒绝接管：$default_v4"
 }
 
 resolve_warp_endpoint_v6() {
