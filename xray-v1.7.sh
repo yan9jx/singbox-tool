@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v2.7"
+SCRIPT_VERSION="v2.8"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -142,10 +142,26 @@ install_xray() {
 }
 
 check_domain() {
-  local domain="$1" ip="$2" resolved
-  resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | head -n1 || true)"
-  [[ -n "$resolved" ]] || die "未检测到 $domain 的 A 记录。"
-  [[ "$resolved" == "$ip" ]] || die "$domain 当前解析到 $resolved，不是本机公网 IPv4 $ip。"
+  local domain="$1" resolved route_dev public_v4
+
+  while read -r resolved; do
+    [[ -n "$resolved" ]] || continue
+    if ip -6 route get "$resolved" 2>/dev/null | grep -Eq '(^|[[:space:]])local([[:space:]]|$)'; then
+      echo "已确认 $domain 的 AAAA 记录指向本机 IPv6：$resolved"
+      return
+    fi
+  done < <(getent ahostsv6 "$domain" 2>/dev/null | awk '$1 ~ /:/ {print $1}' | sort -u)
+
+  route_dev="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')"
+  if [[ -n "$route_dev" && "$route_dev" != "warp-ipv4" ]]; then
+    public_v4="$(public_ipv4)"
+    if [[ -n "$public_v4" ]] && getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | grep -Fxq "$public_v4"; then
+      echo "已确认 $domain 的 A 记录指向本机公网 IPv4：$public_v4"
+      return
+    fi
+  fi
+
+  die "$domain 的 A/AAAA 记录没有指向本机原生公网地址。"
 }
 
 shared_caddy_owns_port() {
@@ -415,13 +431,12 @@ install_node() {
   install_xray
   systemctl stop xray-xhttp 2>/dev/null || true
 
-  local domain ip port uuid path name tmp link cover_domain caddy_conf
+  local domain port uuid path name tmp link cover_domain caddy_conf
   local vless_decryption="none" vless_encryption="none" encryption_pair
   read -r -p "请输入已解析到本机的 XHTTP 域名/子域名：" domain
   domain="${domain#https://}"; domain="${domain%%/*}"; domain="${domain,,}"
   valid_domain "$domain" || die "域名格式不正确。"
-  ip="$(public_ipv4)"; [[ -n "$ip" ]] || die "无法检测本机公网 IPv4。"
-  check_domain "$domain" "$ip"
+  check_domain "$domain"
   if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" ]]; then
     echo "检测到 File Browser 正在共用 ${domain}:443；保留网盘根路径，XHTTP 只添加随机路径路由。"
     cover_domain=""
