@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # Pure-IPv6 VPS: route IPv4 through Cloudflare WARP on demand while leaving
 # every IPv6 route, address, DNS setting, and firewall rule untouched.
 
-SCRIPT_VERSION="1.0.3"
+SCRIPT_VERSION="1.1.0"
 NAME="warp-ipv4"
 WG_IF="warp-ipv4"
 WG_CONF="/etc/wireguard/${WG_IF}.conf"
@@ -16,6 +16,8 @@ RUN_DIR="/run/${NAME}"
 IPV6_ROUTE_GUARD="${RUN_DIR}/ipv6-default.before"
 IPV6_ADDR_GUARD="${RUN_DIR}/ipv6-public.before"
 ROLLBACK_UNIT="${NAME}-rollback"
+AUTOSTART_UNIT="${NAME}-autostart"
+AUTOSTART_SERVICE="/etc/systemd/system/${AUTOSTART_UNIT}.service"
 ROLLBACK_SECONDS=180
 WARP_ROUTE_METRIC=5
 TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
@@ -304,7 +306,7 @@ install_warp() {
   say "  - WireGuard 配置使用 Table = off"
   say "  - 仅配置 0.0.0.0/0，不配置 ::/0"
   say "  - 不修改 DNS、IPv6 地址、防火墙或 sysctl"
-  say "  - 不设置开机自动启用"
+  say "  - 确认 IPv6 连接安全后才设置开机自动启用"
   say
   say "启用命令：sudo $MANAGER on"
 }
@@ -382,6 +384,32 @@ cancel_rollback() {
   systemctl stop "${ROLLBACK_UNIT}.service" >/dev/null 2>&1 || true
   systemctl reset-failed "${ROLLBACK_UNIT}.timer" "${ROLLBACK_UNIT}.service" \
     >/dev/null 2>&1 || true
+}
+
+enable_autostart() {
+  cat > "$AUTOSTART_SERVICE" <<EOF
+[Unit]
+Description=IPv4-only Cloudflare WARP for an IPv6 VPS
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$MANAGER boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload || return 1
+  systemctl enable "${AUTOSTART_UNIT}.service" >/dev/null || return 1
+}
+
+disable_autostart() {
+  systemctl disable "${AUTOSTART_UNIT}.service" >/dev/null 2>&1 || true
+  rm -f "$AUTOSTART_SERVICE"
+  systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
 schedule_rollback() {
@@ -483,6 +511,14 @@ enable_warp() {
   say "立即关闭：sudo $MANAGER off"
 }
 
+boot_warp() {
+  require_root
+  enable_warp
+  cancel_rollback
+  is_interface_up || die "开机启用 WARP IPv4 失败。"
+  say "WARP IPv4 已在开机阶段安全启用；IPv6 路由保持不变。"
+}
+
 confirm_warp() {
   require_root
   is_interface_up || die "WARP IPv4 当前未启用。"
@@ -498,18 +534,22 @@ confirm_warp() {
     die "WARP IPv4 校验失败，已自动关闭 WARP。"
   fi
 
+  if ! enable_autostart; then
+    die "无法创建开机自启服务；自动回滚仍然有效。"
+  fi
   cancel_rollback
   say "已确认本次启用；自动回滚计时器已取消。"
-  say "WARP 仍不会开机自启，重启 VPS 后默认关闭。"
+  say "WARP IPv4 开机自启已启用；IPv6 仍使用 VPS 原生路由。"
 }
 
 disable_warp() {
   require_root
+  disable_autostart
   cancel_rollback
   down_tunnel
   rm -f "$IPV6_ROUTE_GUARD" "$IPV6_ADDR_GUARD"
   rmdir "$RUN_DIR" 2>/dev/null || true
-  say "WARP IPv4 已关闭；IPv6 配置未改动。"
+  say "WARP IPv4 已关闭，开机自启已取消；IPv6 配置未改动。"
 }
 
 rollback_warp() {
@@ -558,6 +598,11 @@ status_warp() {
   else
     say "自动回滚计时器：未运行"
   fi
+  if systemctl is-enabled --quiet "${AUTOSTART_UNIT}.service"; then
+    say "开机自启：已启用"
+  else
+    say "开机自启：未启用"
+  fi
 }
 
 uninstall_warp() {
@@ -572,6 +617,7 @@ uninstall_warp() {
 
   cancel_rollback
   down_tunnel
+  disable_autostart
   systemctl disable "wg-quick@${WG_IF}.service" >/dev/null 2>&1 || true
 
   rm -f \
@@ -594,8 +640,8 @@ show_help() {
 命令：
   install    安装并注册，但不启用 WARP
   on         临时启用 IPv4 -> WARP，并启动 ${ROLLBACK_SECONDS} 秒自动回滚
-  confirm    确认 IPv6 SSH 正常并取消自动回滚
-  off        立即关闭 WARP IPv4
+  confirm    确认 IPv6 SSH 正常，取消自动回滚并启用开机自启
+  off        立即关闭 WARP IPv4 并取消开机自启
   status     查看 WireGuard、IPv4/IPv6 路由和回滚计时器
   uninstall  关闭并删除本机 WARP 配置
   help       显示帮助
@@ -612,8 +658,8 @@ menu() {
     say "===== 纯 IPv6 VPS：按需 WARP IPv4 ====="
     say "1. 安装/注册（不会启用）"
     say "2. 启用 WARP IPv4（带自动回滚）"
-    say "3. 确认连接安全，取消自动回滚"
-    say "4. 关闭 WARP IPv4"
+    say "3. 确认连接安全，取消回滚并启用开机自启"
+    say "4. 关闭 WARP IPv4 并取消开机自启"
     say "5. 查看状态"
     say "6. 卸载本机配置"
     say "0. 退出"
@@ -635,6 +681,7 @@ main() {
   case "${1:-menu}" in
     install) install_warp ;;
     on|enable|start) enable_warp ;;
+    boot) boot_warp ;;
     confirm) confirm_warp ;;
     off|disable|stop) disable_warp ;;
     rollback) rollback_warp ;;
