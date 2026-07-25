@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v2.6"
+SCRIPT_VERSION="v2.7"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -142,7 +142,17 @@ install_xray() {
 }
 
 check_domain() {
-  local domain="$1" ip="$2" resolved
+  local domain="$1" ip="${2:-}" resolved
+
+  while read -r resolved; do
+    [[ -n "$resolved" ]] || continue
+    if ip -6 route get "$resolved" 2>/dev/null | grep -Eq '(^|[[:space:]])local([[:space:]]|$)'; then
+      echo "已确认 $domain 的 AAAA 记录指向本机 IPv6：$resolved"
+      return
+    fi
+  done < <(getent ahostsv6 "$domain" 2>/dev/null | awk '$1 ~ /:/ {print $1}' | sort -u)
+
+  [[ -n "$ip" ]] || die "未检测到 $domain 的 AAAA 记录，且本机没有可用公网 IPv4。"
   resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | head -n1 || true)"
   [[ -n "$resolved" ]] || die "未检测到 $domain 的 A 记录。"
   [[ "$resolved" == "$ip" ]] || die "$domain 当前解析到 $resolved，不是本机公网 IPv4 $ip。"
@@ -424,7 +434,7 @@ install_node() {
   read -r -p "请输入已解析到本机的 XHTTP 域名/子域名：" domain
   domain="${domain#https://}"; domain="${domain%%/*}"; domain="${domain,,}"
   valid_domain "$domain" || die "域名格式不正确。"
-  ip="$(public_ipv4)"; [[ -n "$ip" ]] || die "无法检测本机公网 IPv4。"
+  ip="$(public_ipv4)"
   check_domain "$domain" "$ip"
   if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" ]]; then
     echo "检测到 File Browser 正在共用 ${domain}:443；保留网盘根路径，XHTTP 只添加随机路径路由。"
