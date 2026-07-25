@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v2.6"
+SCRIPT_VERSION="v2.7"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -169,13 +169,9 @@ ensure_443_available_for_shared_caddy() {
 }
 
 fetch_caddy_release() {
-  local release_json
-  release_json="$(curl -fsSL --max-time 30 "$CADDY_RELEASE_API")" || die "Failed to query Caddy/NaiveProxy release."
-  CADDY_RELEASE_TAG="$(jq -er '.tag_name' <<<"$release_json")" || die "Caddy/NaiveProxy release has no tag."
-  CADDY_RELEASE_URL="$(jq -er --arg name "$CADDY_RELEASE_ASSET" '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json")" ||
-    die "Caddy/NaiveProxy release is missing $CADDY_RELEASE_ASSET."
-  CADDY_RELEASE_DIGEST="$(jq -er --arg name "$CADDY_RELEASE_ASSET" '.assets[] | select(.name == $name) | .digest // ""' <<<"$release_json" |
-    sed 's/^sha256://')" || true
+  CADDY_RELEASE_TAG="v2.11.2-naive"
+  CADDY_RELEASE_URL="https://github.com/klzgrad/forwardproxy/releases/download/${CADDY_RELEASE_TAG}/${CADDY_RELEASE_ASSET}"
+  CADDY_RELEASE_DIGEST="19eccb7321dd877a5fb4a3dba6ef1b745185188b616c96cc6201f1a1fc0380a8"
 }
 
 ensure_caddy_binary() {
