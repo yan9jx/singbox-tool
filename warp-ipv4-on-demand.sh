@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # Pure-IPv6 VPS: route IPv4 through Cloudflare WARP on demand while leaving
 # every IPv6 route, address, DNS setting, and firewall rule untouched.
 
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 NAME="warp-ipv4"
 WG_IF="warp-ipv4"
 WG_CONF="/etc/wireguard/${WG_IF}.conf"
@@ -309,12 +309,30 @@ install_warp() {
   say "启用命令：sudo $MANAGER on"
 }
 
+current_ipv6_path() {
+  local route
+
+  route="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null)" || return 1
+  awk -v warp_if="$WG_IF" '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "via") via = $(i + 1)
+        if ($i == "dev") dev = $(i + 1)
+      }
+    }
+    END {
+      if (dev == "" || dev == warp_if) exit 1
+      print "via=" via " dev=" dev
+    }
+  ' <<< "$route"
+}
+
 save_ipv6_guards() {
-  local public_v6
+  local public_v6 route_path
 
   install -d -m 700 "$RUN_DIR"
-  ip -6 route show default > "$IPV6_ROUTE_GUARD"
-  [[ -s "$IPV6_ROUTE_GUARD" ]] || die "无法保存 IPv6 默认路由基线。"
+  route_path="$(current_ipv6_path)" || die "无法保存 IPv6 出口路径基线。"
+  printf '%s\n' "$route_path" > "$IPV6_ROUTE_GUARD"
 
   public_v6="$(native_ipv6)" || die "无法保存原生 IPv6 地址基线。"
   [[ "$public_v6" == *:* ]] || die "原生 IPv6 地址基线异常。"
@@ -330,7 +348,7 @@ verify_ipv6_unchanged() {
 
   expected_route="$(cat "$IPV6_ROUTE_GUARD")"
   expected_v6="$(cat "$IPV6_ADDR_GUARD")"
-  current_route="$(ip -6 route show default)"
+  current_route="$(current_ipv6_path)" || return 1
   current_v6="$(native_ipv6)" || return 1
 
   [[ "$current_route" == "$expected_route" && "$current_v6" == "$expected_v6" ]]
