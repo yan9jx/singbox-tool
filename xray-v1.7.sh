@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v3.1"
+SCRIPT_VERSION="v2.6"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -120,23 +120,18 @@ EOF
 }
 
 install_xray() {
-  local machine asset digest tmp zip binary latest="v26.3.27"
+  local machine asset latest tmp zip binary
   [[ -x "$XRAY_BIN" ]] && return
   machine="$(uname -m)"
   case "$machine" in
-    x86_64|amd64)
-      asset="Xray-linux-64.zip"
-      digest="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
-      ;;
-    aarch64|arm64)
-      asset="Xray-linux-arm64-v8a.zip"
-      digest="4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
-      ;;
+    x86_64|amd64) asset="Xray-linux-64.zip" ;;
+    aarch64|arm64) asset="Xray-linux-arm64-v8a.zip" ;;
     *) die "不支持的 CPU 架构：$machine" ;;
   esac
+  latest="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
+  [[ -n "$latest" ]] || die "无法获取 Xray 最新版本。"
   tmp="$(mktemp -d)"; zip="$tmp/xray.zip"
-  curl -fL --retry 3 "https://github.com/XTLS/Xray-core/releases/download/${latest}/${asset}" -o "$zip"
-  printf '%s  %s\n' "$digest" "$zip" | sha256sum -c - >/dev/null || die "Xray 安装包 SHA-256 校验失败。"
+  curl -fL "https://github.com/XTLS/Xray-core/releases/download/${latest}/${asset}" -o "$zip"
   unzip -q "$zip" -d "$tmp"
   binary="$tmp/xray"
   [[ -x "$binary" ]] || die "Xray 安装包不完整。"
@@ -147,26 +142,10 @@ install_xray() {
 }
 
 check_domain() {
-  local domain="$1" resolved route_dev public_v4
-
-  while read -r resolved; do
-    [[ -n "$resolved" ]] || continue
-    if ip -6 route get "$resolved" 2>/dev/null | grep -Eq '(^|[[:space:]])local([[:space:]]|$)'; then
-      echo "已确认 $domain 的 AAAA 记录指向本机 IPv6：$resolved"
-      return
-    fi
-  done < <(getent ahostsv6 "$domain" 2>/dev/null | awk '$1 ~ /:/ {print $1}' | sort -u)
-
-  route_dev="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')"
-  if [[ -n "$route_dev" && "$route_dev" != "warp-ipv4" ]]; then
-    public_v4="$(public_ipv4)"
-    if [[ -n "$public_v4" ]] && getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | grep -Fxq "$public_v4"; then
-      echo "已确认 $domain 的 A 记录指向本机公网 IPv4：$public_v4"
-      return
-    fi
-  fi
-
-  die "$domain 的 A/AAAA 记录没有指向本机原生公网地址。"
+  local domain="$1" ip="$2" resolved
+  resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | head -n1 || true)"
+  [[ -n "$resolved" ]] || die "未检测到 $domain 的 A 记录。"
+  [[ "$resolved" == "$ip" ]] || die "$domain 当前解析到 $resolved，不是本机公网 IPv4 $ip。"
 }
 
 shared_caddy_owns_port() {
@@ -190,9 +169,13 @@ ensure_443_available_for_shared_caddy() {
 }
 
 fetch_caddy_release() {
-  CADDY_RELEASE_TAG="v2.11.2-naive"
-  CADDY_RELEASE_URL="https://github.com/klzgrad/forwardproxy/releases/download/${CADDY_RELEASE_TAG}/${CADDY_RELEASE_ASSET}"
-  CADDY_RELEASE_DIGEST="19eccb7321dd877a5fb4a3dba6ef1b745185188b616c96cc6201f1a1fc0380a8"
+  local release_json
+  release_json="$(curl -fsSL --max-time 30 "$CADDY_RELEASE_API")" || die "Failed to query Caddy/NaiveProxy release."
+  CADDY_RELEASE_TAG="$(jq -er '.tag_name' <<<"$release_json")" || die "Caddy/NaiveProxy release has no tag."
+  CADDY_RELEASE_URL="$(jq -er --arg name "$CADDY_RELEASE_ASSET" '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json")" ||
+    die "Caddy/NaiveProxy release is missing $CADDY_RELEASE_ASSET."
+  CADDY_RELEASE_DIGEST="$(jq -er --arg name "$CADDY_RELEASE_ASSET" '.assets[] | select(.name == $name) | .digest // ""' <<<"$release_json" |
+    sed 's/^sha256://')" || true
 }
 
 ensure_caddy_binary() {
@@ -436,12 +419,13 @@ install_node() {
   install_xray
   systemctl stop xray-xhttp 2>/dev/null || true
 
-  local domain port uuid path name tmp link cover_domain caddy_conf
+  local domain ip port uuid path name tmp link cover_domain caddy_conf
   local vless_decryption="none" vless_encryption="none" encryption_pair
   read -r -p "请输入已解析到本机的 XHTTP 域名/子域名：" domain
   domain="${domain#https://}"; domain="${domain%%/*}"; domain="${domain,,}"
   valid_domain "$domain" || die "域名格式不正确。"
-  check_domain "$domain"
+  ip="$(public_ipv4)"; [[ -n "$ip" ]] || die "无法检测本机公网 IPv4。"
+  check_domain "$domain" "$ip"
   if [[ -f "${CADDY_SITE_DIR}/filebrowser-${domain}.caddy" ]]; then
     echo "检测到 File Browser 正在共用 ${domain}:443；保留网盘根路径，XHTTP 只添加随机路径路由。"
     cover_domain=""
