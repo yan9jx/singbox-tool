@@ -5,9 +5,12 @@
 # Caddy 自动申请和续期证书，支持 NaiveProxy 与 File Browser 使用不同域名共用 443。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.15"
+SCRIPT_VERSION="v1.16"
 INSTALL_DIR="/etc/naiveproxy"
 INFO_FILE="$INSTALL_DIR/node-info.env"
+SUBSCRIPTION_INFO_FILE="$INSTALL_DIR/subscription.env"
+DASHBOARD_AGENT_CONF="${DASHBOARD_AGENT_CONF:-/etc/ejectors-vps-agent.conf}"
+DEFAULT_DASHBOARD_URL="${DEFAULT_DASHBOARD_URL:-}"
 CADDY_DIR="/etc/caddy-naive"
 CADDYFILE="$CADDY_DIR/Caddyfile"
 CADDY_SITE_DIR="$CADDY_DIR/sites"
@@ -42,6 +45,16 @@ port_is_listening() { ss -H -lnt "sport = :$1" 2>/dev/null | grep -q .; }
 public_ipv4() { curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || true; }
 urlencode() { jq -nr --arg value "$1" '$value|@uri'; }
 info_value() { sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$INFO_FILE"; }
+subscription_info_value() { if [[ -f "$SUBSCRIPTION_INFO_FILE" ]]; then sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$SUBSCRIPTION_INFO_FILE"; fi; return 0; }
+agent_info_value() { if [[ -f "$DASHBOARD_AGENT_CONF" ]]; then sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$DASHBOARD_AGENT_CONF"; fi; return 0; }
+json_escape() {
+  local value="${1//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
 require_install() { [[ -x "$BIN" && -f "$INFO_FILE" && -f "$CADDYFILE" ]] || die "未找到 NaiveProxy，请先安装。"; }
 
 install_deps() {
@@ -458,6 +471,79 @@ EOF
   chmod 600 "$INFO_FILE"
 }
 
+load_subscription_identity() {
+  SUB_DASHBOARD_URL="$(agent_info_value DASHBOARD_URL)"
+  SUB_INGEST_TOKEN="$(agent_info_value INGEST_TOKEN)"
+  SUB_NODE_ID="$(agent_info_value NODE_ID)"
+  [[ -n "$SUB_DASHBOARD_URL" ]] || SUB_DASHBOARD_URL="$(subscription_info_value DASHBOARD_URL)"
+  [[ -n "$SUB_INGEST_TOKEN" ]] || SUB_INGEST_TOKEN="$(subscription_info_value INGEST_TOKEN)"
+  [[ -n "$SUB_NODE_ID" ]] || SUB_NODE_ID="$(subscription_info_value NODE_ID)"
+  SUB_DASHBOARD_URL="${SUB_DASHBOARD_URL:-$DEFAULT_DASHBOARD_URL}"
+  [[ -n "$SUB_DASHBOARD_URL" ]] || read -rp "聚合订阅服务地址（HTTPS）: " SUB_DASHBOARD_URL
+  SUB_DASHBOARD_URL="${SUB_DASHBOARD_URL%/}"
+  if [[ -z "$SUB_NODE_ID" && -r /etc/machine-id ]]; then
+    SUB_NODE_ID="naive-$(tr -cd 'a-zA-Z0-9' </etc/machine-id | head -c 20)"
+  fi
+  [[ "$SUB_DASHBOARD_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die "订阅服务地址必须是 HTTPS 地址。"
+  [[ "$SUB_NODE_ID" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]] || die "订阅节点 ID 格式错误。"
+  if [[ -z "$SUB_INGEST_TOKEN" ]]; then
+    read -rsp "VPS 状态面板上报密钥（输入不显示）: " SUB_INGEST_TOKEN
+    echo
+  fi
+  [[ "$SUB_INGEST_TOKEN" =~ ^[A-Za-z0-9._~-]{16,512}$ ]] || die "上报密钥格式错误。"
+}
+
+sync_subscription_node() {
+  require_install
+  local quiet="${1:-false}" name domain port username password payload response subscription_url
+  name="$(info_value NODE_NAME)"
+  domain="$(info_value DOMAIN)"
+  port="$(info_value PORT)"
+  username="$(info_value USERNAME)"
+  password="$(info_value PASSWORD)"
+  load_subscription_identity
+  payload="$(printf '{"node_id":"%s","name":"%s","server":"%s","port":%s,"proto":"https","username":"%s","password":"%s","sni":"%s","insecure":false}' \
+    "$(json_escape "$SUB_NODE_ID")" "$(json_escape "$name")" "$(json_escape "$domain")" "$port" \
+    "$(json_escape "$username")" "$(json_escape "$password")" "$(json_escape "$domain")")"
+  if ! response="$(curl -fsS --max-time 20 -X POST "${SUB_DASHBOARD_URL}/api/v1/naive" \
+    -H "Authorization: Bearer ${SUB_INGEST_TOKEN}" -H "Content-Type: application/json" --data "$payload")"; then
+    echo "警告：Naive 节点未能登记到聚合订阅服务。" >&2
+    return 1
+  fi
+  subscription_url="$(sed -n 's/.*"subscription_url":"\([^"]*\)".*/\1/p' <<<"$response")"
+  [[ "$subscription_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/sub/anytls/[a-f0-9]{64}$ ]] ||
+    die "订阅服务未返回有效链接。"
+  cat >"$SUBSCRIPTION_INFO_FILE" <<EOF
+DASHBOARD_URL='$SUB_DASHBOARD_URL'
+INGEST_TOKEN='$SUB_INGEST_TOKEN'
+NODE_ID='$SUB_NODE_ID'
+SUBSCRIPTION_URL='$subscription_url'
+EOF
+  chmod 600 "$SUBSCRIPTION_INFO_FILE"
+  if [[ "$quiet" != "true" ]]; then
+    echo
+    echo "NekoBox-i 统一聚合订阅："
+    echo "$subscription_url"
+    echo "同一 VPS 的其他协议也可加入这条订阅链接。"
+  fi
+}
+
+remove_subscription_node() {
+  local quiet="${1:-false}" dashboard_url ingest_token node_id payload
+  [[ -f "$SUBSCRIPTION_INFO_FILE" ]] || { [[ "$quiet" == "true" ]] || echo "当前 Naive 节点未加入聚合订阅。"; return 0; }
+  dashboard_url="$(subscription_info_value DASHBOARD_URL)"
+  ingest_token="$(subscription_info_value INGEST_TOKEN)"
+  node_id="$(subscription_info_value NODE_ID)"
+  payload="$(printf '{"node_id":"%s"}' "$(json_escape "$node_id")")"
+  if ! curl -fsS --max-time 20 -X POST "${dashboard_url}/api/v1/naive/delete" \
+    -H "Authorization: Bearer ${ingest_token}" -H "Content-Type: application/json" --data "$payload" >/dev/null; then
+    echo "警告：无法从聚合订阅移除此 Naive 节点；本地记录暂未删除。" >&2
+    return 1
+  fi
+  rm -f "$SUBSCRIPTION_INFO_FILE"
+  [[ "$quiet" == "true" ]] || echo "当前 Naive 节点已退出聚合订阅。"
+}
+
 install_self() {
   if [[ -r "$0" && -f "$0" ]]; then
     install -m 700 "$0" "$MANAGER"
@@ -623,6 +709,10 @@ install_node() {
   echo "NaiveProxy 已安装完成。Caddy 将自动申请并续期证书。"
   echo "请确认云厂商安全组已放行 TCP/$port；自动签发通常还需要 TCP/80 或 TCP/443 可达。"
   show_config
+  echo
+  if confirm_yes "是否将这个 Naive 节点加入统一聚合订阅？"; then
+    sync_subscription_node
+  fi
 }
 
 update_server() {
@@ -671,6 +761,9 @@ reset_password() {
   write_info "$name" "$domain" "$port" "$username" "$password" "$version" "$cover_domain"
   verify_filebrowser_via_naive "$port" "$domain" "$username" "$password" ||
     die "NaiveProxy cannot reach File Browser through the shared Caddy configuration."
+  if [[ -f "$SUBSCRIPTION_INFO_FILE" ]]; then
+    sync_subscription_node true || echo "警告：新密码未同步到聚合订阅，请稍后手动更新。" >&2
+  fi
   echo "密码已重置，请在客户端更新节点。"
   show_config
 }
@@ -719,6 +812,7 @@ uninstall_node() {
   confirm_yes "是否卸载本脚本创建的 NaiveProxy？" || return 0
   local domain site filebrowser_domain other_sites=false
   domain="$(info_value DOMAIN 2>/dev/null || true)"
+  remove_subscription_node true || true
 
   systemctl disable --now naiveproxy-update.timer 2>/dev/null || true
   if [[ -n "$domain" ]]; then
@@ -778,6 +872,8 @@ menu() {
 8. 开启每周自动更新
 9. 关闭自动更新
 10. 卸载 NaiveProxy
+11. 加入 / 更新聚合订阅
+12. 退出聚合订阅
 0. 退出
 EOF
   local choice
@@ -793,6 +889,8 @@ EOF
     8) enable_auto_update ;;
     9) disable_auto_update ;;
     10) uninstall_node ;;
+    11) sync_subscription_node ;;
+    12) remove_subscription_node ;;
     0) exit 0 ;;
     *) die "无效选项。" ;;
   esac
@@ -810,6 +908,8 @@ case "${1:-}" in
   repair) repair_shared_caddy ;;
   auto-update-on) enable_auto_update ;;
   auto-update-off) disable_auto_update ;;
+  subscription) sync_subscription_node ;;
+  unsubscribe) remove_subscription_node ;;
   uninstall) uninstall_node ;;
   *) menu ;;
 esac

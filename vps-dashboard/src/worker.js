@@ -165,6 +165,16 @@ export default {
         return deleteProtocolNode(request, env, "mieru");
       }
 
+      if (url.pathname === "/api/v1/naive" && request.method === "POST") {
+        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
+        return receiveNaiveNode(request, env);
+      }
+
+      if (url.pathname === "/api/v1/naive/delete" && request.method === "POST") {
+        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
+        return deleteProtocolNode(request, env, "naive");
+      }
+
       if (url.pathname.startsWith("/api/")) {
         return json({ ok: false, error: "接口不存在" }, 404);
       }
@@ -329,6 +339,29 @@ async function receiveMieruNode(request, env) {
   });
 }
 
+async function receiveNaiveNode(request, env) {
+  const input = await readSubscriptionInput(request);
+  if (input instanceof Response) return input;
+  const common = validateSubscriptionCommon(input);
+  if (common instanceof Response) return common;
+  const proto = cleanText(input?.proto || "https", 16).toLowerCase();
+  const username = cleanText(input?.username, 256);
+  const password = cleanText(input?.password, 512);
+  const sni = cleanText(input?.sni || common.server, 255);
+  if (!["https", "quic"].includes(proto)) return json({ ok: false, error: "Naive 传输协议错误" }, 400);
+  if (!username) return json({ ok: false, error: "Naive 用户名不能为空" }, 400);
+  if (!password) return json({ ok: false, error: "Naive 密码不能为空" }, 400);
+  if (!sni || /[\s/?#]/.test(sni)) return json({ ok: false, error: "Naive SNI 格式错误" }, 400);
+  return upsertProtocolNode(request, env, "naive", {
+    ...common,
+    proto,
+    username,
+    password,
+    sni,
+    insecure: input?.insecure === true,
+  });
+}
+
 async function readSubscriptionInput(request) {
   const contentLength = Number(request.headers.get("content-length") || 0);
   if (contentLength > MAX_BODY_BYTES) return json({ ok: false, error: "上报数据过大" }, 413);
@@ -402,7 +435,7 @@ async function toggleAnyTlsNode(request, env) {
   }
   const nodeId = String(input?.node_id || "");
   const protocol = String(input?.protocol || "anytls");
-  if (!NODE_ID_PATTERN.test(nodeId) || !["anytls", "xhttp", "mieru"].includes(protocol)
+  if (!NODE_ID_PATTERN.test(nodeId) || !["anytls", "xhttp", "mieru", "naive"].includes(protocol)
     || typeof input?.enabled !== "boolean") {
     return json({ ok: false, error: "订阅节点设置错误" }, 400);
   }
@@ -654,7 +687,7 @@ export class VpsStatusStore {
       return json({ ok: true, node_id: record.node_id, updated_at: record.updated_at });
     }
 
-    if ((url.pathname === "/xhttp/upsert" || url.pathname === "/mieru/upsert") && request.method === "POST") {
+    if (["/xhttp/upsert", "/mieru/upsert", "/naive/upsert"].includes(url.pathname) && request.method === "POST") {
       const protocol = url.pathname.split("/")[1];
       const record = await request.json();
       const key = `${protocol}:${record.node_id}`;
@@ -671,7 +704,7 @@ export class VpsStatusStore {
       return json({ ok: true, node_id: input.node_id });
     }
 
-    if ((url.pathname === "/xhttp/delete" || url.pathname === "/mieru/delete") && request.method === "POST") {
+    if (["/xhttp/delete", "/mieru/delete", "/naive/delete"].includes(url.pathname) && request.method === "POST") {
       const protocol = url.pathname.split("/")[1];
       const input = await request.json();
       await this.ctx.storage.delete(`${protocol}:${input.node_id}`);
@@ -698,7 +731,7 @@ export class VpsStatusStore {
 
     if (url.pathname === "/anytls/toggle" && request.method === "POST") {
       const input = await request.json();
-      const protocol = ["anytls", "xhttp", "mieru"].includes(input.protocol) ? input.protocol : "anytls";
+      const protocol = ["anytls", "xhttp", "mieru", "naive"].includes(input.protocol) ? input.protocol : "anytls";
       const key = `${protocol}:${input.node_id}`;
       const record = await this.ctx.storage.get(key);
       if (!record) return json({ ok: false, error: "订阅节点不存在" }, 404);
@@ -708,7 +741,7 @@ export class VpsStatusStore {
     }
 
     if (url.pathname === "/anytls/nodes" && request.method === "GET") {
-      const recordSets = await Promise.all(["anytls", "xhttp", "mieru"]
+      const recordSets = await Promise.all(["anytls", "xhttp", "mieru", "naive"]
         .map((protocol) => this.ctx.storage.list({ prefix: `${protocol}:` })));
       const nodes = recordSets.flatMap((records) => [...records.values()])
         .filter((record) => record && typeof record === "object" && NODE_ID_PATTERN.test(record.node_id || ""))
@@ -726,7 +759,7 @@ export class VpsStatusStore {
     }
 
     if (url.pathname === "/anytls/subscription" && request.method === "GET") {
-      const recordSets = await Promise.all(["anytls", "xhttp", "mieru"]
+      const recordSets = await Promise.all(["anytls", "xhttp", "mieru", "naive"]
         .map((protocol) => this.ctx.storage.list({ prefix: `${protocol}:` })));
       const nodes = recordSets.flatMap((records) => [...records.values()])
         .filter((record) => record && typeof record === "object"
@@ -734,7 +767,9 @@ export class VpsStatusStore {
         .map((record) => ({ ...record, protocol: record.protocol || "anytls" }))
         .sort((a, b) => `${a.name}-${a.protocol}`.localeCompare(`${b.name}-${b.protocol}`, "zh-CN"));
       const format = subscriptionFormat(url.searchParams.get("format"), request.headers.get("user-agent"));
-      return format === "yaml" ? subscriptionYaml(nodes) : subscriptionUri(nodes, format);
+      return ["yaml", "nekobox"].includes(format)
+        ? subscriptionYaml(nodes, format === "nekobox")
+        : subscriptionUri(nodes, format);
     }
 
     if (url.pathname === "/auth/check" && request.method === "GET") {
@@ -1449,10 +1484,11 @@ function cleanText(value, maxLength) {
   return String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, "").slice(0, maxLength);
 }
 
-function subscriptionYaml(nodes) {
+function subscriptionYaml(nodes, includeNaive = false) {
+  const supportedNodes = includeNaive ? nodes : nodes.filter((node) => node.protocol !== "naive");
   const counts = new Map();
-  for (const node of nodes) counts.set(node.name, (counts.get(node.name) || 0) + 1);
-  const normalized = nodes.map((node) => ({
+  for (const node of supportedNodes) counts.set(node.name, (counts.get(node.name) || 0) + 1);
+  const normalized = supportedNodes.map((node) => ({
     ...node,
     display_name: counts.get(node.name) > 1
       ? `${node.name} (${String(node.protocol).toUpperCase()}-${node.node_id})`
@@ -1489,6 +1525,14 @@ function subscriptionYaml(nodes) {
         `    password: ${yamlString(node.password)}`,
         `    multiplexing: ${yamlString(node.multiplexing || "MULTIPLEXING_LOW")}`,
         "    udp: true",
+      ].join("\n");
+    }
+    if (node.protocol === "naive") {
+      return [...common,
+        `    proto: ${yamlString(node.proto || "https")}`,
+        `    username: ${yamlString(node.username)}`,
+        `    password: ${yamlString(node.password)}`,
+        `    sni: ${yamlString(node.sni || node.server)}`,
       ].join("\n");
     }
     return [...common,
@@ -1542,9 +1586,11 @@ function yamlString(value) {
 
 function subscriptionFormat(requested, userAgent) {
   const format = String(requested || "").toLowerCase();
+  if (format === "nekobox") return "nekobox";
   if (format === "shadowrocket") return "shadowrocket";
   if (["v2ray", "v2rayng", "v2rayn", "uri", "base64"].includes(format)) return "uri";
   if (["mihomo", "clash", "meta", "yaml"].includes(format)) return "yaml";
+  if (/nekobox/i.test(String(userAgent || ""))) return "nekobox";
   if (/shadowrocket/i.test(String(userAgent || ""))) return "shadowrocket";
   return /\b(v2rayng|v2rayn)\b/i.test(String(userAgent || "")) ? "uri" : "yaml";
 }
@@ -1661,7 +1707,8 @@ function requiresViewAuthorization(pathname) {
     && !["/api/v1/health", "/api/v1/heartbeat", "/api/v1/shutdown",
       "/api/v1/anytls", "/api/v1/anytls/delete",
       "/api/v1/xhttp", "/api/v1/xhttp/delete",
-      "/api/v1/mieru", "/api/v1/mieru/delete"].includes(pathname);
+      "/api/v1/mieru", "/api/v1/mieru/delete",
+      "/api/v1/naive", "/api/v1/naive/delete"].includes(pathname);
 }
 
 async function enforceViewAuthorization(request, env) {
