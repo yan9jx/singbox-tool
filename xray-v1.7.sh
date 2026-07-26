@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v2.6"
+SCRIPT_VERSION="v2.7"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -507,6 +507,19 @@ subscription_info_value() { if [[ -f "$SUBSCRIPTION_INFO_FILE" ]]; then sed -n "
 agent_info_value() { if [[ -f "$DASHBOARD_AGENT_CONF" ]]; then sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$DASHBOARD_AGENT_CONF"; fi; return 0; }
 require_node_files() { [[ -f "$XRAY_INFO" && -f "$XRAY_CONFIG" ]] || die "未找到 XHTTP 节点，请先安装。"; }
 
+saved_vless_encryption() {
+  local encryption link
+  encryption="$(info_value VLESS_ENCRYPTION)"
+  if [[ -z "$encryption" || "$encryption" == "none" ]]; then
+    link="$(info_value LINK)"
+    if [[ "$link" == *"encryption="* ]]; then
+      encryption="${link#*encryption=}"
+      encryption="${encryption%%&*}"
+    fi
+  fi
+  printf '%s' "${encryption:-none}"
+}
+
 load_subscription_identity() {
   SUB_DASHBOARD_URL="$(agent_info_value DASHBOARD_URL)"
   SUB_INGEST_TOKEN="$(agent_info_value INGEST_TOKEN)"
@@ -536,8 +549,7 @@ sync_subscription_node() {
   domain="$(info_value DOMAIN)"
   uuid="$(info_value UUID)"
   path="$(info_value PATH)"
-  encryption="$(info_value VLESS_ENCRYPTION)"
-  encryption="${encryption:-none}"
+  encryption="$(saved_vless_encryption)"
   [[ "$encryption" =~ ^[A-Za-z0-9._-]+$ ]] || die "保存的 VLESS Encryption 客户端参数格式错误。"
   load_subscription_identity
   payload="$(printf '{"node_id":"%s","name":"%s","server":"%s","port":443,"uuid":"%s","sni":"%s","host":"%s","path":"%s","encryption":"%s","insecure":false}' \
