@@ -4,7 +4,7 @@
 # 如果 TCP/443 已被占用，会自动选择可用的 *443 备用端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.9"
+SCRIPT_VERSION="v2.0"
 XRAY_ROOT="/opt/reality-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/reality-xhttp"
@@ -13,10 +13,21 @@ XRAY_INFO="$XRAY_DIR/node-info.env"
 XRAY_SERVICE="/etc/systemd/system/reality-xhttp.service"
 SERVICE_NAME="reality-xhttp"
 DEFAULT_PORT=443
+DEFAULT_DASHBOARD_URL="${DEFAULT_DASHBOARD_URL:-}"
+DASHBOARD_AGENT_CONF="${DASHBOARD_AGENT_CONF:-/etc/ejectors-vps-agent.conf}"
+SUBSCRIPTION_INFO_FILE="$XRAY_DIR/subscription.env"
 
 die() { echo "错误：$*" >&2; exit 1; }
 require_root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || die "请使用 root 运行。"; command -v systemctl >/dev/null || die "当前系统需要支持 systemd。"; }
 confirm_yes() { local answer; read -r -p "$1 [Y/n]: " answer; [[ -z "$answer" || "$answer" =~ ^[Yy]$ ]]; }
+json_escape() {
+  local value="${1//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
 validate_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
 port_is_listening() { ss -H -lnt "sport = :$1" 2>/dev/null | grep -q .; }
 
@@ -263,15 +274,102 @@ install_node() {
   echo "$link"
   echo
   qrencode -t ANSIUTF8 "$link"
+  echo
+  if confirm_yes "是否将这个 REALITY + XHTTP 节点加入统一聚合订阅？"; then
+    sync_subscription_node
+  fi
 }
 
 info_value() { sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$XRAY_INFO"; }
+subscription_info_value() { if [[ -f "$SUBSCRIPTION_INFO_FILE" ]]; then sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$SUBSCRIPTION_INFO_FILE"; fi; return 0; }
+agent_info_value() { if [[ -f "$DASHBOARD_AGENT_CONF" ]]; then sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$DASHBOARD_AGENT_CONF"; fi; return 0; }
 require_node_files() { [[ -f "$XRAY_INFO" && -f "$XRAY_CONFIG" ]] || die "未找到节点，请先安装。"; }
 show_link() { require_node_files; info_value LINK; }
 print_link_qr() { echo "$1"; echo; qrencode -t ANSIUTF8 "$1"; }
 show_status() { [[ -x "$XRAY_BIN" ]] && "$XRAY_BIN" version | head -n1 || true; systemctl status "$SERVICE_NAME" --no-pager; }
 show_logs() { journalctl -u "$SERVICE_NAME" -n 100 --no-pager; }
 restart_node() { systemctl restart "$SERVICE_NAME"; systemctl is-active --quiet "$SERVICE_NAME" || die "重启失败。"; echo "已重启。"; }
+
+load_subscription_identity() {
+  SUB_DASHBOARD_URL="$(agent_info_value DASHBOARD_URL)"
+  SUB_INGEST_TOKEN="$(agent_info_value INGEST_TOKEN)"
+  SUB_NODE_ID="$(agent_info_value NODE_ID)"
+  [[ -n "$SUB_DASHBOARD_URL" ]] || SUB_DASHBOARD_URL="$(subscription_info_value DASHBOARD_URL)"
+  [[ -n "$SUB_INGEST_TOKEN" ]] || SUB_INGEST_TOKEN="$(subscription_info_value INGEST_TOKEN)"
+  [[ -n "$SUB_NODE_ID" ]] || SUB_NODE_ID="$(subscription_info_value NODE_ID)"
+  SUB_DASHBOARD_URL="${SUB_DASHBOARD_URL:-$DEFAULT_DASHBOARD_URL}"
+  [[ -n "$SUB_DASHBOARD_URL" ]] || read -rp "聚合订阅服务地址（HTTPS）: " SUB_DASHBOARD_URL
+  SUB_DASHBOARD_URL="${SUB_DASHBOARD_URL%/}"
+  if [[ -z "$SUB_NODE_ID" && -r /etc/machine-id ]]; then
+    SUB_NODE_ID="reality-$(tr -cd 'a-zA-Z0-9' </etc/machine-id | head -c 20)"
+  fi
+  [[ "$SUB_DASHBOARD_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die "订阅服务地址必须是 HTTPS 地址。"
+  [[ "$SUB_NODE_ID" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]] || die "订阅节点 ID 格式错误。"
+  if [[ -z "$SUB_INGEST_TOKEN" ]]; then
+    read -rsp "VPS 状态面板上报密钥（输入不显示）: " SUB_INGEST_TOKEN
+    echo
+  fi
+  [[ "$SUB_INGEST_TOKEN" =~ ^[A-Za-z0-9._~-]{16,512}$ ]] || die "上报密钥格式错误。"
+}
+
+sync_subscription_node() {
+  require_node_files
+  local quiet="${1:-false}" name host port uuid sni public_key short_id path payload response subscription_url
+  name="$(info_value NODE_NAME)"
+  host="$(info_value SERVER_ADDRESS)"
+  port="$(info_value PORT)"
+  uuid="$(info_value UUID)"
+  sni="$(info_value SNI)"
+  public_key="$(info_value PUBLIC_KEY)"
+  short_id="$(info_value SHORT_ID)"
+  path="$(info_value PATH)"
+  load_subscription_identity
+  payload="$(printf '{"node_id":"%s","name":"%s","server":"%s","port":%s,"uuid":"%s","sni":"%s","public_key":"%s","short_id":"%s","fingerprint":"chrome","transport":"xhttp","host":"","path":"%s","mode":"auto","encryption":"none"}' \
+    "$(json_escape "$SUB_NODE_ID")" "$(json_escape "$name")" "$(json_escape "$host")" "$port" \
+    "$(json_escape "$uuid")" "$(json_escape "$sni")" "$(json_escape "$public_key")" \
+    "$(json_escape "$short_id")" "$(json_escape "$path")")"
+  if ! response="$(curl -fsS --max-time 20 -X POST "${SUB_DASHBOARD_URL}/api/v1/reality" \
+    -H "Authorization: Bearer ${SUB_INGEST_TOKEN}" -H "Content-Type: application/json" --data "$payload")"; then
+    echo "警告：REALITY + XHTTP 节点未能登记到聚合订阅服务。" >&2
+    return 1
+  fi
+  subscription_url="$(sed -n 's/.*"subscription_url":"\([^"]*\)".*/\1/p' <<<"$response")"
+  [[ "$subscription_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/sub/anytls/[a-f0-9]{64}$ ]] ||
+    die "订阅服务未返回有效链接。"
+  install -d -m 700 "$XRAY_DIR"
+  cat >"$SUBSCRIPTION_INFO_FILE" <<EOF
+DASHBOARD_URL='$SUB_DASHBOARD_URL'
+INGEST_TOKEN='$SUB_INGEST_TOKEN'
+NODE_ID='$SUB_NODE_ID'
+SUBSCRIPTION_URL='$subscription_url'
+EOF
+  chmod 600 "$SUBSCRIPTION_INFO_FILE"
+  if [[ "$quiet" != "true" ]]; then
+    echo
+    echo "NekoBox-i 统一聚合订阅："
+    echo "$subscription_url"
+    echo "同一 VPS 的其他协议也可加入这条订阅链接。"
+  fi
+}
+
+remove_subscription_node() {
+  local quiet="${1:-false}" dashboard_url ingest_token node_id payload
+  [[ -f "$SUBSCRIPTION_INFO_FILE" ]] || {
+    [[ "$quiet" == "true" ]] || echo "当前 REALITY 节点未加入聚合订阅。"
+    return 0
+  }
+  dashboard_url="$(subscription_info_value DASHBOARD_URL)"
+  ingest_token="$(subscription_info_value INGEST_TOKEN)"
+  node_id="$(subscription_info_value NODE_ID)"
+  payload="$(printf '{"node_id":"%s"}' "$(json_escape "$node_id")")"
+  if ! curl -fsS --max-time 20 -X POST "${dashboard_url}/api/v1/reality/delete" \
+    -H "Authorization: Bearer ${ingest_token}" -H "Content-Type: application/json" --data "$payload" >/dev/null; then
+    echo "警告：无法从聚合订阅移除此 REALITY 节点；本地记录暂未删除。" >&2
+    return 1
+  fi
+  rm -f "$SUBSCRIPTION_INFO_FILE"
+  [[ "$quiet" == "true" ]] || echo "当前 REALITY 节点已退出聚合订阅。"
+}
 
 change_port() {
   require_node_files
@@ -290,6 +388,7 @@ change_port() {
   systemctl is-active --quiet "$SERVICE_NAME" || die "修改端口后服务启动失败。"
   link="$(make_link "$uuid" "$host" "$new_port" "$server_name" "$public_key" "$short_id" "$path" "$name")"
   write_info "$name" "$host" "$new_port" "$uuid" "$server_name" "$destination" "$private_key" "$public_key" "$short_id" "$path" "$link"
+  [[ -f "$SUBSCRIPTION_INFO_FILE" ]] && sync_subscription_node true || true
   print_link_qr "$link"
 }
 
@@ -304,6 +403,7 @@ change_link_host() {
   [[ -n "$host" && "$host" != *[[:space:]]* ]] || die "节点地址不能为空或包含空格。"
   link="$(make_link "$uuid" "$host" "$port" "$server_name" "$public_key" "$short_id" "$path" "$name")"
   write_info "$name" "$host" "$port" "$uuid" "$server_name" "$destination" "$private_key" "$public_key" "$short_id" "$path" "$link"
+  [[ -f "$SUBSCRIPTION_INFO_FILE" ]] && sync_subscription_node true || true
   print_link_qr "$link"
 }
 
@@ -311,8 +411,9 @@ upgrade_xray() { install_xray; restart_node; }
 
 uninstall_node() {
   confirm_yes "是否卸载 REALITY + XHTTP 节点？" || return
+  remove_subscription_node true || true
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
-  rm -f "$XRAY_SERVICE" "$XRAY_CONFIG" "$XRAY_INFO"
+  rm -f "$XRAY_SERVICE" "$XRAY_CONFIG" "$XRAY_INFO" "$SUBSCRIPTION_INFO_FILE"
   rmdir "$XRAY_DIR" 2>/dev/null || true
   systemctl daemon-reload
   echo "节点已卸载；Xray 二进制保留在 $XRAY_ROOT。"
@@ -331,7 +432,9 @@ menu() {
 6. 更换监听端口
 7. 设置节点连接地址
 8. 检查 / 更新 Xray-core
-9. 卸载节点
+9. 加入 / 更新聚合订阅
+10. 退出聚合订阅
+11. 卸载节点
 0. 退出
 EOF
   local choice
@@ -345,7 +448,9 @@ EOF
     6) change_port ;;
     7) change_link_host ;;
     8) upgrade_xray ;;
-    9) uninstall_node ;;
+    9) sync_subscription_node ;;
+    10) remove_subscription_node ;;
+    11) uninstall_node ;;
     0) exit 0 ;;
     *) die "无效选项。" ;;
   esac
@@ -361,6 +466,8 @@ case "${1:-}" in
   port) change_port ;;
   host) change_link_host ;;
   update) upgrade_xray ;;
+  subscription|subscribe|sub) sync_subscription_node ;;
+  unsubscribe|unsub) remove_subscription_node ;;
   uninstall) uninstall_node ;;
   *) menu ;;
 esac

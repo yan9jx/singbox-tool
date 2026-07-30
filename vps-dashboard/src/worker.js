@@ -155,6 +155,16 @@ export default {
         return deleteProtocolNode(request, env, "xhttp");
       }
 
+      if (url.pathname === "/api/v1/reality" && request.method === "POST") {
+        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
+        return receiveRealityNode(request, env);
+      }
+
+      if (url.pathname === "/api/v1/reality/delete" && request.method === "POST") {
+        if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
+        return deleteProtocolNode(request, env, "reality");
+      }
+
       if (url.pathname === "/api/v1/mieru" && request.method === "POST") {
         if (!isIngestAuthorized(request, env)) return unauthorized("上报密钥不正确");
         return receiveMieruNode(request, env);
@@ -339,6 +349,60 @@ async function receiveMieruNode(request, env) {
   });
 }
 
+async function receiveRealityNode(request, env) {
+  const input = await readSubscriptionInput(request);
+  if (input instanceof Response) return input;
+  const common = validateSubscriptionCommon(input);
+  if (common instanceof Response) return common;
+  const uuid = cleanText(input?.uuid, 64);
+  const sni = cleanText(input?.sni, 255);
+  const publicKey = cleanText(input?.public_key, 64);
+  const shortId = cleanText(input?.short_id, 16);
+  const fingerprint = cleanText(input?.fingerprint || "chrome", 64);
+  const transport = cleanText(input?.transport || "raw", 16).toLowerCase();
+  const path = cleanText(input?.path || "", 512);
+  const host = cleanText(input?.host || "", 255);
+  const mode = cleanText(input?.mode || (transport === "xhttp" ? "auto" : ""), 32).toLowerCase();
+  if (!/^[0-9a-fA-F-]{36}$/.test(uuid)) return json({ ok: false, error: "UUID 格式错误" }, 400);
+  if (!/^[A-Za-z0-9.-]+$/.test(sni)) return json({ ok: false, error: "SNI 格式错误" }, 400);
+  if (!/^[A-Za-z0-9_-]{43,44}$/.test(publicKey)) {
+    return json({ ok: false, error: "REALITY 公钥格式错误" }, 400);
+  }
+  if (shortId.length > 16 || shortId.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(shortId)) {
+    return json({ ok: false, error: "REALITY Short ID 格式错误" }, 400);
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(fingerprint)) {
+    return json({ ok: false, error: "REALITY 指纹格式错误" }, 400);
+  }
+  if (!["raw", "tcp", "xhttp"].includes(transport)) {
+    return json({ ok: false, error: "REALITY 传输协议不受支持" }, 400);
+  }
+  if (transport === "xhttp") {
+    if (!path.startsWith("/") || /[\s?#]/.test(path)) {
+      return json({ ok: false, error: "XHTTP 路径格式错误" }, 400);
+    }
+    if (host && !/^[A-Za-z0-9.-]+$/.test(host)) {
+      return json({ ok: false, error: "XHTTP Host 格式错误" }, 400);
+    }
+    if (!["auto", "packet-up", "stream-up", "stream-one"].includes(mode)) {
+      return json({ ok: false, error: "XHTTP 模式不受支持" }, 400);
+    }
+  }
+  return upsertProtocolNode(request, env, "reality", {
+    ...common,
+    uuid,
+    sni,
+    public_key: publicKey,
+    short_id: shortId,
+    fingerprint,
+    transport: transport === "tcp" ? "raw" : transport,
+    path,
+    host,
+    mode,
+    encryption: "none",
+  });
+}
+
 async function receiveNaiveNode(request, env) {
   const input = await readSubscriptionInput(request);
   if (input instanceof Response) return input;
@@ -435,7 +499,7 @@ async function toggleAnyTlsNode(request, env) {
   }
   const nodeId = String(input?.node_id || "");
   const protocol = String(input?.protocol || "anytls");
-  if (!NODE_ID_PATTERN.test(nodeId) || !["anytls", "xhttp", "mieru", "naive"].includes(protocol)
+  if (!NODE_ID_PATTERN.test(nodeId) || !["anytls", "xhttp", "reality", "mieru", "naive"].includes(protocol)
     || typeof input?.enabled !== "boolean") {
     return json({ ok: false, error: "订阅节点设置错误" }, 400);
   }
@@ -687,7 +751,7 @@ export class VpsStatusStore {
       return json({ ok: true, node_id: record.node_id, updated_at: record.updated_at });
     }
 
-    if (["/xhttp/upsert", "/mieru/upsert", "/naive/upsert"].includes(url.pathname) && request.method === "POST") {
+    if (["/xhttp/upsert", "/reality/upsert", "/mieru/upsert", "/naive/upsert"].includes(url.pathname) && request.method === "POST") {
       const protocol = url.pathname.split("/")[1];
       const record = await request.json();
       const key = `${protocol}:${record.node_id}`;
@@ -704,7 +768,7 @@ export class VpsStatusStore {
       return json({ ok: true, node_id: input.node_id });
     }
 
-    if (["/xhttp/delete", "/mieru/delete", "/naive/delete"].includes(url.pathname) && request.method === "POST") {
+    if (["/xhttp/delete", "/reality/delete", "/mieru/delete", "/naive/delete"].includes(url.pathname) && request.method === "POST") {
       const protocol = url.pathname.split("/")[1];
       const input = await request.json();
       await this.ctx.storage.delete(`${protocol}:${input.node_id}`);
@@ -731,7 +795,7 @@ export class VpsStatusStore {
 
     if (url.pathname === "/anytls/toggle" && request.method === "POST") {
       const input = await request.json();
-      const protocol = ["anytls", "xhttp", "mieru", "naive"].includes(input.protocol) ? input.protocol : "anytls";
+      const protocol = ["anytls", "xhttp", "reality", "mieru", "naive"].includes(input.protocol) ? input.protocol : "anytls";
       const key = `${protocol}:${input.node_id}`;
       const record = await this.ctx.storage.get(key);
       if (!record) return json({ ok: false, error: "订阅节点不存在" }, 404);
@@ -741,7 +805,7 @@ export class VpsStatusStore {
     }
 
     if (url.pathname === "/anytls/nodes" && request.method === "GET") {
-      const recordSets = await Promise.all(["anytls", "xhttp", "mieru", "naive"]
+      const recordSets = await Promise.all(["anytls", "xhttp", "reality", "mieru", "naive"]
         .map((protocol) => this.ctx.storage.list({ prefix: `${protocol}:` })));
       const nodes = recordSets.flatMap((records) => [...records.values()])
         .filter((record) => record && typeof record === "object" && NODE_ID_PATTERN.test(record.node_id || ""))
@@ -759,7 +823,7 @@ export class VpsStatusStore {
     }
 
     if (url.pathname === "/anytls/subscription" && request.method === "GET") {
-      const recordSets = await Promise.all(["anytls", "xhttp", "mieru", "naive"]
+      const recordSets = await Promise.all(["anytls", "xhttp", "reality", "mieru", "naive"]
         .map((protocol) => this.ctx.storage.list({ prefix: `${protocol}:` })));
       const nodes = recordSets.flatMap((records) => [...records.values()])
         .filter((record) => record && typeof record === "object"
@@ -1497,7 +1561,7 @@ function subscriptionYaml(nodes, includeNaive = false) {
   const proxyLines = normalized.map((node) => {
     const common = [
       `  - name: ${yamlString(node.display_name)}`,
-      `    type: ${node.protocol === "xhttp" ? "vless" : node.protocol}`,
+      `    type: ${["xhttp", "reality"].includes(node.protocol) ? "vless" : node.protocol}`,
       `    server: ${yamlString(node.server)}`,
       `    port: ${node.port}`,
     ];
@@ -1516,8 +1580,32 @@ function subscriptionYaml(nodes, includeNaive = false) {
         `      path: ${yamlString(node.path)}`,
         `      host: ${yamlString(node.host || node.sni)}`,
         "      mode: auto",
-      ].join("\n");
-    }
+        ].join("\n");
+      }
+      if (node.protocol === "reality") {
+        const transport = node.transport === "xhttp" ? "xhttp" : "tcp";
+        const lines = [...common,
+          `    uuid: ${yamlString(node.uuid)}`,
+          "    encryption: none",
+          `    network: ${transport}`,
+          "    tls: true",
+          "    udp: true",
+          `    servername: ${yamlString(node.sni)}`,
+          `    client-fingerprint: ${yamlString(node.fingerprint || "chrome")}`,
+          "    reality-opts:",
+          `      public-key: ${yamlString(node.public_key)}`,
+          `      short-id: ${yamlString(node.short_id || "")}`,
+        ];
+        if (transport === "xhttp") {
+          lines.push(
+            "    xhttp-opts:",
+            `      path: ${yamlString(node.path)}`,
+            `      host: ${yamlString(node.host || "")}`,
+            `      mode: ${yamlString(node.mode || "auto")}`,
+          );
+        }
+        return lines.join("\n");
+      }
     if (node.protocol === "mieru") {
       return [...common,
         `    transport: ${node.transport}`,
@@ -1599,7 +1687,8 @@ function subscriptionUri(nodes, format = "uri") {
   const counts = new Map();
   for (const node of nodes) counts.set(node.name, (counts.get(node.name) || 0) + 1);
   const links = nodes
-    .filter((node) => node.protocol === "xhttp" || (format === "shadowrocket" && ["anytls", "mieru"].includes(node.protocol)))
+    .filter((node) => ["xhttp", "reality"].includes(node.protocol)
+      || (format === "shadowrocket" && ["anytls", "mieru"].includes(node.protocol)))
     .map((node) => {
       const protocolName = String(node.protocol).toUpperCase();
       const displayName = counts.get(node.name) > 1 ? `${node.name} (${protocolName}-${node.node_id})` : node.name;
@@ -1627,7 +1716,7 @@ function subscriptionUri(nodes, format = "uri") {
         }
         return "";
       }
-      if (node.protocol === "xhttp" && format === "shadowrocket") {
+        if (node.protocol === "xhttp" && format === "shadowrocket") {
         const userInfo = base64Utf8(`auto:${node.uuid}@${node.server}:${node.port}`);
         const query = new URLSearchParams({
           tfo: "1",
@@ -1642,8 +1731,26 @@ function subscriptionUri(nodes, format = "uri") {
           mode: "auto",
           encryption: node.encryption || "none",
         });
-        return `vless://${userInfo}?${query.toString()}`;
-      }
+          return `vless://${userInfo}?${query.toString()}`;
+        }
+        if (node.protocol === "reality") {
+          const transport = node.transport === "xhttp" ? "xhttp" : "tcp";
+          const query = new URLSearchParams({
+            encryption: "none",
+            security: "reality",
+            sni: node.sni,
+            fp: node.fingerprint || "chrome",
+            pbk: node.public_key,
+            sid: node.short_id || "",
+            type: transport,
+          });
+          if (transport === "xhttp") {
+            if (node.host) query.set("host", node.host);
+            query.set("path", node.path);
+            query.set("mode", node.mode || "auto");
+          }
+          return `vless://${encodeURIComponent(node.uuid)}@${node.server}:${node.port}?${query.toString()}#${encodeURIComponent(displayName)}`;
+        }
       const query = new URLSearchParams({
         encryption: node.encryption || "none",
         security: "tls",
@@ -1705,9 +1812,10 @@ function isIngestAuthorized(request, env) {
 function requiresViewAuthorization(pathname) {
   return pathname.startsWith("/api/v1/")
     && !["/api/v1/health", "/api/v1/heartbeat", "/api/v1/shutdown",
-      "/api/v1/anytls", "/api/v1/anytls/delete",
-      "/api/v1/xhttp", "/api/v1/xhttp/delete",
-      "/api/v1/mieru", "/api/v1/mieru/delete",
+        "/api/v1/anytls", "/api/v1/anytls/delete",
+        "/api/v1/xhttp", "/api/v1/xhttp/delete",
+        "/api/v1/reality", "/api/v1/reality/delete",
+        "/api/v1/mieru", "/api/v1/mieru/delete",
       "/api/v1/naive", "/api/v1/naive/delete"].includes(pathname);
 }
 
