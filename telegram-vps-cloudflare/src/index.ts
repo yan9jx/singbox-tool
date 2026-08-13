@@ -109,6 +109,7 @@ const VALID_ACTIONS = new Set([
   "restart_node",
   "restart_proxy",
   "reboot",
+  "latency",
 ]);
 const VALID_TARGETS = new Set(["auto", "node", "reverse-proxy"]);
 
@@ -184,6 +185,31 @@ export const PANEL_KEYBOARD: JsonObject = {
     [{ text: "🖥 切换 VPS", callback_data: "nodes" }, { text: "♻️ 重启 VPS", callback_data: "reboot_ask" }],
   ],
 };
+
+export function alertPolicyText(snapshot: JsonObject, nodeName: string, version: string): string {
+  const diagnostics = isObject(snapshot.diagnostics) ? snapshot.diagnostics : {};
+  const policy = isObject(diagnostics.alert_policy) ? diagnostics.alert_policy : {};
+  const configured = Object.keys(policy).length > 0;
+  const ram = asNumber(policy.ram_warn) || 80;
+  const swap = asNumber(policy.swap_warn) || 30;
+  const cpu = asNumber(policy.cpu_warn) || 80;
+  const disk = asNumber(policy.disk_warn) || 90;
+  const bandwidth = asNumber(policy.bandwidth_mbps);
+  const ratio = asNumber(policy.traffic_saturation_ratio) || 90;
+  const lines = [
+    `🚨 VPS 告警阈值\n[${nodeName}]`,
+    `CPU：≥ ${cpu}%`,
+    `RAM：≥ ${ram}%`,
+    `SWAP：≥ ${swap}%`,
+    `磁盘：≥ ${disk}%`,
+  ];
+  if (bandwidth > 0) lines.push(`带宽：≥ ${ratio}%（约 ${(bandwidth * ratio / 100).toFixed(0)} Mbps）`);
+  lines.push("资源和服务异常连续检测 2 次才告警，节点超过约 2 分钟未上报则判定离线。");
+  lines.push(configured
+    ? `来源：VPS Agent ${version} 实际上报配置。`
+    : `注意：当前 Agent ${version} 尚未上报自定义阈值，以上是 Cloudflare 默认值；升级 Agent 后会显示 VPS 实际配置。`);
+  return lines.join("\n");
+}
 
 function redact(text: string): string {
   return text
@@ -553,6 +579,14 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
       await this.sendMessage(await this.statusText(), this.panelKeyboard());
     } else if (["/status", "状态", "状态刷新", "我的vps状态", "我的 vps 状态", "vps状态"].includes(lower)) {
       await this.sendMessage(await this.statusText(), this.panelKeyboard());
+    } else if (lower === "/thresholds" || lower.includes("告警阈值") || lower.includes("报警阈值")) {
+      await this.sendMessage(await this.thresholdsText());
+    } else if (lower === "/latency" || ["延迟测试", "测试延迟", "网络延迟"].some((item) => lower.includes(item))) {
+      await this.queueImmediate("latency", "auto", "VPS 延迟测试");
+    } else if (["断线提醒", "掉线提醒", "离线提醒"].some((item) => lower.includes(item))) {
+      await this.sendMessage(this.offlineReminderText());
+    } else if (lower.includes("整点播报") || lower.includes("每小时播报")) {
+      await this.sendMessage("✅ Cloudflare 每小时整点播报已启用。它直接读取 VPS 上报状态，不调用 DeepSeek；异常告警仍独立运行。", this.panelKeyboard());
     } else if (lower === "/nodes") {
       await this.sendMessage(await this.nodesText(), this.nodesKeyboard());
     } else if (lower.startsWith("/use ")) {
@@ -590,7 +624,7 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     } else if (lower.startsWith("/ai ")) {
       await this.aiChat(normalized.slice(4).trim());
     } else if (lower === "确认重启vps") {
-      await this.queueImmediate("reboot", "auto", "重启整台 VPS");
+      await this.requestConfirmation("reboot", "auto", "重启整台 VPS");
     } else if (this.state.aiMode) {
       await this.aiChat(normalized);
     } else {
@@ -603,9 +637,9 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     else if (data === "nodes") await this.sendMessage(await this.nodesText(), this.nodesKeyboard());
     else if (data.startsWith("use:")) await this.selectNode(data.slice(4));
     else if (data === "refresh_local") await this.queueImmediate("refresh", "auto", "刷新本机状态");
-    else if (data === "restart_node") await this.queueImmediate("restart_node", "node", "重启节点服务");
-    else if (data === "restart_proxy") await this.queueImmediate("restart_proxy", "reverse-proxy", "重启反向代理");
-    else if (data === "reboot_ask") await this.sendMessage("⚠️ 确认重启 VPS 请发送：确认重启VPS", this.panelKeyboard());
+    else if (data === "restart_node") await this.requestConfirmation("restart_node", "node", "重启节点服务");
+    else if (data === "restart_proxy") await this.requestConfirmation("restart_proxy", "reverse-proxy", "重启反向代理");
+    else if (data === "reboot_ask") await this.requestConfirmation("reboot", "auto", "重启整台 VPS");
     else if (data.startsWith("confirm:")) await this.confirmAction(data.slice(8));
     else if (data.startsWith("cancel:")) await this.cancelAction(data.slice(7));
     else await this.sendMessage(await this.statusText(), this.panelKeyboard());
@@ -645,6 +679,17 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     const node = await this.selectedNode();
     if (!node) return "尚未收到 VPS 代理上报。请先在 VPS 安装 Cloudflare Telegram Agent。";
     return this.formatNodeStatus(node);
+  }
+
+  private async thresholdsText(): Promise<string> {
+    const node = await this.selectedNode();
+    if (!node) return "尚未收到 VPS Agent 上报，无法读取告警阈值。";
+    const snapshot = safeJsonParse(node.snapshot_json);
+    return alertPolicyText(isObject(snapshot) ? snapshot : {}, node.name, node.version);
+  }
+
+  private offlineReminderText(): string {
+    return "✅ 断线提醒已启用。VPS Agent 每 30 秒上报；超过约 2 分钟未上报，Cloudflare 会在下一次 5 分钟巡检时主动提醒，恢复后也会主动通知。该功能不调用 DeepSeek。";
   }
 
   private formatNodeStatus(node: NodeRow): string {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.1.1"
+VERSION="1.1.2"
 APP="/usr/local/lib/ejectors-telegram-vps-agent.py"
 CONF="/etc/ejectors-telegram-vps-agent.json"
 STATE="/var/lib/ejectors-telegram-vps-agent-state.json"
@@ -136,13 +136,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 CONF_PATH = Path("/etc/ejectors-telegram-vps-agent.json")
 STATE_PATH = Path("/var/lib/ejectors-telegram-vps-agent-state.json")
 MANAGER_CONFIG = Path("/opt/universe-vps-manager/config.json")
 MANAGER_APP = Path("/opt/universe-vps-manager/vps_manager.py")
 MAX_OUTPUT = 12000
-ALLOWED_ACTIONS = {"refresh", "clean", "pause10", "resume", "restart_node", "restart_proxy", "reboot"}
+ALLOWED_ACTIONS = {"refresh", "clean", "pause10", "resume", "restart_node", "restart_proxy", "reboot", "latency"}
 
 
 def load_json(path, default):
@@ -343,6 +343,31 @@ def valid_service(name):
     return name if re.fullmatch(r"[A-Za-z0-9_.@-]+", str(name or "")) else ""
 
 
+def latency_test():
+    targets = (
+        ("Cloudflare", "https://www.cloudflare.com/cdn-cgi/trace"),
+        ("Telegram", "https://api.telegram.org"),
+        ("DeepSeek", "https://api.deepseek.com"),
+        ("GitHub", "https://raw.githubusercontent.com/yan9jx/singbox-tool/main/README.md"),
+    )
+    lines = ["🌐 VPS 延迟测试"]
+    for label, url in targets:
+        started = time.perf_counter()
+        request = urllib.request.Request(url, headers={"User-Agent": "ejectors-latency-test/1.0"})
+        try:
+            with urllib.request.urlopen(request, timeout=6) as response:
+                response.read(1)
+            elapsed = round((time.perf_counter() - started) * 1000)
+            lines.append(f"{label}：{elapsed} ms")
+        except urllib.error.HTTPError:
+            elapsed = round((time.perf_counter() - started) * 1000)
+            lines.append(f"{label}：{elapsed} ms（已连通）")
+        except Exception:
+            lines.append(f"{label}：连接失败")
+    lines.append("固定白名单 HTTPS 测试，不使用 DeepSeek Token。")
+    return True, "\n".join(lines)
+
+
 def execute(command):
     action = str(command.get("action", ""))
     if action not in ALLOWED_ACTIONS:
@@ -369,6 +394,8 @@ def execute(command):
         return update_pause(10)
     if action == "resume":
         return update_pause(0)
+    if action == "latency":
+        return latency_test()
     if action == "restart_node":
         cfg = load_json(MANAGER_CONFIG, {})
         service = valid_service(cfg.get("service_name", "sing-box"))
@@ -499,7 +526,8 @@ ReadWritePaths=/var/lib /opt/universe-vps-manager /run /tmp
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now ejectors-telegram-vps-agent.service
+  systemctl enable ejectors-telegram-vps-agent.service >/dev/null
+  systemctl restart ejectors-telegram-vps-agent.service
 }
 
 apply_cloudflare_only_mode() {
@@ -578,7 +606,7 @@ secret = hmac.new(token.encode(), b"ejectors-telegram-webhook-v1", hashlib.sha25
 health_url = str(agent["worker_url"]).rstrip("/") + "/health"
 health_request = urllib.request.Request(
     health_url,
-    headers={"User-Agent": "ejectors-telegram-vps-agent/1.1.1"},
+    headers={"User-Agent": "ejectors-telegram-vps-agent/1.1.2"},
 )
 with urllib.request.urlopen(health_request, timeout=15) as response:
     health = json.loads(response.read().decode())
