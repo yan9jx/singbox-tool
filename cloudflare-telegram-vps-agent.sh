@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.1.4"
+VERSION="1.1.5"
 APP="/usr/local/lib/ejectors-telegram-vps-agent.py"
 CONF="/etc/ejectors-telegram-vps-agent.json"
 STATE="/var/lib/ejectors-telegram-vps-agent-state.json"
@@ -136,13 +136,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.1.4"
+VERSION = "1.1.5"
 CONF_PATH = Path("/etc/ejectors-telegram-vps-agent.json")
 STATE_PATH = Path("/var/lib/ejectors-telegram-vps-agent-state.json")
 MANAGER_CONFIG = Path("/opt/universe-vps-manager/config.json")
 MANAGER_APP = Path("/opt/universe-vps-manager/vps_manager.py")
 MAX_OUTPUT = 12000
-ALLOWED_ACTIONS = {"refresh", "clean", "pause10", "resume", "restart_node", "restart_proxy", "reboot", "latency"}
+ALLOWED_ACTIONS = {"refresh", "clean", "pause10", "resume", "restart_node", "restart_proxy", "reboot", "latency", "speedtest"}
 
 
 def load_json(path, default):
@@ -344,26 +344,61 @@ def valid_service(name):
 
 
 def latency_test():
-    targets = (
-        ("Cloudflare Speed", "https://speed.cloudflare.com/__down?bytes=0"),
-        ("中国移动（VPS→官网）", "https://www.10086.cn/"),
-        ("中国联通（VPS→官网）", "https://m.client.10010.com/"),
-        ("中国电信（VPS→官网）", "https://www.189.cn/"),
-    )
-    lines = ["🌐 VPS 延迟测试"]
-    for label, url in targets:
+    url = "http://cp.cloudflare.com/"
+    samples = []
+    for _ in range(3):
         started = time.perf_counter()
-        request = urllib.request.Request(url, headers={"User-Agent": "ejectors-latency-test/1.0"})
+        request = urllib.request.Request(url, headers={
+            "Cache-Control": "no-cache",
+            "User-Agent": "ejectors-latency-test/1.1",
+        })
         try:
             with urllib.request.urlopen(request, timeout=6) as response:
                 response.read(1)
-            elapsed = round((time.perf_counter() - started) * 1000)
-            lines.append(f"{label}：{elapsed} ms")
+            samples.append(round((time.perf_counter() - started) * 1000))
         except urllib.error.HTTPError:
-            elapsed = round((time.perf_counter() - started) * 1000)
-            lines.append(f"{label}：{elapsed} ms（已连通）")
+            samples.append(round((time.perf_counter() - started) * 1000))
         except Exception:
-            lines.append(f"{label}：连接失败")
+            pass
+    if not samples:
+        return False, "🌐 VPS 延迟测试\nCloudflare：连接失败"
+    average = round(sum(samples) / len(samples))
+    return True, f"🌐 VPS 延迟测试\nCloudflare：{average} ms（{len(samples)} 次平均，最低 {min(samples)} ms）"
+
+
+def speed_test():
+    url = "https://speed.cloudflare.com/__down?bytes=100000000"
+    expected_bytes = 100_000_000
+    downloaded = 0
+    started = time.perf_counter()
+    partial_reason = ""
+    request = urllib.request.Request(url, headers={
+        "Cache-Control": "no-cache",
+        "User-Agent": "ejectors-speed-test/1.0",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            while downloaded < expected_bytes:
+                if time.perf_counter() - started >= 90:
+                    partial_reason = "达到 90 秒安全上限"
+                    break
+                chunk = response.read(min(256 * 1024, expected_bytes - downloaded))
+                if not chunk:
+                    break
+                downloaded += len(chunk)
+    except Exception as exc:
+        if downloaded == 0:
+            return False, f"🚀 VPS 下载测速失败：{redact(exc)}"
+        partial_reason = "连接提前结束"
+    elapsed = max(time.perf_counter() - started, 0.001)
+    mbps = downloaded * 8 / elapsed / 1_000_000
+    lines = [
+        "🚀 VPS 下载测速",
+        f"Cloudflare：{mbps:.1f} Mbps",
+        f"已下载：{downloaded / 1_000_000:.1f} MB，耗时：{elapsed:.1f} 秒",
+    ]
+    if downloaded < expected_bytes:
+        lines.append(f"结果为部分样本：{partial_reason or '未收到完整 100 MB'}")
     return True, "\n".join(lines)
 
 
@@ -395,6 +430,8 @@ def execute(command):
         return update_pause(0)
     if action == "latency":
         return latency_test()
+    if action == "speedtest":
+        return speed_test()
     if action == "restart_node":
         cfg = load_json(MANAGER_CONFIG, {})
         service = valid_service(cfg.get("service_name", "sing-box"))
@@ -605,7 +642,7 @@ secret = hmac.new(token.encode(), b"ejectors-telegram-webhook-v1", hashlib.sha25
 health_url = str(agent["worker_url"]).rstrip("/") + "/health"
 health_request = urllib.request.Request(
     health_url,
-    headers={"User-Agent": "ejectors-telegram-vps-agent/1.1.4"},
+    headers={"User-Agent": "ejectors-telegram-vps-agent/1.1.5"},
 )
 with urllib.request.urlopen(health_request, timeout=15) as response:
     health = json.loads(response.read().decode())

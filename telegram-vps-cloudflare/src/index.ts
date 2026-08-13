@@ -131,6 +131,7 @@ const VALID_ACTIONS = new Set([
   "restart_proxy",
   "reboot",
   "latency",
+  "speedtest",
 ]);
 const VALID_TARGETS = new Set(["auto", "node", "reverse-proxy"]);
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
@@ -640,8 +641,10 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
       await this.sendMessage(await this.statusText(), this.panelKeyboard());
     } else if (lower === "/thresholds" || lower.includes("告警阈值") || lower.includes("报警阈值")) {
       await this.sendMessage(await this.thresholdsText());
-    } else if (lower === "/latency" || ["测延迟", "测速", "延迟测试", "测试延迟", "网络延迟"].some((item) => lower.includes(item))) {
+    } else if (lower === "/latency" || ["测延迟", "延迟测试", "测试延迟", "网络延迟"].some((item) => lower.includes(item))) {
       await this.queueImmediate("latency", "auto", "VPS 延迟测试");
+    } else if (lower === "/speedtest" || ["测网速", "测速", "网速测试", "下载测速", "网络测速"].some((item) => lower.includes(item))) {
+      await this.requestConfirmation("speedtest", "auto", "下载 100 MB 测试文件进行网速测试");
     } else if (["断线提醒", "掉线提醒", "离线提醒"].some((item) => lower.includes(item))) {
       await this.sendMessage(this.offlineReminderText());
     } else if (lower.includes("整点播报") || lower.includes("每小时播报")) {

@@ -12,7 +12,8 @@
 - VPS 状态、只读诊断、缓存清理、告警暂停/恢复
 - 原控制面板按钮与重启流程
 - 所有重启操作必须通过 2 分钟二次确认按钮；只读诊断可直接执行
-- `/thresholds` 读取 VPS 实际告警阈值；`/latency` 测试 Cloudflare Speed 及 VPS 到移动、联通、电信官网的 HTTPS 往返耗时
+- `/thresholds` 读取 VPS 实际告警阈值；`/latency` 通过 `cp.cloudflare.com` 测试 VPS 到 Cloudflare 的延迟
+- `/speedtest` 下载 Cloudflare 100 MB 测试文件并计算 VPS 下载速度；执行前需要二次确认
 - 多 VPS `/nodes`、`/use 节点ID`
 - Cloudflare 每小时状态播报，以及资源、服务、端口和离线上报告警（不调用 DeepSeek）
 - 北京时间 09:00 每日 AI 运维简报

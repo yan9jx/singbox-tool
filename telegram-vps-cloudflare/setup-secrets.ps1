@@ -126,6 +126,7 @@ try {
         @{ command = 'status'; description = '查看当前 VPS 状态' },
         @{ command = 'thresholds'; description = '查看真实告警阈值' },
         @{ command = 'latency'; description = '测试 VPS 网络延迟' },
+        @{ command = 'speedtest'; description = '测试 VPS 下载网速（100 MB）' },
         @{ command = 'nodes'; description = '查看和切换 VPS' },
         @{ command = 'ai'; description = 'AI 模式与单次提问' },
         @{ command = 'balance'; description = '查看 DeepSeek 余额' },
