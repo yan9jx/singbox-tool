@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.08.13-4"
+APP_VERSION="2026.08.13-5"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -197,7 +197,9 @@ import re
 import os
 import sys
 import time
+import datetime
 import fcntl
+import secrets
 import shutil
 import subprocess
 import urllib.parse
@@ -332,6 +334,35 @@ def send_message(text, reply_markup=None):
     return tg_api("sendMessage", data, timeout=8)
 
 
+def deepseek_post(payload, timeout=20):
+    api_key = str(CFG.get("deepseek_api_key", "")).strip()
+    if not api_key:
+        return None
+    req = urllib.request.Request(
+        "https://api.deepseek.com/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            resp = json.loads(r.read().decode("utf-8"))
+        return resp["choices"][0]["message"]
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="ignore")[:500]
+        except Exception:
+            pass
+        log_event(f"deepseek http error {e.code}: {detail or e.reason}")
+    except Exception as e:
+        log_event(f"deepseek error: {e}")
+    return None
+
+
 def deepseek_chat(text):
     api_key = str(CFG.get("deepseek_api_key", "")).strip()
     if not api_key:
@@ -344,9 +375,11 @@ def deepseek_chat(text):
             {
                 "role": "system",
                 "content": (
-                    "你是部署在用户私有 Telegram 机器人中的中文助手。回答应简洁、准确。"
-                    "当用户询问本机 VPS 的状态、CPU、内存、磁盘、流量、服务或端口时，"
-                    "必须调用 show_vps_status；不要猜测或编造服务器状态。"
+                    "你是部署在用户私有 Telegram 机器人中的中文 AI VPS 管家。回答应简洁、准确。"
+                    "查询本机概览状态时调用 show_vps_status；分析性能、内存、磁盘、服务、网络、"
+                    "安全登录或日志问题时必须调用 read_vps_diagnostics，且只能依据工具返回的数据。"
+                    "只有用户明确要求重启服务时才能调用 request_service_restart；该工具只申请确认，"
+                    "不会直接执行。不要索要或输出密码、API Key、Token、SSH 私钥，也不要编造状态。"
                 ),
             },
             *DEEPSEEK_HISTORY,
@@ -364,49 +397,94 @@ def deepseek_chat(text):
                         "additionalProperties": False,
                     },
                 },
-            }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_vps_diagnostics",
+                    "description": "运行预设的只读白名单检查，用于分析 VPS 性能、内存、磁盘、服务、网络、安全登录或日志问题",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "scope": {
+                                "type": "string",
+                                "enum": ["overview", "performance", "memory", "disk", "services", "network", "security", "logs"],
+                            },
+                            "target": {
+                                "type": "string",
+                                "enum": ["auto", "xray", "sing-box", "caddy", "nginx", "filebrowser"],
+                            },
+                        },
+                        "required": ["scope"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "request_service_restart",
+                    "description": "仅申请带按钮的重启确认；必须由用户点击确认后才能执行",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "target": {
+                                "type": "string",
+                                "enum": ["node", "xray", "sing-box", "reverse-proxy"],
+                            }
+                        },
+                        "required": ["target"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
         ],
         "tool_choice": "auto",
         "max_tokens": 800,
     }
-    req = urllib.request.Request(
-        "https://api.deepseek.com/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    message = deepseek_post(payload, timeout=20)
+    if not message:
+        return False
 
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            resp = json.loads(r.read().decode("utf-8"))
-        message = resp["choices"][0]["message"]
-        for tool_call in message.get("tool_calls") or []:
-            if tool_call.get("function", {}).get("name") == "show_vps_status":
-                send_status(keyboard())
-                return True
-
-        answer = str(message.get("content") or "").strip()
-        if answer:
-            if ai_mode_enabled():
-                DEEPSEEK_HISTORY.extend([
-                    {"role": "user", "content": text},
-                    {"role": "assistant", "content": answer},
-                ])
-                del DEEPSEEK_HISTORY[:-12]
-            send_message(answer[:4000])
+    tool_messages = []
+    for tool_call in message.get("tool_calls") or []:
+        function = tool_call.get("function", {})
+        name = function.get("name")
+        if name == "show_vps_status":
+            send_status(keyboard())
             return True
-    except urllib.error.HTTPError as e:
-        detail = ""
         try:
-            detail = e.read().decode("utf-8", errors="ignore")[:500]
+            arguments = json.loads(function.get("arguments") or "{}")
         except Exception:
-            pass
-        log_event(f"deepseek http error {e.code}: {detail or e.reason}")
-    except Exception as e:
-        log_event(f"deepseek error: {e}")
+            arguments = {}
+        if name == "read_vps_diagnostics":
+            result = read_vps_diagnostics(arguments.get("scope"), arguments.get("target", "auto"))
+            tool_messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.get("id", "diagnostics"),
+                "content": result,
+            })
+        elif name == "request_service_restart":
+            return request_service_restart(arguments.get("target"))
+
+    if tool_messages:
+        followup = dict(payload)
+        followup["messages"] = payload["messages"] + [message] + tool_messages
+        followup["tool_choice"] = "none"
+        message = deepseek_post(followup, timeout=25)
+        if not message:
+            return False
+
+    answer = str(message.get("content") or "").strip()
+    if answer:
+        if ai_mode_enabled():
+            DEEPSEEK_HISTORY.extend([
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": answer},
+            ])
+            del DEEPSEEK_HISTORY[:-12]
+        send_message(answer[:4000])
+        return True
 
     return False
 
@@ -515,6 +593,232 @@ def deepseek_balance_text():
     except Exception as e:
         log_event(f"deepseek balance error: {e}")
         return "DeepSeek 余额查询失败，请稍后再试。"
+
+
+def redact_diagnostic_text(text):
+    text = str(text or "")
+    patterns = (
+        (r"\bsk-[A-Za-z0-9_-]{10,}\b", "[已隐藏API Key]"),
+        (r"\b\d{6,12}:[A-Za-z0-9_-]{20,}\b", "[已隐藏Bot Token]"),
+        (r"(?i)(api[_ -]?key|token|password|passwd|secret)\s*[:=]\s*\S+", r"\1=[已隐藏]"),
+        (r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----", "[已隐藏私钥]"),
+    )
+    for pattern, replacement in patterns:
+        text = re.sub(pattern, replacement, text)
+    return text[:12000]
+
+
+def diagnostic_command(title, command, timeout=8):
+    code, out, err = run(command, timeout=timeout)
+    body = out or err or "无输出"
+    return f"## {title}\n退出码: {code}\n{redact_diagnostic_text(body)}"
+
+
+def diagnostic_services(target="auto"):
+    allowed = {
+        "xray": ["xray"],
+        "sing-box": [singbox_service_name() or "sing-box"],
+        "caddy": ["shared-caddy", "caddy"],
+        "nginx": ["nginx", "filebrowser-nginx"],
+        "filebrowser": ["filebrowser"],
+    }
+    candidates = allowed.get(str(target), [])
+    if target == "auto":
+        candidates = ["xray", singbox_service_name() or "sing-box", "shared-caddy", "caddy", "nginx", "filebrowser"]
+    result = []
+    for service in candidates:
+        if service and re.fullmatch(r"[A-Za-z0-9_.@-]+", service) and unit_exists(service) and service not in result:
+            result.append(service)
+    return result[:5]
+
+
+def read_vps_diagnostics(scope, target="auto"):
+    allowed_scopes = {"overview", "performance", "memory", "disk", "services", "network", "security", "logs"}
+    scope = str(scope or "overview")
+    target = str(target or "auto")
+    if scope not in allowed_scopes:
+        scope = "overview"
+    if target not in {"auto", "xray", "sing-box", "caddy", "nginx", "filebrowser"}:
+        target = "auto"
+
+    sections = [f"检查范围: {scope}", f"服务器: {CFG.get('server_name', 'VPS')}", f"时间: {now_text()}"]
+    if scope == "overview":
+        sections.append(redact_diagnostic_text(status_text()))
+        sections.append(diagnostic_command("系统运行时间", "uptime", 3))
+        sections.append(diagnostic_command("失败的 systemd 服务", "systemctl --failed --no-legend --plain", 5))
+    elif scope == "performance":
+        sections.append(diagnostic_command("负载与运行时间", "uptime", 3))
+        sections.append(diagnostic_command("CPU 占用最高的进程", "ps -eo pid,comm,%cpu,%mem,rss --sort=-%cpu | head -n 12", 5))
+        sections.append(diagnostic_command("虚拟内存摘要", "vmstat 1 2 | tail -n 2", 5))
+    elif scope == "memory":
+        sections.append(diagnostic_command("内存摘要", "free -m", 3))
+        sections.append(diagnostic_command("内存占用最高的进程", "ps -eo pid,comm,%mem,%cpu,rss --sort=-%mem | head -n 12", 5))
+    elif scope == "disk":
+        sections.append(diagnostic_command("文件系统使用率", "df -hT / /var /opt /srv 2>/dev/null | awk '!seen[$7]++'", 5))
+        sections.append(diagnostic_command("主要目录占用", "du -x -B1 -d1 /var /opt /srv 2>/dev/null | sort -nr | head -n 15", 10))
+        sections.append(diagnostic_command("systemd 日志占用", "journalctl --disk-usage", 5))
+    elif scope == "services":
+        statuses = managed_service_statuses()
+        sections.append("## 受管服务\n" + ("\n".join(f"{name}: {state}" for name, state in statuses) or "未检测到受管服务"))
+        sections.append(diagnostic_command("失败的 systemd 服务", "systemctl --failed --no-legend --plain", 5))
+    elif scope == "network":
+        sections.append(diagnostic_command("连接统计", "ss -s", 3))
+        sections.append("## 公网监听端口\n" + display_ports())
+        sections.append(diagnostic_command("当前网卡流量", "ip -s -h link", 5))
+    elif scope == "security":
+        sections.append(diagnostic_command("最近登录", "last -n 10 -F", 5))
+        sections.append(diagnostic_command(
+            "24小时 SSH 失败记录",
+            "journalctl -u ssh -u sshd --since '24 hours ago' --no-pager 2>/dev/null | grep -Ei 'failed|invalid user|authentication failure' | tail -n 30",
+            8,
+        ))
+    elif scope == "logs":
+        services = diagnostic_services(target)
+        if not services:
+            sections.append("## 服务日志\n未检测到对应的已安装服务。")
+        for service in services:
+            sections.append(diagnostic_command(
+                f"{service} 最近警告日志",
+                f"journalctl -u {service} -p warning -n 35 --no-pager",
+                8,
+            ))
+
+    return redact_diagnostic_text("\n\n".join(sections))
+
+
+def restart_target_info(target):
+    target = str(target or "")
+    if target == "node":
+        service = str(CFG.get("service_name", "sing-box")).strip()
+        label = f"节点服务 {service}"
+    elif target == "xray":
+        service, label = "xray", "Xray"
+    elif target == "sing-box":
+        service = singbox_service_name() or "sing-box"
+        label = "sing-box"
+    elif target == "reverse-proxy":
+        service = next((name for name in ("shared-caddy", "caddy", "nginx", "filebrowser-nginx") if unit_exists(name)), "")
+        label = "反向代理"
+    else:
+        return "", ""
+    if not service or not re.fullmatch(r"[A-Za-z0-9_.@-]+", service) or not unit_exists(service):
+        return "", label
+    return service, label
+
+
+def request_service_restart(target):
+    service, label = restart_target_info(target)
+    if not service:
+        send_message(f"未检测到可安全重启的{label or '目标服务'}。")
+        return True
+    token = secrets.token_hex(6)
+    pending = {
+        "token": token,
+        "service": service,
+        "label": label,
+        "expires": now_ts() + 120,
+    }
+    write_text(state_path("pending_ai_restart.json"), json.dumps(pending, ensure_ascii=False))
+    buttons = {
+        "inline_keyboard": [[
+            {"text": f"✅ 确认重启 {label}", "callback_data": f"ai_restart_yes:{token}"},
+            {"text": "取消", "callback_data": f"ai_restart_no:{token}"},
+        ]]
+    }
+    send_message(
+        f"⚠️ AI 申请危险操作\n[{CFG['server_name']}]\n\n操作：重启 {label}\n有效期：2 分钟\n只有点击确认按钮才会执行。",
+        buttons,
+    )
+    return True
+
+
+def handle_ai_restart_callback(data):
+    if not (data.startswith("ai_restart_yes:") or data.startswith("ai_restart_no:")):
+        return False
+    token = data.split(":", 1)[1]
+    pending_path = state_path("pending_ai_restart.json")
+    try:
+        pending = json.loads(read_text(pending_path, "{}"))
+    except Exception:
+        pending = {}
+    try:
+        pending_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    if not pending or not secrets.compare_digest(str(pending.get("token", "")), token):
+        send_message("此操作确认已失效，请重新发起。")
+        return True
+    if now_ts() > int(pending.get("expires", 0)):
+        send_message("操作确认已超过 2 分钟，请重新发起。")
+        return True
+    if data.startswith("ai_restart_no:"):
+        send_message("已取消重启操作。")
+        return True
+    service = str(pending.get("service", ""))
+    label = str(pending.get("label", service))
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]+", service) or not unit_exists(service):
+        send_message("目标服务已变化，未执行重启。")
+        return True
+    send_message(f"🔄 正在重启 {label}...")
+    code, _, err = run(f"systemctl restart {service}", timeout=20)
+    time.sleep(1)
+    if code == 0 and systemd_active(service):
+        send_message(f"✅ {label} 已重启并正常运行。", keyboard())
+    else:
+        log_event(f"confirmed restart failed: {service}: {err}")
+        send_message(f"❌ {label} 重启失败，请检查服务日志。", keyboard())
+    return True
+
+
+def beijing_now():
+    return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+
+
+def daily_brief_enabled():
+    return read_text(state_path("daily_brief_mode"), "on") == "on"
+
+
+def set_daily_brief(enabled):
+    write_text(state_path("daily_brief_mode"), "on" if enabled else "off")
+
+
+def daily_brief_text():
+    if not str(CFG.get("deepseek_api_key", "")).strip():
+        return ""
+    context = "\n\n".join([
+        read_vps_diagnostics("overview", "auto"),
+        read_vps_diagnostics("performance", "auto"),
+        read_vps_diagnostics("services", "auto"),
+    ])[:18000]
+    payload = {
+        "model": "deepseek-v4-flash",
+        "thinking": {"type": "disabled"},
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是只读 VPS 运维分析助手。仅依据提供的检查结果生成中文日报，不得编造。"
+                    "输出不超过1200字：先给总体结论，再列资源、服务、异常和最多3条建议。"
+                    "不要输出命令，不要建议无依据的重启，疑似敏感信息不要复述。"
+                ),
+            },
+            {"role": "user", "content": context},
+        ],
+        "max_tokens": 900,
+    }
+    message = deepseek_post(payload, timeout=30)
+    answer = str((message or {}).get("content") or "").strip()
+    if not answer:
+        return ""
+    return f"🧭 每日 AI 运维简报\n[{CFG['server_name']}]\n\n{answer}"[:4000]
+
+
+def send_daily_brief():
+    text = daily_brief_text()
+    if not text:
+        return False
+    send_message(text, keyboard())
+    return True
 
 
 def answer_callback(callback_id, text="已收到"):
@@ -1681,6 +1985,17 @@ def resource_check():
 
 
 def report():
+    current = beijing_now()
+    today = current.strftime("%Y-%m-%d")
+    if (
+        current.hour >= 9
+        and daily_brief_enabled()
+        and str(CFG.get("deepseek_api_key", "")).strip()
+        and read_text(state_path("daily_brief_last_date"), "") != today
+    ):
+        if send_daily_brief():
+            write_text(state_path("daily_brief_last_date"), today)
+            return
     send_status(keyboard())
 
 
@@ -1701,6 +2016,8 @@ def handle_callback(cb):
     cid = cb.get("id", "")
     answer_callback(cid, "已收到")
 
+    if handle_ai_restart_callback(data):
+        return
     if data == "status":
         send_status(keyboard())
     elif data == "refresh_local":
@@ -1743,6 +2060,17 @@ def handle_text(text):
         send_message("pong")
     elif ai_command in ("/balance", "/ai balance", "/ai 余额", "ai余额", "deepseek余额"):
         send_message(deepseek_balance_text())
+    elif ai_command == "/brief on":
+        set_daily_brief(True)
+        send_message("✅ 每日 AI 运维简报已开启，将在北京时间每天 09:00 后首次定时汇报时发送。")
+    elif ai_command == "/brief off":
+        set_daily_brief(False)
+        send_message("✅ 每日 AI 运维简报已关闭；原监控和告警不受影响。")
+    elif ai_command == "/brief":
+        if not str(CFG.get("deepseek_api_key", "")).strip():
+            send_message("DeepSeek API Key 未配置，无法生成 AI 运维简报。")
+        elif not send_daily_brief():
+            send_message("AI 运维简报暂时生成失败，请稍后再试。")
     elif ai_command == "/ai on":
         if not str(CFG.get("deepseek_api_key", "")).strip():
             send_message("DeepSeek API Key 未配置，无法开启 AI 模式。")
@@ -1763,7 +2091,9 @@ def handle_text(text):
             f"当前 AI 连续对话模式：{state}\n"
             "开启：/ai on\n"
             "关闭：/ai off\n"
-            "单次提问：/ai 你的问题"
+            "单次提问：/ai 你的问题\n"
+            "即时运维简报：/brief\n"
+            "每日简报：/brief on 或 /brief off"
         )
     elif text.startswith("/ai "):
         prompt = text[4:].strip()
@@ -1838,6 +2168,9 @@ def main():
         resource_check()
     elif cmd == "report":
         report()
+    elif cmd == "daily-brief":
+        if not send_daily_brief():
+            sys.exit(1)
     elif cmd == "clean":
         clean_cache(manual=False)
     elif cmd == "bot-loop":
@@ -1860,7 +2193,7 @@ def main():
     elif cmd == "init-traffic":
         init_traffic()
     else:
-        print("usage: vps_manager.py alive|resource|report|clean|bot-loop|bot|sync-updates|check-telegram|check-deepseek|menu|status|init-traffic")
+        print("usage: vps_manager.py alive|resource|report|daily-brief|clean|bot-loop|bot|sync-updates|check-telegram|check-deepseek|menu|status|init-traffic")
 
 
 if __name__ == "__main__":
@@ -2111,6 +2444,10 @@ PYAI
   echo "✅ DeepSeek AI 配置完成"
   echo "连续对话：/ai on（退出：/ai off）"
   echo "单次提问：/ai 你的问题"
+  echo "即时运维简报：/brief"
+  echo "每日简报：/brief on（关闭：/brief off）"
+  echo "智能诊断示例：这台 VPS 为什么变慢了？"
+  echo "确认式操作示例：请重启 Xray"
   echo "VPS 状态：我的 VPS 状态"
 }
 
@@ -2128,8 +2465,18 @@ main() {
   install_bot_service
 }
 
-if [ "${1:-}" = "--setup-ai" ]; then
-  setup_ai
-else
-  main "$@"
-fi
+case "${1:-}" in
+  --setup-ai)
+    setup_ai
+    ;;
+  --install-or-update)
+    if [ -f "$CONFIG_FILE" ] && [ -f "$PY_FILE" ] && [ -f "$BOT_SERVICE" ]; then
+      setup_ai
+    else
+      main
+    fi
+    ;;
+  *)
+    main "$@"
+    ;;
+esac
