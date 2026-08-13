@@ -1,12 +1,27 @@
 ﻿param()
 
 $ErrorActionPreference = 'Stop'
+$ResumeAfterSecretUpload = @($args) -contains 'resume'
 $WorkerName = 'ejectors-telegram-vps-manager'
 $WorkerUrl = 'https://ejectors-telegram-vps-manager.yan9jx-ejectors.workers.dev'
 $Wrangler = Join-Path $PSScriptRoot 'node_modules\.bin\wrangler.cmd'
 
 if (-not (Test-Path -LiteralPath $Wrangler)) {
     throw '未找到 Wrangler。请先在 telegram-vps-cloudflare 目录执行 pnpm install。'
+}
+
+$NodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+$Node = if ($NodeCommand) { $NodeCommand.Source } else { $null }
+if (-not $Node) {
+    $BundledNode = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
+    if (Test-Path -LiteralPath $BundledNode) { $Node = $BundledNode }
+}
+if (-not $Node) {
+    throw '未找到 Node.js。请安装 Node.js 22 或从 Codex 环境运行此脚本。'
+}
+$NodeDirectory = Split-Path -Parent $Node
+if (-not (($env:PATH -split ';') -contains $NodeDirectory)) {
+    $env:PATH = "$NodeDirectory;$env:PATH"
 }
 
 function Convert-SecureToPlain([Security.SecureString]$Secure) {
@@ -26,14 +41,37 @@ function Get-DerivedSecret([string]$Token, [string]$Purpose) {
 }
 
 function Set-WorkerSecret([string]$Name, [string]$Value) {
-    $Value | & $Wrangler secret put $Name --name $WorkerName | Out-Host
+    $Value | & $Wrangler secret put $Name --name $WorkerName --install-skills=false | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "写入 Cloudflare Secret 失败：$Name" }
+}
+
+function Test-CloudflareLogin {
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $WhoAmIOutput = @(& $Wrangler whoami --install-skills=false 2>&1)
+        $WhoAmIExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    $WhoAmIText = $WhoAmIOutput | Out-String
+    return ($WhoAmIExitCode -eq 0 -and $WhoAmIText -notmatch '(?i)not authenticated|not logged in')
 }
 
 Write-Host '==================================================' -ForegroundColor Cyan
 Write-Host '独立 Cloudflare Telegram VPS 管家 - 安全配置' -ForegroundColor Cyan
 Write-Host '不会修改 ejectors-vps-dashboard、网页、域名或路由。'
 Write-Host '==================================================' -ForegroundColor Cyan
+
+Write-Host '正在检查 Cloudflare 登录状态...' -ForegroundColor Yellow
+$LoggedIn = Test-CloudflareLogin
+if (-not $LoggedIn) {
+    Write-Host '尚未登录 Cloudflare，即将打开浏览器授权。授权完成后返回此窗口。' -ForegroundColor Yellow
+    & $Wrangler login --install-skills=false
+    if ($LASTEXITCODE -ne 0) { throw 'Cloudflare 登录失败。' }
+    if (-not (Test-CloudflareLogin)) { throw 'Cloudflare 登录状态验证失败。' }
+}
+Write-Host 'Cloudflare 登录状态正常。' -ForegroundColor Green
 
 $BotSecure = Read-Host 'Telegram Bot Token（输入不显示）' -AsSecureString
 $ChatId = (Read-Host 'Telegram Chat ID').Trim()
@@ -55,11 +93,15 @@ $WebhookSecret = Get-DerivedSecret $BotToken 'ejectors-telegram-webhook-v1'
 $AgentSecret = Get-DerivedSecret $BotToken 'ejectors-vps-agent-v1'
 
 try {
-    Set-WorkerSecret 'TELEGRAM_BOT_TOKEN' $BotToken
-    Set-WorkerSecret 'TELEGRAM_CHAT_ID' $ChatId
-    Set-WorkerSecret 'TELEGRAM_WEBHOOK_SECRET' $WebhookSecret
-    Set-WorkerSecret 'DEEPSEEK_API_KEY' $DeepSeekKey
-    Set-WorkerSecret 'VPS_AGENT_SECRET' $AgentSecret
+    if ($ResumeAfterSecretUpload) {
+        Write-Host '续跑模式：保留现有 Cloudflare Secrets，不重复上传。' -ForegroundColor Yellow
+    } else {
+        Set-WorkerSecret 'TELEGRAM_BOT_TOKEN' $BotToken
+        Set-WorkerSecret 'TELEGRAM_CHAT_ID' $ChatId
+        Set-WorkerSecret 'TELEGRAM_WEBHOOK_SECRET' $WebhookSecret
+        Set-WorkerSecret 'DEEPSEEK_API_KEY' $DeepSeekKey
+        Set-WorkerSecret 'VPS_AGENT_SECRET' $AgentSecret
+    }
 
     # Wrangler 每次写入 Secret 都会创建新 Worker 版本，边缘节点可能需要短暂时间完成传播。
     $health = $null
@@ -89,8 +131,11 @@ try {
         @{ command = 'clean'; description = '清理缓存' },
         @{ command = 'pause10'; description = '暂停告警 10 分钟' },
         @{ command = 'resume'; description = '恢复告警' }
-    ) | ConvertTo-Json -Compress
-    $setCommands = Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$BotToken/setMyCommands" -ContentType 'application/json' -Body (@{ commands = ($commands | ConvertFrom-Json) } | ConvertTo-Json -Depth 5)
+    )
+    $commandsBody = ConvertTo-Json -InputObject @{ commands = $commands } -Depth 5 -Compress
+    if ($commandsBody -notmatch '^\{"commands":\[') { throw 'Telegram 命令菜单 JSON 生成失败。' }
+    $commandsBodyBytes = [Text.Encoding]::UTF8.GetBytes($commandsBody)
+    $setCommands = Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$BotToken/setMyCommands" -ContentType 'application/json; charset=utf-8' -Body $commandsBodyBytes
     if (-not $setCommands.ok) { throw 'Telegram 命令菜单设置失败。' }
 
     $deepSeek = Invoke-RestMethod -Uri 'https://api.deepseek.com/user/balance' -Headers @{ Authorization = "Bearer $DeepSeekKey" } -TimeoutSec 20

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 APP="/usr/local/lib/ejectors-telegram-vps-agent.py"
 CONF="/etc/ejectors-telegram-vps-agent.json"
 STATE="/var/lib/ejectors-telegram-vps-agent-state.json"
@@ -446,7 +446,11 @@ if not token:
     raise SystemExit("Bot Token 未配置")
 secret = hmac.new(token.encode(), b"ejectors-telegram-webhook-v1", hashlib.sha256).hexdigest()
 health_url = str(agent["worker_url"]).rstrip("/") + "/health"
-with urllib.request.urlopen(health_url, timeout=15) as response:
+health_request = urllib.request.Request(
+    health_url,
+    headers={"User-Agent": "ejectors-telegram-vps-agent/1.0.2"},
+)
+with urllib.request.urlopen(health_request, timeout=15) as response:
     health = json.loads(response.read().decode())
 if not health.get("ok") or health.get("nodes", {}).get("online_nodes", 0) < 1:
     raise SystemExit("Cloudflare Worker 尚未看到在线 VPS Agent")
