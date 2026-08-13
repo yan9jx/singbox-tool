@@ -1,0 +1,13 @@
+{
+  "extends": "agents/tsconfig",
+  "compilerOptions": {
+    "lib": ["ES2022", "WebWorker"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "types": ["./worker-configuration.d.ts"]
+  },
+  "include": ["src/**/*.ts", "worker-configuration.d.ts"]
+}

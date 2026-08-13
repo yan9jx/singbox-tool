@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.08.13-5"
+APP_VERSION="2026.08.13-6"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -2292,6 +2292,18 @@ WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
+  if [ -f /var/lib/ejectors-telegram-webhook-active ]; then
+    systemctl disable --now universe-vps-manager-bot.service >/dev/null 2>&1 || true
+    python3 "$PY_FILE" init-traffic >/dev/null 2>&1 || true
+    if ! python3 "$PY_FILE" check-telegram; then
+      echo "Telegram 发送检查失败；Cloudflare Webhook 模式未启动本地轮询服务。"
+      return 1
+    fi
+    echo
+    echo "✅ 安装完成（Cloudflare Webhook 模式）"
+    echo "监控 cron、告警发送和原节点功能保持启用；本地 getUpdates 轮询保持关闭。"
+    return 0
+  fi
   systemctl enable universe-vps-manager-bot.service >/dev/null 2>&1 || true
   python3 "$PY_FILE" init-traffic >/dev/null 2>&1 || true
   python3 "$PY_FILE" sync-updates >/dev/null 2>&1 || true

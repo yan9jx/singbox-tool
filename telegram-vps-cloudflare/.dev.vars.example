@@ -1,0 +1,5 @@
+TELEGRAM_BOT_TOKEN=123456:replace_me
+TELEGRAM_CHAT_ID=123456789
+TELEGRAM_WEBHOOK_SECRET=replace_with_random_secret
+DEEPSEEK_API_KEY=sk-replace_me
+VPS_AGENT_SECRET=replace_with_at_least_32_random_characters

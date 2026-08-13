@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ejectors-telegram-vps-manager",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TelegramVpsAgent",
+        "class_name": "TelegramVpsAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TelegramVpsAgent"]
+    }
+  ],
+  "triggers": {
+    "crons": ["0 1 * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

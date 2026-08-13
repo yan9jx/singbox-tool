@@ -1,0 +1,21 @@
+{
+  "name": "ejectors-telegram-vps-manager",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit && tsc --noEmit -p tests/tsconfig.json",
+    "test": "vitest run",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types"
+  },
+  "dependencies": {
+    "agents": "0.20.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.21.2",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10",
+    "wrangler": "4.122.0"
+  }
+}

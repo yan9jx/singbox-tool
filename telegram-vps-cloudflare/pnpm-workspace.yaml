@@ -1,0 +1,7 @@
+allowBuilds:
+  core-js-pure: true
+  esbuild: true
+  workerd: true
+minimumReleaseAgeExclude:
+  # Wrangler 4.122.0 declares this exact current runtime type package transitively.
+  - '@cloudflare/workers-types@5.20260813.1'
