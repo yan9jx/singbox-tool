@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.07.11-1"
+APP_VERSION="2026.08.13-1"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -92,6 +92,7 @@ write_config() {
 
   BOT_TOKEN="$(read_required 'Bot Token: ')"; echo
   CHAT_ID="$(read_required 'Chat ID: ')"; echo
+  read -r -s -p "DeepSeek API Key [留空关闭 AI 对话]: " DEEPSEEK_API_KEY; echo
   SERVER_NAME="$(read_required '服务器名称: ')"; echo
 
   read -r -p "检测服务名 [sing-box]: " SERVICE_NAME
@@ -121,6 +122,7 @@ write_config() {
 
   BOT_TOKEN="$(clean_input "$BOT_TOKEN")"
   CHAT_ID="$(clean_input "$CHAT_ID")"
+  DEEPSEEK_API_KEY="$(clean_input "$DEEPSEEK_API_KEY")"
   SERVER_NAME="$(clean_input "$SERVER_NAME")"
   SERVICE_NAME="$(clean_input "$SERVICE_NAME")"
   CHECK_PORT="$(clean_input "$CHECK_PORT")"
@@ -128,7 +130,7 @@ write_config() {
   INIT_TX_GB="$(clean_input "$INIT_TX_GB")"
   BANDWIDTH_MBPS="$(clean_input "$BANDWIDTH_MBPS")"
 
-  export BOT_TOKEN CHAT_ID SERVER_NAME SERVICE_NAME CHECK_PORT INIT_RX_GB INIT_TX_GB BANDWIDTH_MBPS CONFIG_FILE
+  export BOT_TOKEN CHAT_ID DEEPSEEK_API_KEY SERVER_NAME SERVICE_NAME CHECK_PORT INIT_RX_GB INIT_TX_GB BANDWIDTH_MBPS CONFIG_FILE
 
   python3 - <<'PYCONF'
 from pathlib import Path
@@ -154,6 +156,7 @@ def safe_env(name, default=""):
 cfg = {
     "bot_token": safe_env("BOT_TOKEN"),
     "chat_id": safe_env("CHAT_ID"),
+    "deepseek_api_key": safe_env("DEEPSEEK_API_KEY"),
     "server_name": safe_env("SERVER_NAME"),
     "service_name": safe_env("SERVICE_NAME", "sing-box") or "sing-box",
     "check_port": safe_env("CHECK_PORT"),
@@ -326,6 +329,78 @@ def send_message(text, reply_markup=None):
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     return tg_api("sendMessage", data, timeout=8)
+
+
+def deepseek_chat(text):
+    api_key = str(CFG.get("deepseek_api_key", "")).strip()
+    if not api_key:
+        return False
+
+    payload = {
+        "model": "deepseek-v4-flash",
+        "thinking": {"type": "disabled"},
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是部署在用户私有 Telegram 机器人中的中文助手。回答应简洁、准确。"
+                    "当用户询问本机 VPS 的状态、CPU、内存、磁盘、流量、服务或端口时，"
+                    "必须调用 show_vps_status；不要猜测或编造服务器状态。"
+                ),
+            },
+            {"role": "user", "content": text},
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "show_vps_status",
+                    "description": "显示当前这台 VPS 的真实运行状态、资源、流量、服务和端口信息",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+        "tool_choice": "auto",
+        "max_tokens": 800,
+    }
+    req = urllib.request.Request(
+        "https://api.deepseek.com/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = json.loads(r.read().decode("utf-8"))
+        message = resp["choices"][0]["message"]
+        for tool_call in message.get("tool_calls") or []:
+            if tool_call.get("function", {}).get("name") == "show_vps_status":
+                send_status(keyboard())
+                return True
+
+        answer = str(message.get("content") or "").strip()
+        if answer:
+            send_message(answer[:4000])
+            return True
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="ignore")[:500]
+        except Exception:
+            pass
+        log_event(f"deepseek http error {e.code}: {detail or e.reason}")
+    except Exception as e:
+        log_event(f"deepseek error: {e}")
+
+    return False
 
 
 def answer_callback(callback_id, text="已收到"):
@@ -1538,7 +1613,7 @@ def handle_callback(cb):
 def handle_text(text):
     if text in ("/start", "/menu", "菜单"):
         send_panel()
-    elif text in ("/status", "状态", "状态刷新"):
+    elif text in ("/status", "状态", "状态刷新", "我的vps状态", "我的 VPS 状态", "VPS状态", "vps状态"):
         send_status(keyboard())
     elif text in ("/clean", "清理", "清理缓存"):
         clean_cache(manual=True)
@@ -1550,6 +1625,12 @@ def handle_text(text):
         send_message(f"🟢 已恢复告警\n[{CFG['server_name']}]", keyboard())
     elif text in ("/ping", "ping"):
         send_message("pong")
+    elif text == "/ai":
+        send_message("请发送：/ai 你的问题")
+    elif text.startswith("/ai "):
+        prompt = text[4:].strip()
+        if prompt and not deepseek_chat(prompt):
+            send_message("AI 暂时不可用，请稍后再试。")
     elif text == "确认重启VPS":
         send_message("⚠️ VPS 即将重启。")
         subprocess.Popen("sleep 2; reboot", shell=True)
