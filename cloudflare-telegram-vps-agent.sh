@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 APP="/usr/local/lib/ejectors-telegram-vps-agent.py"
 CONF="/etc/ejectors-telegram-vps-agent.json"
 STATE="/var/lib/ejectors-telegram-vps-agent-state.json"
@@ -132,7 +132,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 CONF_PATH = Path("/etc/ejectors-telegram-vps-agent.json")
 STATE_PATH = Path("/var/lib/ejectors-telegram-vps-agent-state.json")
 MANAGER_CONFIG = Path("/opt/universe-vps-manager/config.json")
@@ -377,7 +377,8 @@ def main():
                 last_collect = time.time()
             save_json(STATE_PATH, state)
             failures = 0
-            time.sleep(1 if executed else 10)
+            # 30 秒心跳兼顾控制响应速度，并为 Cloudflare Free 额度保留余量。
+            time.sleep(1 if executed else 30)
         except urllib.error.HTTPError as exc:
             print(time.strftime("%F %T"), "sync HTTP error:", exc.code, flush=True)
             failures += 1

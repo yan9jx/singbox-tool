@@ -61,7 +61,17 @@ try {
     Set-WorkerSecret 'DEEPSEEK_API_KEY' $DeepSeekKey
     Set-WorkerSecret 'VPS_AGENT_SECRET' $AgentSecret
 
-    $health = Invoke-RestMethod -Uri "$WorkerUrl/health" -TimeoutSec 30
+    # Wrangler 每次写入 Secret 都会创建新 Worker 版本，边缘节点可能需要短暂时间完成传播。
+    $health = $null
+    foreach ($attempt in 1..12) {
+        $cacheBust = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $health = Invoke-RestMethod -Uri "$WorkerUrl/health?ts=$cacheBust" -TimeoutSec 30
+        if ($health.ok -and -not (@($health.configured.PSObject.Properties.Value) -contains $false)) { break }
+        if ($attempt -lt 12) {
+            Write-Host "等待 Cloudflare Secret 生效（$attempt/12）..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
+        }
+    }
     if (-not $health.ok -or @($health.configured.PSObject.Properties.Value) -contains $false) {
         throw 'Worker 健康检查显示仍有 Secret 未配置。'
     }
