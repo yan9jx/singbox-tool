@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.08.13-3"
+APP_VERSION="2026.08.13-4"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -463,6 +463,58 @@ def deepseek_self_test():
         print(f"DeepSeek API 检查失败：{e}")
 
     return False
+
+
+def deepseek_balance_text():
+    api_key = str(CFG.get("deepseek_api_key", "")).strip()
+    if not api_key:
+        return "DeepSeek API Key 未配置，无法查询余额。"
+
+    req = urllib.request.Request(
+        "https://api.deepseek.com/user/balance",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            resp = json.loads(r.read().decode("utf-8"))
+
+        infos = resp.get("balance_infos") or []
+        if not isinstance(infos, list) or not infos:
+            return "DeepSeek 余额接口未返回余额明细。"
+
+        lines = [
+            "💰 DeepSeek API 余额",
+            f"状态：{'可用' if resp.get('is_available') else '不可用'}",
+        ]
+        for info in infos:
+            if not isinstance(info, dict):
+                continue
+            currency = str(info.get("currency") or "").upper()
+            symbol = "¥" if currency == "CNY" else "$" if currency == "USD" else ""
+            suffix = "" if symbol else f" {currency}".rstrip()
+            total = str(info.get("total_balance") or "0")
+            topped = str(info.get("topped_up_balance") or "0")
+            granted = str(info.get("granted_balance") or "0")
+            lines.extend([
+                "",
+                f"总余额：{symbol}{total}{suffix}",
+                f"充值余额：{symbol}{topped}{suffix}",
+                f"赠送余额：{symbol}{granted}{suffix}",
+            ])
+        return "\n".join(lines)
+    except urllib.error.HTTPError as e:
+        log_event(f"deepseek balance http error: {e.code}")
+        if e.code == 401:
+            return "DeepSeek 余额查询失败：API Key 认证失败。"
+        return f"DeepSeek 余额查询失败：HTTP {e.code}。"
+    except Exception as e:
+        log_event(f"deepseek balance error: {e}")
+        return "DeepSeek 余额查询失败，请稍后再试。"
 
 
 def answer_callback(callback_id, text="已收到"):
@@ -1689,6 +1741,8 @@ def handle_text(text):
         send_message(f"🟢 已恢复告警\n[{CFG['server_name']}]", keyboard())
     elif text in ("/ping", "ping"):
         send_message("pong")
+    elif ai_command in ("/balance", "/ai balance", "/ai 余额", "ai余额", "deepseek余额"):
+        send_message(deepseek_balance_text())
     elif ai_command == "/ai on":
         if not str(CFG.get("deepseek_api_key", "")).strip():
             send_message("DeepSeek API Key 未配置，无法开启 AI 模式。")
