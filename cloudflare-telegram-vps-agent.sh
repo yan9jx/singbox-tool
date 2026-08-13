@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.2.1"
+VERSION="1.2.2"
 APP="/usr/local/lib/ejectors-telegram-vps-agent.py"
 LOCAL_TEST_APP="/usr/local/lib/ejectors-local-speedtest.py"
 CONF="/etc/ejectors-telegram-vps-agent.json"
@@ -132,6 +132,8 @@ import json
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -140,7 +142,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 CONF_PATH = Path("/etc/ejectors-telegram-vps-agent.json")
 STATE_PATH = Path("/var/lib/ejectors-telegram-vps-agent-state.json")
 MANAGER_CONFIG = Path("/opt/universe-vps-manager/config.json")
@@ -358,14 +360,32 @@ def caddy_binary():
     return ""
 
 
+def public_dns_addresses(domain):
+    addresses = set()
+    for record_type in ("A", "AAAA"):
+        try:
+            dns_url = "https://cloudflare-dns.com/dns-query?" + urllib.parse.urlencode({"name": domain, "type": record_type})
+            dns_request = urllib.request.Request(dns_url, headers={
+                "Accept": "application/dns-json",
+                "User-Agent": "ejectors-local-test-setup/1.2",
+            })
+            with urllib.request.urlopen(dns_request, timeout=10) as response:
+                dns_value = json.loads(response.read().decode("utf-8"))
+            for answer in dns_value.get("Answer", []):
+                try:
+                    addresses.add(str(ipaddress.ip_address(str(answer.get("data", "")))))
+                except ValueError:
+                    pass
+        except Exception:
+            pass
+    return addresses
+
+
 def direct_test_site():
     roots = (Path("/etc/caddy-naive"), Path("/etc/shared-caddy"))
     sites = [(root, site) for root in roots for site in sorted((root / "sites").glob("filebrowser-*.caddy"))]
     if not sites:
         raise RuntimeError("未在 /etc/caddy-naive 或 /etc/shared-caddy 找到 FileBrowser 站点，未做任何修改。")
-    request = urllib.request.Request("https://api64.ipify.org", headers={"User-Agent": "ejectors-local-test-setup/1.2"})
-    with urllib.request.urlopen(request, timeout=10) as response:
-        public_ip = str(ipaddress.ip_address(response.read(128).decode().strip()))
     rejected = []
     for root, site in sites:
         text = site.read_text(encoding="utf-8")
@@ -373,35 +393,24 @@ def direct_test_site():
         if not match:
             continue
         domain = match.group(1).lower()
-        route_dir = root / "routes" / domain
-        if f"import {route_dir}/*.caddy" not in text:
-            rejected.append(f"{domain} 缺少独立路由导入点")
-            continue
-        addresses = set()
-        for record_type in ("A", "AAAA"):
-            try:
-                dns_url = "https://cloudflare-dns.com/dns-query?" + urllib.parse.urlencode({"name": domain, "type": record_type})
-                dns_request = urllib.request.Request(dns_url, headers={
-                    "Accept": "application/dns-json",
-                    "User-Agent": "ejectors-local-test-setup/1.2",
-                })
-                with urllib.request.urlopen(dns_request, timeout=10) as response:
-                    dns_value = json.loads(response.read().decode("utf-8"))
-                for answer in dns_value.get("Answer", []):
-                    try:
-                        addresses.add(str(ipaddress.ip_address(str(answer.get("data", "")))))
-                    except ValueError:
-                        pass
-            except Exception:
-                pass
-        if public_ip not in addresses:
-            rejected.append(f"{domain} 未直接解析到本 VPS")
-            continue
         caddyfile = root / "Caddyfile"
         if not caddyfile.is_file():
             rejected.append(f"{domain} 缺少 {caddyfile}")
             continue
-        return domain, route_dir, caddyfile
+        main_text = caddyfile.read_text(encoding="utf-8")
+        if f"import {root}/sites/*.caddy" not in main_text:
+            rejected.append(f"{caddyfile} 缺少独立站点导入点")
+            continue
+        route_dir = root / "routes" / domain
+        if f"import {route_dir}/*.caddy" not in text:
+            rejected.append(f"{domain} 缺少独立路由导入点")
+            continue
+        addresses = public_dns_addresses(domain)
+        local_tls_ok, _ = verify_local_tls(domain)
+        if not addresses or not local_tls_ok:
+            rejected.append(f"{domain} 的公共 DNS 或本机 HTTPS 证书校验失败")
+            continue
+        return domain, route_dir / "ejectors-local-test.caddy", caddyfile
     raise RuntimeError("；".join(rejected) or "没有找到可安全使用的直连 HTTPS 域名，未做任何修改。")
 
 
@@ -420,13 +429,29 @@ def validate_and_reload_caddy(caddyfile):
     return code == 0, redact(err or out or ("共享 Caddy 已重载" if code == 0 else "共享 Caddy 重载失败"))
 
 
+def verify_local_tls(domain):
+    context = ssl.create_default_context()
+    deadline = time.time() + 45
+    last_error = "TLS 证书尚未就绪"
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", 443), timeout=5) as raw:
+                with context.wrap_socket(raw, server_hostname=domain) as tls:
+                    certificate = tls.getpeercert()
+                    if certificate:
+                        return True, "HTTPS 证书已就绪"
+        except Exception as exc:
+            last_error = str(exc)
+        time.sleep(3)
+    return False, redact(last_error)
+
+
 def setup_local_test():
     try:
-        domain, route_dir, caddyfile = direct_test_site()
+        domain, route, caddyfile = direct_test_site()
     except Exception as exc:
         return False, redact(exc)
-    route_dir.mkdir(parents=True, exist_ok=True)
-    route = route_dir / "ejectors-local-test.caddy"
+    route.parent.mkdir(parents=True, exist_ok=True)
     previous = route.read_bytes() if route.exists() else None
     content = (
         "# Managed by ejectors Telegram VPS Agent.\n"
@@ -438,7 +463,7 @@ def setup_local_test():
     tmp = route.with_suffix(".tmp")
     tmp.write_text(content, encoding="utf-8")
     os.chmod(tmp, 0o640)
-    os.chown(tmp, 0, route_dir.stat().st_gid)
+    os.chown(tmp, 0, route.parent.stat().st_gid)
     os.replace(tmp, route)
     url = f"https://{domain}/__ejectors-test"
     save_json(LOCAL_TEST_STATE, {"url": url, "route": str(route), "domain": domain, "caddyfile": str(caddyfile)})
@@ -451,6 +476,8 @@ def setup_local_test():
             code, err = 1, str(exc)
     if code == 0:
         valid, message = validate_and_reload_caddy(caddyfile)
+        if valid:
+            valid, message = verify_local_tls(domain)
     else:
         valid, message = False, redact(err or out or "本地测速服务启动失败")
     if not valid:
@@ -460,17 +487,20 @@ def setup_local_test():
             route.write_bytes(previous)
             os.chmod(route, 0o640)
             os.chown(route, 0, route.parent.stat().st_gid)
+        validate_and_reload_caddy(caddyfile)
         LOCAL_TEST_STATE.unlink(missing_ok=True)
         run(["systemctl", "stop", "ejectors-local-speedtest.service"], 15)
         return False, f"启用失败并已回滚：{message}"
-    return True, f"本地设备直连测试入口已启用：{url}\n原网页内容、原有路由和代理节点未修改；只新增了隔离测试路径。"
+    return True, f"本地设备直连测试入口已启用：{url}\n原网页内容、原有路由和代理节点未修改；只新增独立测试路径。"
 
 
 def disable_local_test():
     cfg = load_json(LOCAL_TEST_STATE, {})
     route_text = str(cfg.get("route", "")) if isinstance(cfg, dict) else ""
     caddyfile = Path(str(cfg.get("caddyfile", ""))) if isinstance(cfg, dict) else Path("")
-    expected_roots = (Path("/etc/caddy-naive/routes").resolve(), Path("/etc/shared-caddy/routes").resolve())
+    expected_roots = (
+        Path("/etc/caddy-naive/routes").resolve(), Path("/etc/shared-caddy/routes").resolve(),
+    )
     if not route_text:
         return True, "本地设备直连测试入口本来就是停用状态。"
     route = Path(route_text)
@@ -901,7 +931,7 @@ secret = hmac.new(token.encode(), b"ejectors-telegram-webhook-v1", hashlib.sha25
 health_url = str(agent["worker_url"]).rstrip("/") + "/health"
 health_request = urllib.request.Request(
     health_url,
-    headers={"User-Agent": "ejectors-telegram-vps-agent/1.2.1"},
+    headers={"User-Agent": "ejectors-telegram-vps-agent/1.2.2"},
 )
 with urllib.request.urlopen(health_request, timeout=15) as response:
     health = json.loads(response.read().decode())
