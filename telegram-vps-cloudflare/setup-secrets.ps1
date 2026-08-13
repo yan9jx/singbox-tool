@@ -129,6 +129,8 @@ try {
         @{ command = 'nodes'; description = '查看和切换 VPS' },
         @{ command = 'ai'; description = 'AI 模式与单次提问' },
         @{ command = 'balance'; description = '查看 DeepSeek 余额' },
+        @{ command = 'models'; description = '刷新并选择 DeepSeek 模型' },
+        @{ command = 'model'; description = '查看当前 DeepSeek 模型' },
         @{ command = 'brief'; description = '生成 AI 运维简报' },
         @{ command = 'pause10'; description = '暂停告警 10 分钟' },
         @{ command = 'resume'; description = '恢复告警' }

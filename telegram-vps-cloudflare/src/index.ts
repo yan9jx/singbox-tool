@@ -16,6 +16,8 @@ interface ManagerState {
   dailyBrief: boolean;
   selectedNode: string;
   alertsPausedUntil: number;
+  aiModel: string;
+  aiFallbackModel: string;
 }
 
 interface CommandResult {
@@ -72,6 +74,19 @@ interface PendingRow {
   expires_at: number;
 }
 
+interface ModelChoiceRow {
+  token: string;
+  model_id: string;
+  expires_at: number;
+}
+
+interface PendingModelSwitchRow {
+  token: string;
+  model_id: string;
+  previous_model: string;
+  expires_at: number;
+}
+
 interface AlertStateRow {
   active: number;
   consecutive: number;
@@ -96,8 +111,14 @@ interface DeepSeekResponse {
   choices?: Array<{ message?: DeepSeekMessage }>;
 }
 
+interface DeepSeekCallResult {
+  message: DeepSeekMessage | null;
+  status: number;
+}
+
 const MAX_BODY_BYTES = 128 * 1024;
 const COMMAND_TTL_MS = 2 * 60 * 1000;
+const MODEL_CHOICE_TTL_MS = 10 * 60 * 1000;
 const NODE_STALE_MS = 2 * 60 * 1000;
 const ALERT_REPEAT_MS = 30 * 60 * 1000;
 const TELEGRAM_TEXT_LIMIT = 4000;
@@ -112,6 +133,8 @@ const VALID_ACTIONS = new Set([
   "latency",
 ]);
 const VALID_TARGETS = new Set(["auto", "node", "reverse-proxy"]);
+const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
+const MODEL_FALLBACK_STATUSES = new Set([400, 404, 422]);
 
 function log(level: "info" | "warn" | "error", event: string, data: JsonObject = {}): void {
   console.log(JSON.stringify({ level, event, at: new Date().toISOString(), ...data }));
@@ -127,6 +150,20 @@ function asString(value: unknown, max = 256): string {
 
 function asInteger(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) ? value : 0;
+}
+
+function isDeepSeekModelId(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$/.test(value);
+}
+
+export function deepSeekModelIds(value: unknown): string[] {
+  if (!isObject(value) || !Array.isArray(value.data)) return [];
+  const ids = value.data.flatMap((item) => {
+    if (!isObject(item)) return [];
+    const id = asString(item.id, 129);
+    return isDeepSeekModelId(id) ? [id] : [];
+  });
+  return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
 }
 
 function asNumber(value: unknown): number {
@@ -297,7 +334,14 @@ async function telegramApi(env: Env, method: string, payload: JsonObject): Promi
 }
 
 export class TelegramVpsAgent extends Agent<Env, ManagerState> {
-  override initialState: ManagerState = { aiMode: false, dailyBrief: true, selectedNode: "", alertsPausedUntil: 0 };
+  override initialState: ManagerState = {
+    aiMode: false,
+    dailyBrief: true,
+    selectedNode: "",
+    alertsPausedUntil: 0,
+    aiModel: DEFAULT_DEEPSEEK_MODEL,
+    aiFallbackModel: DEFAULT_DEEPSEEK_MODEL,
+  };
 
   override async onStart(): Promise<void> {
     await this.sql`
@@ -331,6 +375,21 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
         action TEXT NOT NULL,
         target TEXT NOT NULL,
         label TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      )
+    `;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS model_choices (
+        token TEXT PRIMARY KEY,
+        model_id TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      )
+    `;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS pending_model_switches (
+        token TEXT PRIMARY KEY,
+        model_id TEXT NOT NULL,
+        previous_model TEXT NOT NULL,
         expires_at INTEGER NOT NULL
       )
     `;
@@ -601,6 +660,10 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
       await this.sendMessage("pong");
     } else if (["/balance", "/ai balance", "/ai 余额", "查询余额", "查余额", "余额", "ai余额", "deepseek余额"].includes(lower)) {
       await this.sendMessage(await this.balanceText());
+    } else if (["/models", "刷新模型", "可用模型", "切换模型", "更换模型"].includes(lower)) {
+      await this.showModels();
+    } else if (["/model", "当前模型", "现在模型", "使用的模型"].includes(lower)) {
+      await this.sendMessage(`🤖 当前 DeepSeek 模型：${this.currentModel()}\n发送 /models 可读取最新可用模型。`);
     } else if (lower === "/brief on") {
       this.setState({ ...this.state, dailyBrief: true });
       await this.sendMessage("✅ 每日 AI 运维简报已开启，将在北京时间每天 09:00 发送。");
@@ -619,7 +682,8 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     } else if (lower === "/ai") {
       await this.sendMessage(
         `当前 AI 连续对话模式：${this.state.aiMode ? "开启" : "关闭"}\n` +
-          "开启：/ai on\n关闭：/ai off\n单次提问：/ai 你的问题\n即时简报：/brief\n每日简报：/brief on 或 /brief off\n节点列表：/nodes",
+          `当前模型：${this.currentModel()}\n` +
+          "开启：/ai on\n关闭：/ai off\n单次提问：/ai 你的问题\n模型列表：/models\n即时简报：/brief\n每日简报：/brief on 或 /brief off\n节点列表：/nodes",
       );
     } else if (lower.startsWith("/ai ")) {
       await this.aiChat(normalized.slice(4).trim());
@@ -640,6 +704,9 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     else if (data === "restart_node") await this.requestConfirmation("restart_node", "node", "重启节点服务");
     else if (data === "restart_proxy") await this.requestConfirmation("restart_proxy", "reverse-proxy", "重启反向代理");
     else if (data === "reboot_ask") await this.requestConfirmation("reboot", "auto", "重启整台 VPS");
+    else if (data.startsWith("model_pick:")) await this.requestModelSwitch(data.slice(11));
+    else if (data.startsWith("model_confirm:")) await this.confirmModelSwitch(data.slice(14));
+    else if (data.startsWith("model_cancel:")) await this.cancelModelSwitch(data.slice(13));
     else if (data.startsWith("confirm:")) await this.confirmAction(data.slice(8));
     else if (data.startsWith("cancel:")) await this.cancelAction(data.slice(7));
     else await this.sendMessage(await this.statusText(), this.panelKeyboard());
@@ -794,6 +861,107 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     return lines.join("\n");
   }
 
+  private currentModel(): string {
+    const model = String(this.state.aiModel ?? "");
+    return isDeepSeekModelId(model) ? model : DEFAULT_DEEPSEEK_MODEL;
+  }
+
+  private fallbackModel(): string {
+    const model = String(this.state.aiFallbackModel ?? "");
+    return isDeepSeekModelId(model) ? model : DEFAULT_DEEPSEEK_MODEL;
+  }
+
+  private async fetchModels(): Promise<string[]> {
+    const response = await fetch("https://api.deepseek.com/models", {
+      headers: { Authorization: `Bearer ${this.env.DEEPSEEK_API_KEY}`, Accept: "application/json" },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const models = deepSeekModelIds(await response.json());
+    if (models.length === 0) throw new Error("接口未返回可用模型");
+    return models;
+  }
+
+  private async showModels(): Promise<void> {
+    let models: string[];
+    try {
+      models = await this.fetchModels();
+    } catch (error) {
+      log("warn", "deepseek_models_failed", { error: String(error) });
+      await this.sendMessage(`DeepSeek 模型列表读取失败：${redact(String(error))}\n当前仍使用：${this.currentModel()}`);
+      return;
+    }
+    const now = Date.now();
+    await this.sql`DELETE FROM model_choices WHERE expires_at < ${now}`;
+    const keyboard: JsonObject[][] = [];
+    for (const model of models.slice(0, 12)) {
+      const token = crypto.randomUUID();
+      await this.sql`
+        INSERT INTO model_choices (token, model_id, expires_at)
+        VALUES (${token}, ${model}, ${now + MODEL_CHOICE_TTL_MS})
+      `;
+      keyboard.push([{ text: `${model === this.currentModel() ? "✅ " : ""}${model}`, callback_data: `model_pick:${token}` }]);
+    }
+    await this.sendMessage(
+      `🤖 DeepSeek 可用模型\n当前：${this.currentModel()}\n\n点击模型后还需要再次确认；刷新列表不产生对话 Token。`,
+      { inline_keyboard: keyboard },
+    );
+  }
+
+  private async requestModelSwitch(choiceToken: string): Promise<void> {
+    const rows = await this.sql<ModelChoiceRow>`SELECT * FROM model_choices WHERE token = ${choiceToken}`;
+    const choice = rows[0];
+    await this.sql`DELETE FROM model_choices WHERE token = ${choiceToken}`;
+    if (!choice || choice.expires_at < Date.now() || !isDeepSeekModelId(choice.model_id)) {
+      await this.sendMessage("模型选择已失效，请发送 /models 重新读取。");
+      return;
+    }
+    const previous = this.currentModel();
+    if (choice.model_id === previous) {
+      await this.sendMessage(`当前已经在使用 ${previous}，未做修改。`);
+      return;
+    }
+    const token = crypto.randomUUID();
+    await this.sql`
+      INSERT INTO pending_model_switches (token, model_id, previous_model, expires_at)
+      VALUES (${token}, ${choice.model_id}, ${previous}, ${Date.now() + COMMAND_TTL_MS})
+    `;
+    await this.sendMessage(`⚠️ 确认切换 DeepSeek 模型？\n${previous} → ${choice.model_id}\n确认按钮 2 分钟内有效。`, {
+      inline_keyboard: [[
+        { text: `✅ 确认切换`, callback_data: `model_confirm:${token}` },
+        { text: "取消", callback_data: `model_cancel:${token}` },
+      ]],
+    });
+  }
+
+  private async confirmModelSwitch(token: string): Promise<void> {
+    const rows = await this.sql<PendingModelSwitchRow>`SELECT * FROM pending_model_switches WHERE token = ${token}`;
+    const pending = rows[0];
+    await this.sql`DELETE FROM pending_model_switches WHERE token = ${token}`;
+    if (!pending || pending.expires_at < Date.now() || !isDeepSeekModelId(pending.model_id)) {
+      await this.sendMessage("模型切换确认已失效，请发送 /models 重新选择。");
+      return;
+    }
+    try {
+      const available = await this.fetchModels();
+      if (!available.includes(pending.model_id)) {
+        await this.sendMessage(`未切换：${pending.model_id} 已不在 DeepSeek 最新模型列表中。`);
+        return;
+      }
+    } catch (error) {
+      log("warn", "deepseek_model_recheck_failed", { error: String(error) });
+      await this.sendMessage("未切换：确认时无法重新验证 DeepSeek 模型列表，请稍后重试。");
+      return;
+    }
+    const previous = isDeepSeekModelId(pending.previous_model) ? pending.previous_model : this.currentModel();
+    this.setState({ ...this.state, aiModel: pending.model_id, aiFallbackModel: previous });
+    await this.sendMessage(`✅ DeepSeek 模型已切换为：${pending.model_id}\n若新模型调用不兼容，将自动退回：${previous}`);
+  }
+
+  private async cancelModelSwitch(token: string): Promise<void> {
+    await this.sql`DELETE FROM pending_model_switches WHERE token = ${token}`;
+    await this.sendMessage(`✅ 已取消模型切换，继续使用：${this.currentModel()}`);
+  }
+
   private async aiChat(userText: string): Promise<void> {
     if (!userText) return;
     const historyRows = await this.sql<{ role: string; content: string }>`
@@ -939,8 +1107,30 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     tools: JsonObject[],
     toolChoice: "auto" | "none" = "auto",
   ): Promise<DeepSeekMessage | null> {
+    const selected = this.currentModel();
+    const first = await this.callDeepSeek(selected, messages, tools, toolChoice);
+    if (first.message) return first.message;
+
+    const fallback = this.fallbackModel();
+    if (fallback === selected || !MODEL_FALLBACK_STATUSES.has(first.status)) return null;
+    const second = await this.callDeepSeek(fallback, messages, tools, toolChoice);
+    if (!second.message) return null;
+
+    this.setState({ ...this.state, aiModel: fallback, aiFallbackModel: DEFAULT_DEEPSEEK_MODEL });
+    await this.sendMessage(`⚠️ 模型 ${selected} 调用失败，已自动退回 ${fallback}。`).catch((error: unknown) =>
+      log("warn", "deepseek_fallback_notice_failed", { error: String(error) }),
+    );
+    return second.message;
+  }
+
+  private async callDeepSeek(
+    model: string,
+    messages: DeepSeekMessage[] | Array<{ role: "system" | "user"; content: string }>,
+    tools: JsonObject[],
+    toolChoice: "auto" | "none",
+  ): Promise<DeepSeekCallResult> {
     const payload: JsonObject = {
-      model: "deepseek-v4-flash",
+      model,
       thinking: { type: "disabled" },
       messages,
       max_tokens: 1000,
@@ -949,17 +1139,23 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
       payload.tools = tools;
       payload.tool_choice = toolChoice;
     }
-    const response = await fetch("https://api.deepseek.com/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${this.env.DEEPSEEK_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    let response: Response;
+    try {
+      response = await fetch("https://api.deepseek.com/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${this.env.DEEPSEEK_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      log("warn", "deepseek_network_error", { model, error: String(error) });
+      return { message: null, status: 0 };
+    }
     if (!response.ok) {
-      log("warn", "deepseek_http_error", { status: response.status });
-      return null;
+      log("warn", "deepseek_http_error", { model, status: response.status });
+      return { message: null, status: response.status };
     }
     const value = (await response.json()) as DeepSeekResponse;
-    return value.choices?.[0]?.message ?? null;
+    return { message: value.choices?.[0]?.message ?? null, status: response.status };
   }
 
   private panelKeyboard(): JsonObject {

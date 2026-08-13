@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.1.3"
+VERSION="1.1.4"
 APP="/usr/local/lib/ejectors-telegram-vps-agent.py"
 CONF="/etc/ejectors-telegram-vps-agent.json"
 STATE="/var/lib/ejectors-telegram-vps-agent-state.json"
@@ -136,7 +136,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 CONF_PATH = Path("/etc/ejectors-telegram-vps-agent.json")
 STATE_PATH = Path("/var/lib/ejectors-telegram-vps-agent-state.json")
 MANAGER_CONFIG = Path("/opt/universe-vps-manager/config.json")
@@ -346,9 +346,9 @@ def valid_service(name):
 def latency_test():
     targets = (
         ("Cloudflare Speed", "https://speed.cloudflare.com/__down?bytes=0"),
-        ("Telegram", "https://api.telegram.org"),
-        ("DeepSeek", "https://api.deepseek.com"),
-        ("GitHub", "https://raw.githubusercontent.com/yan9jx/singbox-tool/main/README.md"),
+        ("中国移动（VPS→官网）", "https://www.10086.cn/"),
+        ("中国联通（VPS→官网）", "https://m.client.10010.com/"),
+        ("中国电信（VPS→官网）", "https://www.189.cn/"),
     )
     lines = ["🌐 VPS 延迟测试"]
     for label, url in targets:
@@ -364,7 +364,6 @@ def latency_test():
             lines.append(f"{label}：{elapsed} ms（已连通）")
         except Exception:
             lines.append(f"{label}：连接失败")
-    lines.append("固定白名单 HTTPS 测试，不使用 DeepSeek Token。")
     return True, "\n".join(lines)
 
 
@@ -606,7 +605,7 @@ secret = hmac.new(token.encode(), b"ejectors-telegram-webhook-v1", hashlib.sha25
 health_url = str(agent["worker_url"]).rstrip("/") + "/health"
 health_request = urllib.request.Request(
     health_url,
-    headers={"User-Agent": "ejectors-telegram-vps-agent/1.1.3"},
+    headers={"User-Agent": "ejectors-telegram-vps-agent/1.1.4"},
 )
 with urllib.request.urlopen(health_request, timeout=15) as response:
     health = json.loads(response.read().decode())

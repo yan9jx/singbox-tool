@@ -1,7 +1,7 @@
 import { exports as workerExports } from "cloudflare:workers";
 import { createExecutionContext, createScheduledController, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import worker, { alertPolicyText, PANEL_KEYBOARD, nodeIssues, type Env } from "../src/index";
+import worker, { alertPolicyText, deepSeekModelIds, PANEL_KEYBOARD, nodeIssues, type Env } from "../src/index";
 
 const AGENT_SECRET = "local-agent-secret-at-least-32-characters";
 
@@ -41,6 +41,13 @@ describe("standalone Telegram VPS Worker", () => {
         alert_policy: { cpu_warn: 75, ram_warn: 82, swap_warn: 35, disk_warn: 88, bandwidth_mbps: 100, traffic_saturation_ratio: 80 },
       },
     }, "Test VPS", "1.1.3")).toContain("CPU：≥ 75%");
+    expect(deepSeekModelIds({ data: [
+      { id: "deepseek-v4-pro" },
+      { id: "invalid model" },
+      { id: "deepseek-v4-flash" },
+      { id: "deepseek-v4-pro" },
+      { id: "reasoner-next" },
+    ] })).toEqual(["deepseek-v4-flash", "deepseek-v4-pro", "reasoner-next"]);
   });
 
   it("reports configuration readiness without exposing values", async () => {
