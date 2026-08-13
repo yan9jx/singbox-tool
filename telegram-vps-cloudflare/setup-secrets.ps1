@@ -128,7 +128,6 @@ try {
         @{ command = 'ai'; description = 'AI 模式与单次提问' },
         @{ command = 'balance'; description = '查看 DeepSeek 余额' },
         @{ command = 'brief'; description = '生成 AI 运维简报' },
-        @{ command = 'clean'; description = '清理缓存' },
         @{ command = 'pause10'; description = '暂停告警 10 分钟' },
         @{ command = 'resume'; description = '恢复告警' }
     )

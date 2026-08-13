@@ -2,7 +2,7 @@ import { Agent, getAgentByName, type AgentNamespace } from "agents";
 
 type JsonObject = Record<string, unknown>;
 
-interface Env {
+export interface Env {
   TelegramVpsAgent: AgentNamespace<TelegramVpsAgent>;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
@@ -256,6 +256,12 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
         created_at INTEGER NOT NULL
       )
     `;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS scheduled_runs (
+        run_key TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      )
+    `;
   }
 
   async syncNode(payload: NodeSyncPayload): Promise<{ commands: AgentCommand[]; server_time: number }> {
@@ -365,6 +371,20 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     if (answer) await this.sendMessage(`🧭 每日 AI 运维简报\n\n${answer}`, this.panelKeyboard());
   }
 
+  async runWeeklyCleanup(scheduledTime: number): Promise<void> {
+    const runKey = `weekly-clean:${scheduledTime}`;
+    const prior = await this.sql<{ run_key: string }>`SELECT run_key FROM scheduled_runs WHERE run_key = ${runKey}`;
+    if (prior.length > 0) return;
+    await this.sql`INSERT INTO scheduled_runs (run_key, created_at) VALUES (${runKey}, ${Date.now()})`;
+    await this.sql`DELETE FROM scheduled_runs WHERE created_at < ${Date.now() - 90 * 86_400_000}`;
+
+    const nodes = await this.sql<NodeRow>`
+      SELECT * FROM nodes WHERE last_seen >= ${Date.now() - NODE_STALE_MS} ORDER BY name ASC
+    `;
+    for (const node of nodes) await this.enqueueCommand(node.node_id, "clean", "auto");
+    log("info", "weekly_cleanup_queued", { scheduledTime, nodes: nodes.length });
+  }
+
   private async handleText(text: string): Promise<void> {
     const normalized = text.replace(/\s+/g, " ").trim();
     const lower = normalized.toLowerCase();
@@ -376,8 +396,6 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
       await this.sendMessage(await this.nodesText(), this.nodesKeyboard());
     } else if (lower.startsWith("/use ")) {
       await this.selectNode(normalized.slice(5).trim());
-    } else if (["/clean", "清理", "清理缓存"].includes(lower)) {
-      await this.queueImmediate("clean", "auto", "手动清理缓存");
     } else if (["/pause10", "暂停"].includes(lower)) {
       await this.queueImmediate("pause10", "auto", "暂停告警 10 分钟");
     } else if (["/resume", "恢复"].includes(lower)) {
@@ -422,7 +440,6 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     else if (data === "nodes") await this.sendMessage(await this.nodesText(), this.nodesKeyboard());
     else if (data.startsWith("use:")) await this.selectNode(data.slice(4));
     else if (data === "refresh_local") await this.queueImmediate("refresh", "auto", "刷新本机状态");
-    else if (data === "clean") await this.queueImmediate("clean", "auto", "手动清理缓存");
     else if (data === "restart_node") await this.queueImmediate("restart_node", "node", "重启节点服务");
     else if (data === "restart_proxy") await this.queueImmediate("restart_proxy", "reverse-proxy", "重启反向代理");
     else if (data === "reboot_ask") await this.sendMessage("⚠️ 确认重启 VPS 请发送：确认重启VPS", this.panelKeyboard());
@@ -736,10 +753,9 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
   private panelKeyboard(): JsonObject {
     return {
       inline_keyboard: [
-        [{ text: "📊 状态刷新", callback_data: "status" }, { text: "🖥 切换 VPS", callback_data: "nodes" }],
-        [{ text: "🔍 状态更新", callback_data: "refresh_local" }],
-        [{ text: "🧹 手动清理缓存", callback_data: "clean" }],
+        [{ text: "📊 状态刷新", callback_data: "status" }, { text: "🔍 状态更新", callback_data: "refresh_local" }],
         [{ text: "🔄 重启节点", callback_data: "restart_node" }, { text: "🌐 重启反代", callback_data: "restart_proxy" }],
+        [{ text: "🖥 切换 VPS", callback_data: "nodes" }],
         [{ text: "♻️ 重启 VPS", callback_data: "reboot_ask" }],
       ],
     };
@@ -845,9 +861,18 @@ export default {
     }
   },
 
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    if (!env.TELEGRAM_CHAT_ID || !env.TELEGRAM_BOT_TOKEN || !env.DEEPSEEK_API_KEY) return;
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (!env.TELEGRAM_CHAT_ID || !env.TELEGRAM_BOT_TOKEN) return;
     const agent = await manager(env);
+    if (controller.cron === "0 20 * * SAT") {
+      ctx.waitUntil(
+        agent.runWeeklyCleanup(controller.scheduledTime).catch((error: unknown) =>
+          log("error", "weekly_cleanup_failed", { error: String(error) }),
+        ),
+      );
+      return;
+    }
+    if (!env.DEEPSEEK_API_KEY) return;
     ctx.waitUntil(agent.runDailyBrief().catch((error: unknown) => log("error", "daily_brief_failed", { error: String(error) })));
   },
 } satisfies ExportedHandler<Env>;

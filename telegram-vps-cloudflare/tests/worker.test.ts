@@ -1,5 +1,7 @@
 import { exports as workerExports } from "cloudflare:workers";
+import { createExecutionContext, createScheduledController, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import worker, { type Env } from "../src/index";
 
 const AGENT_SECRET = "local-agent-secret-at-least-32-characters";
 
@@ -75,5 +77,52 @@ describe("standalone Telegram VPS Worker", () => {
       body: JSON.stringify({ update_id: 1 }),
     }));
     expect(response.status).toBe(401);
+  });
+
+  it("queues weekly cleanup for online VPS nodes", async () => {
+    const payload = {
+      version: "1.0.0",
+      node_id: "weekly-cleanup-vps",
+      name: "Weekly Cleanup VPS",
+      reported_at: Date.now(),
+      snapshot: { status_text: "all good" },
+      command_results: [],
+    };
+    const firstBody = JSON.stringify(payload);
+    const firstTimestamp = String(Date.now());
+    await workerExports.default.fetch(new Request("https://worker.test/api/agent/sync", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Agent-Id": payload.node_id,
+        "X-Agent-Timestamp": firstTimestamp,
+        "X-Agent-Signature": await signature(AGENT_SECRET, firstTimestamp, firstBody),
+      },
+      body: firstBody,
+    }));
+
+    const ctx = createExecutionContext();
+    const scheduledTime = Date.UTC(2026, 7, 15, 20, 0, 0);
+    await worker.scheduled(
+      createScheduledController({ cron: "0 20 * * SAT", scheduledTime }),
+      env as unknown as Env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    const secondBody = JSON.stringify({ ...payload, reported_at: Date.now() });
+    const secondTimestamp = String(Date.now());
+    const response = await workerExports.default.fetch(new Request("https://worker.test/api/agent/sync", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Agent-Id": payload.node_id,
+        "X-Agent-Timestamp": secondTimestamp,
+        "X-Agent-Signature": await signature(AGENT_SECRET, secondTimestamp, secondBody),
+      },
+      body: secondBody,
+    }));
+    const value = await response.json<{ commands: Array<{ action: string; target: string }> }>();
+    expect(value.commands).toContainEqual(expect.objectContaining({ action: "clean", target: "auto" }));
   });
 });

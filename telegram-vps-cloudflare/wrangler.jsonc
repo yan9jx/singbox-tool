@@ -19,7 +19,7 @@
     }
   ],
   "triggers": {
-    "crons": ["0 1 * * *"]
+    "crons": ["0 1 * * *", "0 20 * * SAT"]
   },
   "observability": {
     "enabled": true,
