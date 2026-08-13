@@ -94,34 +94,6 @@ interface AlertStateRow {
   last_detail: string;
 }
 
-type LocalTestKind = "latency" | "speed";
-
-interface LocalTestTokenPayload {
-  n: string;
-  k: LocalTestKind;
-  e: number;
-  x: string;
-}
-
-interface LocalTestResult {
-  latency_avg_ms?: number;
-  latency_min_ms?: number;
-  latency_max_ms?: number;
-  samples?: number;
-  download_mbps?: number;
-  bytes?: number;
-  elapsed_ms?: number;
-  user_agent?: string;
-}
-
-interface LocalTestSessionRow {
-  nonce: string;
-  node_id: string;
-  kind: LocalTestKind;
-  expires_at: number;
-  reported_at: number;
-}
-
 interface DeepSeekMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
@@ -147,7 +119,6 @@ interface DeepSeekCallResult {
 const MAX_BODY_BYTES = 128 * 1024;
 const COMMAND_TTL_MS = 2 * 60 * 1000;
 const MODEL_CHOICE_TTL_MS = 10 * 60 * 1000;
-const LOCAL_TEST_TTL_MS = 10 * 60 * 1000;
 const NODE_STALE_MS = 2 * 60 * 1000;
 const ALERT_REPEAT_MS = 30 * 60 * 1000;
 const TELEGRAM_TEXT_LIMIT = 4000;
@@ -159,8 +130,6 @@ const VALID_ACTIONS = new Set([
   "restart_node",
   "restart_proxy",
   "reboot",
-  "setup_local_test",
-  "disable_local_test",
 ]);
 const VALID_TARGETS = new Set(["auto", "node", "reverse-proxy"]);
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
@@ -350,50 +319,6 @@ async function hmacHex(secret: string, message: string): Promise<string> {
   return [...new Uint8Array(signature)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-function base64UrlEncode(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-function base64UrlDecode(text: string): string {
-  if (!/^[A-Za-z0-9_-]+$/.test(text)) throw new Error("invalid base64url");
-  const padded = text.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - text.length % 4) % 4);
-  const binary = atob(padded);
-  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-}
-
-function validateLocalTestTokenPayload(value: unknown): LocalTestTokenPayload | null {
-  if (!isObject(value)) return null;
-  const nodeId = asString(value.n, 64);
-  const kind = asString(value.k, 16);
-  const expiresAt = asInteger(value.e);
-  const nonce = asString(value.x, 64);
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(nodeId)) return null;
-  if (kind !== "latency" && kind !== "speed") return null;
-  if (!expiresAt || !/^[0-9a-f-]{36}$/i.test(nonce)) return null;
-  return { n: nodeId, k: kind, e: expiresAt, x: nonce };
-}
-
-async function signLocalTestToken(secret: string, payload: LocalTestTokenPayload): Promise<string> {
-  const body = base64UrlEncode(JSON.stringify(payload));
-  return `${body}.${await hmacHex(secret, body)}`;
-}
-
-async function verifyLocalTestToken(secret: string, token: string): Promise<LocalTestTokenPayload | null> {
-  try {
-    const [body, signature, extra] = token.split(".");
-    if (!body || !signature || extra || !/^[0-9a-f]{64}$/i.test(signature)) return null;
-    const expected = await hmacHex(secret, body);
-    if (!timingSafeEqual(signature.toLowerCase(), expected)) return null;
-    return validateLocalTestTokenPayload(safeJsonParse(base64UrlDecode(body)));
-  } catch {
-    return null;
-  }
-}
-
 async function telegramApi(env: Env, method: string, payload: JsonObject): Promise<JsonObject> {
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
     method: "POST",
@@ -498,42 +423,6 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
         PRIMARY KEY (node_id, alert_key)
       )
     `;
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS local_test_sessions (
-        nonce TEXT PRIMARY KEY,
-        node_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        expires_at INTEGER NOT NULL,
-        reported_at INTEGER NOT NULL DEFAULT 0
-      )
-    `;
-  }
-
-  async reportLocalTest(payload: LocalTestTokenPayload, result: LocalTestResult): Promise<{ ok: boolean; error?: string }> {
-    const rows = await this.sql<LocalTestSessionRow>`
-      SELECT nonce, node_id, kind, expires_at, reported_at
-      FROM local_test_sessions WHERE nonce = ${payload.x}
-    `;
-    const session = rows[0];
-    if (!session || session.node_id !== payload.n || session.kind !== payload.k) return { ok: false, error: "unknown session" };
-    if (session.expires_at < Date.now() || payload.e !== session.expires_at) return { ok: false, error: "expired session" };
-    if (session.reported_at > 0) return { ok: false, error: "result already reported" };
-    await this.sql`UPDATE local_test_sessions SET reported_at = ${Date.now()} WHERE nonce = ${payload.x}`;
-    const nodes = await this.sql<NodeRow>`SELECT * FROM nodes WHERE node_id = ${payload.n}`;
-    const node = nodes[0];
-    if (!node) return { ok: false, error: "node not found" };
-    const device = result.user_agent ? `\n设备：${result.user_agent}` : "";
-    if (payload.k === "latency") {
-      await this.sendMessage(
-        `✅ 本地设备 → VPS 延迟测试\n[${node.name}]\n平均：${result.latency_avg_ms?.toFixed(1)} ms\n最低：${result.latency_min_ms?.toFixed(1)} ms\n最高：${result.latency_max_ms?.toFixed(1)} ms\n样本：${result.samples}${device}`,
-      );
-    } else {
-      await this.sendMessage(
-        `✅ 本地设备 → VPS 下载测速\n[${node.name}]\n速度：${result.download_mbps?.toFixed(1)} Mbps\n下载：${((result.bytes ?? 0) / 1_000_000).toFixed(1)} MB\n耗时：${((result.elapsed_ms ?? 0) / 1000).toFixed(1)} 秒${device}`,
-      );
-    }
-    await this.sql`DELETE FROM local_test_sessions WHERE expires_at < ${Date.now() - 86_400_000}`;
-    return { ok: true };
   }
 
   async syncNode(payload: NodeSyncPayload): Promise<{ commands: AgentCommand[]; server_time: number }> {
@@ -750,14 +639,8 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
       await this.sendMessage(await this.statusText(), this.panelKeyboard());
     } else if (lower === "/thresholds" || lower.includes("告警阈值") || lower.includes("报警阈值")) {
       await this.sendMessage(await this.thresholdsText());
-    } else if (lower === "/latency" || ["测延迟", "延迟测试", "测试延迟", "网络延迟"].some((item) => lower.includes(item))) {
-      await this.sendLocalTestLink("latency");
-    } else if (lower === "/speedtest" || ["测网速", "测速", "网速测试", "下载测速", "网络测速"].some((item) => lower.includes(item))) {
-      await this.sendLocalTestLink("speed");
-    } else if (lower === "/testsetup" || ["启用本地测速", "配置本地测速", "开启本地测速"].includes(lower)) {
-      await this.requestConfirmation("setup_local_test", "reverse-proxy", "启用本地设备直连测速入口");
-    } else if (lower === "/testdisable" || ["停用本地测速", "关闭本地测速"].includes(lower)) {
-      await this.requestConfirmation("disable_local_test", "reverse-proxy", "停用本地设备直连测速入口");
+    } else if (["/latency", "/speedtest", "/testsetup", "/testdisable"].includes(lower) || ["测延迟", "延迟测试", "测试延迟", "网络延迟", "测网速", "测速", "网速测试", "下载测速", "网络测速", "启用本地测速", "配置本地测速", "开启本地测速", "停用本地测速", "关闭本地测速"].some((item) => lower.includes(item))) {
+      await this.sendMessage("测延迟和测速功能已取消。");
     } else if (["断线提醒", "掉线提醒", "离线提醒"].some((item) => lower.includes(item))) {
       await this.sendMessage(this.offlineReminderText());
     } else if (lower.includes("整点播报") || lower.includes("每小时播报")) {
@@ -869,40 +752,6 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     if (!node) return "尚未收到 VPS Agent 上报，无法读取告警阈值。";
     const snapshot = safeJsonParse(node.snapshot_json);
     return alertPolicyText(isObject(snapshot) ? snapshot : {}, node.name, node.version);
-  }
-
-  private async sendLocalTestLink(kind: LocalTestKind): Promise<void> {
-    const node = await this.selectedNode();
-    if (!node || Date.now() - node.last_seen > NODE_STALE_MS) {
-      await this.sendMessage("没有在线 VPS 节点，无法生成本地测试链接。");
-      return;
-    }
-    const snapshot = safeJsonParse(node.snapshot_json);
-    const diagnostics = isObject(snapshot) && isObject(snapshot.diagnostics) ? snapshot.diagnostics : {};
-    const baseUrl = asString(diagnostics.local_test_url, 500).replace(/\/+$/, "");
-    if (!/^https:\/\/[A-Za-z0-9.-]+\/__ejectors-test$/.test(baseUrl)) {
-      await this.sendMessage(
-        `当前节点还没有启用本地直连测试入口。\n[${node.name}]\n请发送 /testsetup，并在二次确认后等待 VPS 回报成功；不会改动原网页内容。`,
-      );
-      return;
-    }
-    const payload: LocalTestTokenPayload = {
-      n: node.node_id,
-      k: kind,
-      e: Date.now() + LOCAL_TEST_TTL_MS,
-      x: crypto.randomUUID(),
-    };
-    await this.sql`DELETE FROM local_test_sessions WHERE expires_at < ${Date.now()}`;
-    await this.sql`
-      INSERT INTO local_test_sessions (nonce, node_id, kind, expires_at, reported_at)
-      VALUES (${payload.x}, ${payload.n}, ${payload.k}, ${payload.e}, 0)
-    `;
-    const token = await signLocalTestToken(this.env.VPS_AGENT_SECRET, payload);
-    const label = kind === "latency" ? "测延迟" : "测速（下载 100 MB）";
-    await this.sendMessage(
-      `📱 本地设备 → VPS ${label}\n[${node.name}]\n请在需要测试的手机或电脑上点击下面按钮。链接 10 分钟有效，只能回报一次。`,
-      { inline_keyboard: [[{ text: kind === "latency" ? "🌐 开始测延迟" : "🚀 打开测速页", url: `${baseUrl}/?token=${encodeURIComponent(token)}` }]] },
-    );
   }
 
   private offlineReminderText(): string {
@@ -1363,43 +1212,6 @@ async function handleAgentSync(request: Request, env: Env): Promise<Response> {
   return Response.json(result, { headers: { "Cache-Control": "no-store" } });
 }
 
-function finiteNumber(value: unknown, min: number, max: number): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max ? value : null;
-}
-
-async function handleLocalTestResult(request: Request, env: Env): Promise<Response> {
-  const body = await readLimitedBody(request);
-  const value = safeJsonParse(body);
-  if (!isObject(value)) return Response.json({ error: "invalid payload" }, { status: 400 });
-  const token = asString(value.token, 2048);
-  const payload = await verifyLocalTestToken(env.VPS_AGENT_SECRET, token);
-  if (!payload || payload.e < Date.now()) return Response.json({ error: "invalid or expired token" }, { status: 401 });
-  const result: LocalTestResult = { user_agent: asString(value.user_agent, 120) };
-  if (payload.k === "latency") {
-    const average = finiteNumber(value.latency_avg_ms, 0, 60_000);
-    const minimum = finiteNumber(value.latency_min_ms, 0, 60_000);
-    const maximum = finiteNumber(value.latency_max_ms, 0, 60_000);
-    const samples = asInteger(value.samples);
-    if (average === null || minimum === null || maximum === null || samples < 3 || samples > 10 || minimum > average || average > maximum) {
-      return Response.json({ error: "invalid latency result" }, { status: 400 });
-    }
-    Object.assign(result, { latency_avg_ms: average, latency_min_ms: minimum, latency_max_ms: maximum, samples });
-  } else {
-    const mbps = finiteNumber(value.download_mbps, 0.01, 100_000);
-    const bytes = finiteNumber(value.bytes, 1_000_000, 100_000_000);
-    const elapsed = finiteNumber(value.elapsed_ms, 100, 300_000);
-    if (mbps === null || bytes === null || elapsed === null) {
-      return Response.json({ error: "invalid speed result" }, { status: 400 });
-    }
-    Object.assign(result, { download_mbps: mbps, bytes, elapsed_ms: elapsed });
-  }
-  const response = await (await manager(env)).reportLocalTest(payload, result);
-  return Response.json(response, {
-    status: response.ok ? 200 : 409,
-    headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" },
-  });
-}
-
 async function handleTelegramWebhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const secret = request.headers.get("x-telegram-bot-api-secret-token") ?? "";
   if (!env.TELEGRAM_WEBHOOK_SECRET || !timingSafeEqual(secret, env.TELEGRAM_WEBHOOK_SECRET)) {
@@ -1441,20 +1253,6 @@ export default {
       }
       if (request.method === "POST" && url.pathname === "/api/agent/sync") {
         return await handleAgentSync(request, env);
-      }
-      if (request.method === "POST" && url.pathname === "/api/local-test/result") {
-        return await handleLocalTestResult(request, env);
-      }
-      if (request.method === "OPTIONS" && url.pathname === "/api/local-test/result") {
-        return new Response(null, {
-          status: 204,
-          headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Max-Age": "86400",
-          },
-        });
       }
       return Response.json({ error: "not found" }, { status: 404 });
     } catch (error) {
