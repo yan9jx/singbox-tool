@@ -23,7 +23,7 @@
 3. 在每台 VPS 安装 `cloudflare-telegram-vps-agent.sh`，确认 Worker `/health` 显示在线节点。
 4. 在 VPS 运行 `bash /root/cloudflare-telegram-vps-agent.sh activate`。脚本会先预检，再设置 Webhook并停止旧 `getUpdates` 服务。
 
-`activate` 会停止本地 Telegram 长轮询、整点播报、本地异常告警和本地 AI 简报。Universe VPS Manager 仍保留，用于状态采集、流量累计及安全命令执行；节点服务和反向代理不受影响。回退时运行：
+`activate` 会停止本地 Telegram 长轮询、整点播报、本地异常告警和本地 AI 简报。Universe VPS Manager 仍保留，用于状态采集、流量累计、原自动重启及安全命令执行；节点服务和反向代理不受影响。脚本只为本地 `send_message` 增加可回退的静默保护，`deactivate` 会恢复原文件。回退时运行：
 
 ```bash
 bash /root/cloudflare-telegram-vps-agent.sh deactivate

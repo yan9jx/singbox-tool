@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 APP="/usr/local/lib/ejectors-telegram-vps-agent.py"
 CONF="/etc/ejectors-telegram-vps-agent.json"
 STATE="/var/lib/ejectors-telegram-vps-agent-state.json"
@@ -12,7 +12,8 @@ BRIEF_BACKUP="/var/lib/ejectors-telegram-local-brief-mode.backup"
 OLD_BOT_SERVICE="universe-vps-manager-bot.service"
 MANAGER_CRON="/etc/cron.d/universe-vps-manager"
 MANAGER_CRON_BACKUP="/var/lib/ejectors-telegram-local-cron.backup"
-MANAGER_PAUSE_BACKUP="/var/lib/ejectors-telegram-local-pause.backup"
+MANAGER_APP="/opt/universe-vps-manager/vps_manager.py"
+MANAGER_APP_BACKUP="/var/lib/ejectors-telegram-local-manager.backup"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -135,7 +136,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 CONF_PATH = Path("/etc/ejectors-telegram-vps-agent.json")
 STATE_PATH = Path("/var/lib/ejectors-telegram-vps-agent-state.json")
 MANAGER_CONFIG = Path("/opt/universe-vps-manager/config.json")
@@ -515,20 +516,22 @@ os.chmod(tmp, 0o644)
 os.replace(tmp, path)
 PY
   fi
-  if [ -f /opt/universe-vps-manager/config.json ]; then
-    python3 - "$MANAGER_PAUSE_BACKUP" <<'PY'
-import json, os, pathlib, sys
-path = pathlib.Path("/opt/universe-vps-manager/config.json")
-backup = pathlib.Path(sys.argv[1])
-data = json.loads(path.read_text(encoding="utf-8"))
-if not backup.exists():
-    backup.write_text(str(int(data.get("pause_until", 0) or 0)), encoding="utf-8")
-    os.chmod(backup, 0o600)
-data["pause_until"] = 4102444800
-tmp = path.with_suffix(".cloudflare-tmp")
-tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
+  if [ -f "$MANAGER_APP" ]; then
+    [ -f "$MANAGER_APP_BACKUP" ] || cp -a "$MANAGER_APP" "$MANAGER_APP_BACKUP"
+    python3 - "$MANAGER_APP" <<'PY'
+import os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+needle = "def send_message(text, reply_markup=None):\n"
+guard = '    if Path("/var/lib/ejectors-telegram-webhook-active").exists():\n        return True\n'
+if guard not in text:
+    if needle not in text:
+        raise SystemExit("未找到本地 Telegram 发送函数，拒绝修改")
+    text = text.replace(needle, needle + guard, 1)
+    tmp = path.with_suffix(".cloudflare-tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, path.stat().st_mode & 0o777)
+    os.replace(tmp, path)
 PY
   fi
 }
@@ -538,19 +541,9 @@ restore_local_monitoring_mode() {
     cp -a "$MANAGER_CRON_BACKUP" "$MANAGER_CRON"
     rm -f "$MANAGER_CRON_BACKUP"
   fi
-  if [ -f "$MANAGER_PAUSE_BACKUP" ] && [ -f /opt/universe-vps-manager/config.json ]; then
-    python3 - "$MANAGER_PAUSE_BACKUP" <<'PY'
-import json, os, pathlib, sys
-path = pathlib.Path("/opt/universe-vps-manager/config.json")
-backup = pathlib.Path(sys.argv[1])
-data = json.loads(path.read_text(encoding="utf-8"))
-data["pause_until"] = int(backup.read_text(encoding="utf-8").strip() or 0)
-tmp = path.with_suffix(".restore-tmp")
-tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
-PY
-    rm -f "$MANAGER_PAUSE_BACKUP"
+  if [ -f "$MANAGER_APP_BACKUP" ]; then
+    cp -a "$MANAGER_APP_BACKUP" "$MANAGER_APP"
+    rm -f "$MANAGER_APP_BACKUP"
   fi
 }
 
@@ -585,7 +578,7 @@ secret = hmac.new(token.encode(), b"ejectors-telegram-webhook-v1", hashlib.sha25
 health_url = str(agent["worker_url"]).rstrip("/") + "/health"
 health_request = urllib.request.Request(
     health_url,
-    headers={"User-Agent": "ejectors-telegram-vps-agent/1.1.0"},
+    headers={"User-Agent": "ejectors-telegram-vps-agent/1.1.1"},
 )
 with urllib.request.urlopen(health_request, timeout=15) as response:
     health = json.loads(response.read().decode())
@@ -617,7 +610,7 @@ PY
   chmod 600 "$MODE_FILE"
   apply_cloudflare_only_mode
   echo "✅ 已切换为 Cloudflare Webhook 模式。"
-  echo "本地 Telegram 整点播报、异常告警和 AI 简报已停用；状态采集、流量累计与节点功能保留。"
+  echo "本地 Telegram 整点播报、异常告警和 AI 简报已停用；状态采集、流量累计、自动重启与节点功能保留。"
 }
 
 deactivate_webhook_mode() {
