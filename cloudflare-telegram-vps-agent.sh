@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.1.5"
+VERSION="1.2.0"
 APP="/usr/local/lib/ejectors-telegram-vps-agent.py"
+LOCAL_TEST_APP="/usr/local/lib/ejectors-local-speedtest.py"
 CONF="/etc/ejectors-telegram-vps-agent.json"
 STATE="/var/lib/ejectors-telegram-vps-agent-state.json"
 SERVICE="/etc/systemd/system/ejectors-telegram-vps-agent.service"
+LOCAL_TEST_SERVICE="/etc/systemd/system/ejectors-local-speedtest.service"
 MODE_FILE="/var/lib/ejectors-telegram-webhook-active"
 BRIEF_MODE="/opt/universe-vps-manager/state/daily_brief_mode"
 BRIEF_BACKUP="/var/lib/ejectors-telegram-local-brief-mode.backup"
@@ -125,6 +127,7 @@ write_agent() {
 #!/usr/bin/env python3
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -133,16 +136,18 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.1.5"
+VERSION = "1.2.0"
 CONF_PATH = Path("/etc/ejectors-telegram-vps-agent.json")
 STATE_PATH = Path("/var/lib/ejectors-telegram-vps-agent-state.json")
 MANAGER_CONFIG = Path("/opt/universe-vps-manager/config.json")
 MANAGER_APP = Path("/opt/universe-vps-manager/vps_manager.py")
 MAX_OUTPUT = 12000
-ALLOWED_ACTIONS = {"refresh", "clean", "pause10", "resume", "restart_node", "restart_proxy", "reboot", "latency", "speedtest"}
+LOCAL_TEST_STATE = Path("/var/lib/ejectors-local-test.json")
+ALLOWED_ACTIONS = {"refresh", "clean", "pause10", "resume", "restart_node", "restart_proxy", "reboot", "setup_local_test", "disable_local_test"}
 
 
 def load_json(path, default):
@@ -299,6 +304,8 @@ def collect_snapshot(state):
         if port.isdigit():
             listening_tcp_ports.append(int(port))
     expected_ports = [int(value) for value in re.findall(r"\d+", str(manager_cfg.get("check_port", "")))]
+    local_test_cfg = load_json(LOCAL_TEST_STATE, {})
+    local_test_url = str(local_test_cfg.get("url", "")) if isinstance(local_test_cfg, dict) else ""
     diagnostics = {
         "cpu": {"used_pct": cpu_percent(), "cores": os.cpu_count() or 1},
         "load": {"1m": round(load1, 2), "5m": round(load5, 2), "15m": round(load15, 2)},
@@ -326,6 +333,7 @@ def collect_snapshot(state):
         "top_cpu": redact("\n".join(top_cpu.splitlines()[:12])),
         "recent_warnings": redact(warnings),
         "ssh_failures_24h": redact("\n".join(ssh_lines[-30:])),
+        "local_test_url": local_test_url if re.fullmatch(r"https://[A-Za-z0-9.-]+/__ejectors-test", local_test_url) else "",
     }
     return {"status_text": manager_status(), "diagnostics": diagnostics}
 
@@ -343,63 +351,138 @@ def valid_service(name):
     return name if re.fullmatch(r"[A-Za-z0-9_.@-]+", str(name or "")) else ""
 
 
-def latency_test():
-    url = "http://cp.cloudflare.com/"
-    samples = []
-    for _ in range(3):
-        started = time.perf_counter()
-        request = urllib.request.Request(url, headers={
-            "Cache-Control": "no-cache",
-            "User-Agent": "ejectors-latency-test/1.1",
-        })
-        try:
-            with urllib.request.urlopen(request, timeout=6) as response:
-                response.read(1)
-            samples.append(round((time.perf_counter() - started) * 1000))
-        except urllib.error.HTTPError:
-            samples.append(round((time.perf_counter() - started) * 1000))
-        except Exception:
-            pass
-    if not samples:
-        return False, "🌐 VPS 延迟测试\nCloudflare：连接失败"
-    average = round(sum(samples) / len(samples))
-    return True, f"🌐 VPS 延迟测试\nCloudflare：{average} ms（{len(samples)} 次平均，最低 {min(samples)} ms）"
+def caddy_binary():
+    for candidate in (shutil.which("caddy"), "/usr/local/bin/caddy", "/usr/bin/caddy"):
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return ""
 
 
-def speed_test():
-    url = "https://speed.cloudflare.com/__down?bytes=100000000"
-    expected_bytes = 100_000_000
-    downloaded = 0
-    started = time.perf_counter()
-    partial_reason = ""
-    request = urllib.request.Request(url, headers={
-        "Cache-Control": "no-cache",
-        "User-Agent": "ejectors-speed-test/1.0",
-    })
+def direct_test_site():
+    sites = sorted(Path("/etc/shared-caddy/sites").glob("filebrowser-*.caddy"))
+    if not sites:
+        raise RuntimeError("未找到共享 Caddy 的 FileBrowser 站点，未做任何修改。")
+    request = urllib.request.Request("https://api64.ipify.org", headers={"User-Agent": "ejectors-local-test-setup/1.2"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        public_ip = str(ipaddress.ip_address(response.read(128).decode().strip()))
+    rejected = []
+    for site in sites:
+        text = site.read_text(encoding="utf-8")
+        match = re.search(r"(?m)^\s*([A-Za-z0-9.-]+):443\s*\{", text)
+        if not match:
+            continue
+        domain = match.group(1).lower()
+        route_dir = Path("/etc/shared-caddy/routes") / domain
+        if f"import {route_dir}/*.caddy" not in text:
+            rejected.append(f"{domain} 缺少独立路由导入点")
+            continue
+        addresses = set()
+        for record_type in ("A", "AAAA"):
+            try:
+                dns_url = "https://cloudflare-dns.com/dns-query?" + urllib.parse.urlencode({"name": domain, "type": record_type})
+                dns_request = urllib.request.Request(dns_url, headers={
+                    "Accept": "application/dns-json",
+                    "User-Agent": "ejectors-local-test-setup/1.2",
+                })
+                with urllib.request.urlopen(dns_request, timeout=10) as response:
+                    dns_value = json.loads(response.read().decode("utf-8"))
+                for answer in dns_value.get("Answer", []):
+                    try:
+                        addresses.add(str(ipaddress.ip_address(str(answer.get("data", "")))))
+                    except ValueError:
+                        pass
+            except Exception:
+                pass
+        if public_ip not in addresses:
+            rejected.append(f"{domain} 未直接解析到本 VPS")
+            continue
+        return domain, route_dir
+    raise RuntimeError("；".join(rejected) or "没有找到可安全使用的直连 HTTPS 域名，未做任何修改。")
+
+
+def validate_and_reload_caddy():
+    binary = caddy_binary()
+    if not binary:
+        return False, "未找到 Caddy 可执行文件"
+    code, out, err = run([binary, "validate", "--config", "/etc/shared-caddy/Caddyfile", "--adapter", "caddyfile"], 20)
+    if code != 0:
+        return False, redact(err or out or "Caddy 配置校验失败")
+    code, out, err = run(["systemctl", "reload", "shared-caddy"], 30)
+    return code == 0, redact(err or out or ("共享 Caddy 已重载" if code == 0 else "共享 Caddy 重载失败"))
+
+
+def setup_local_test():
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            while downloaded < expected_bytes:
-                if time.perf_counter() - started >= 90:
-                    partial_reason = "达到 90 秒安全上限"
-                    break
-                chunk = response.read(min(256 * 1024, expected_bytes - downloaded))
-                if not chunk:
-                    break
-                downloaded += len(chunk)
+        domain, route_dir = direct_test_site()
     except Exception as exc:
-        if downloaded == 0:
-            return False, f"🚀 VPS 下载测速失败：{redact(exc)}"
-        partial_reason = "连接提前结束"
-    elapsed = max(time.perf_counter() - started, 0.001)
-    mbps = downloaded * 8 / elapsed / 1_000_000
-    lines = [
-        "🚀 VPS 下载测速",
-        f"Cloudflare：{mbps:.1f} Mbps",
-        f"已下载：{downloaded / 1_000_000:.1f} MB，耗时：{elapsed:.1f} 秒",
-    ]
-    if downloaded < expected_bytes:
-        lines.append(f"结果为部分样本：{partial_reason or '未收到完整 100 MB'}")
-    return True, "\n".join(lines)
+        return False, redact(exc)
+    route_dir.mkdir(parents=True, exist_ok=True)
+    route = route_dir / "ejectors-local-test.caddy"
+    previous = route.read_bytes() if route.exists() else None
+    content = (
+        "# Managed by ejectors Telegram VPS Agent.\n"
+        "handle_path /__ejectors-test/* {\n"
+        "    header Cache-Control \"no-store, no-cache, must-revalidate\"\n"
+        "    reverse_proxy 127.0.0.1:18789\n"
+        "}\n"
+    )
+    tmp = route.with_suffix(".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.chmod(tmp, 0o640)
+    os.chown(tmp, 0, route_dir.stat().st_gid)
+    os.replace(tmp, route)
+    url = f"https://{domain}/__ejectors-test"
+    save_json(LOCAL_TEST_STATE, {"url": url, "route": str(route), "domain": domain})
+    code, out, err = run(["systemctl", "start", "ejectors-local-speedtest.service"], 20)
+    if code == 0:
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:18789/health", timeout=5) as response:
+                code = 0 if response.status == 200 else 1
+        except Exception as exc:
+            code, err = 1, str(exc)
+    if code == 0:
+        valid, message = validate_and_reload_caddy()
+    else:
+        valid, message = False, redact(err or out or "本地测速服务启动失败")
+    if not valid:
+        if previous is None:
+            route.unlink(missing_ok=True)
+        else:
+            route.write_bytes(previous)
+            os.chmod(route, 0o640)
+            os.chown(route, 0, route.parent.stat().st_gid)
+        LOCAL_TEST_STATE.unlink(missing_ok=True)
+        run(["systemctl", "stop", "ejectors-local-speedtest.service"], 15)
+        return False, f"启用失败并已回滚：{message}"
+    return True, f"本地设备直连测试入口已启用：{url}\n原网页内容、原有路由和代理节点未修改；只新增了隔离测试路径。"
+
+
+def disable_local_test():
+    cfg = load_json(LOCAL_TEST_STATE, {})
+    route_text = str(cfg.get("route", "")) if isinstance(cfg, dict) else ""
+    expected_root = Path("/etc/shared-caddy/routes").resolve()
+    if not route_text:
+        return True, "本地设备直连测试入口本来就是停用状态。"
+    route = Path(route_text)
+    try:
+        resolved = route.resolve()
+    except Exception:
+        return False, "测速路由路径无效，拒绝修改。"
+    if resolved.name != "ejectors-local-test.caddy" or expected_root not in resolved.parents:
+        return False, "测速路由路径不在安全白名单，拒绝修改。"
+    previous = resolved.read_bytes() if resolved.exists() else None
+    resolved.unlink(missing_ok=True)
+    valid, message = validate_and_reload_caddy()
+    if not valid:
+        if previous is not None:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_bytes(previous)
+            os.chmod(resolved, 0o640)
+            os.chown(resolved, 0, resolved.parent.stat().st_gid)
+        return False, f"停用失败并已回滚：{message}"
+    run(["systemctl", "stop", "ejectors-local-speedtest.service"], 15)
+    LOCAL_TEST_STATE.unlink(missing_ok=True)
+    return True, "本地设备直连测试入口已停用；其他功能未修改。"
 
 
 def execute(command):
@@ -428,10 +511,10 @@ def execute(command):
         return update_pause(10)
     if action == "resume":
         return update_pause(0)
-    if action == "latency":
-        return latency_test()
-    if action == "speedtest":
-        return speed_test()
+    if action == "setup_local_test":
+        return setup_local_test()
+    if action == "disable_local_test":
+        return disable_local_test()
     if action == "restart_node":
         cfg = load_json(MANAGER_CONFIG, {})
         service = valid_service(cfg.get("service_name", "sing-box"))
@@ -540,6 +623,167 @@ PYAGENT
   chmod 755 "$APP"
 }
 
+write_local_test_server() {
+  cat > "$LOCAL_TEST_APP" <<'PYTEST'
+#!/usr/bin/env python3
+import base64
+import hashlib
+import hmac
+import html
+import json
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+CONF = Path("/etc/ejectors-telegram-vps-agent.json")
+DOWNLOAD_BYTES = 100_000_000
+CHUNK = bytes((index * 73 + 41) % 256 for index in range(256 * 1024))
+
+
+def config():
+    return json.loads(CONF.read_text(encoding="utf-8"))
+
+
+def verify_token(token):
+    try:
+        body, signature = token.split(".", 1)
+        if not body or len(signature) != 64:
+            return None
+        cfg = config()
+        expected = hmac.new(str(cfg["agent_secret"]).encode(), body.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature.lower(), expected):
+            return None
+        padded = body.replace("-", "+").replace("_", "/") + "=" * ((4 - len(body) % 4) % 4)
+        payload = json.loads(base64.b64decode(padded, validate=True).decode("utf-8"))
+        if payload.get("n") != cfg.get("node_id") or payload.get("k") not in ("latency", "speed"):
+            return None
+        if int(payload.get("e", 0)) < int(time.time() * 1000):
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def page(token, kind, worker_url):
+    title = "本机到 VPS 延迟测试" if kind == "latency" else "本机到 VPS 下载测速"
+    detail = "将连续请求 VPS 6 次并计算真实浏览器往返时间。" if kind == "latency" else "点击开始后，本设备会从 VPS 下载 100 MB 测试数据。"
+    button = "" if kind == "latency" else '<button id="start">开始下载 100 MB</button>'
+    auto = "runLatency();" if kind == "latency" else ""
+    return f'''<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>{html.escape(title)}</title>
+<style>body{{font-family:system-ui,-apple-system,sans-serif;margin:0;background:#f4f7fb;color:#162033}}main{{max-width:560px;margin:8vh auto;padding:24px}}.card{{background:#fff;border-radius:18px;padding:24px;box-shadow:0 8px 30px #15325b18}}h1{{font-size:24px;margin:0 0 12px}}p{{line-height:1.6}}#result{{font-size:20px;font-weight:700;white-space:pre-line;margin-top:18px}}button{{width:100%;padding:14px;border:0;border-radius:12px;background:#1677ff;color:#fff;font-size:18px}}button:disabled{{opacity:.55}}small{{color:#667085}}</style></head>
+<body><main><div class="card"><h1>{html.escape(title)}</h1><p>{html.escape(detail)}</p>{button}<div id="result">准备中…</div><p><small>测试链接 10 分钟有效，结果仅回传到你的 Telegram 管家。</small></p></div></main>
+<script>
+const token={json.dumps(token)}; const worker={json.dumps(worker_url.rstrip('/'))}; const result=document.getElementById('result');
+async function report(data){{
+  const response=await fetch(worker+'/api/local-test/result',{{method:'POST',headers:{{'Content-Type':'text/plain;charset=UTF-8'}},body:JSON.stringify({{...data,token,user_agent:navigator.userAgent.slice(0,120)}})}});
+  if(!response.ok) throw new Error('结果回传失败');
+}}
+async function runLatency(){{
+  try{{result.textContent='正在测试…';const values=[];
+    for(let i=0;i<6;i++){{const started=performance.now();const response=await fetch('ping?token='+encodeURIComponent(token)+'&i='+i,{{cache:'no-store'}});if(!response.ok)throw new Error('VPS 无响应');const value=performance.now()-started;if(i>0)values.push(value);}}
+    const avg=values.reduce((a,b)=>a+b,0)/values.length,min=Math.min(...values),max=Math.max(...values);
+    result.textContent=`平均 ${{avg.toFixed(1)}} ms\n最低 ${{min.toFixed(1)}} ms · 最高 ${{max.toFixed(1)}} ms\n正在回传 Telegram…`;
+    await report({{latency_avg_ms:avg,latency_min_ms:min,latency_max_ms:max,samples:values.length}});result.textContent=result.textContent.replace('正在回传 Telegram…','结果已回传 Telegram');
+  }}catch(error){{result.textContent='测试失败：'+error.message;}}
+}}
+async function runSpeed(){{
+  const button=document.getElementById('start');button.disabled=true;
+  try{{result.textContent='正在下载，请保持页面打开…';const started=performance.now();const response=await fetch('download?token='+encodeURIComponent(token),{{cache:'no-store'}});if(!response.ok||!response.body)throw new Error('浏览器不支持流式测速或 VPS 无响应');
+    const reader=response.body.getReader();let bytes=0;while(true){{const part=await reader.read();if(part.done)break;bytes+=part.value.byteLength;result.textContent=`已下载 ${{(bytes/1e6).toFixed(1)}} / 100.0 MB`;}}
+    const elapsed=performance.now()-started,mbps=bytes*8/elapsed/1000;
+    result.textContent=`${{mbps.toFixed(1)}} Mbps\n${{(bytes/1e6).toFixed(1)}} MB · ${{(elapsed/1000).toFixed(1)}} 秒\n正在回传 Telegram…`;
+    await report({{download_mbps:mbps,bytes,elapsed_ms:elapsed}});result.textContent=result.textContent.replace('正在回传 Telegram…','结果已回传 Telegram');
+  }}catch(error){{result.textContent='测速失败：'+error.message;button.disabled=false;}}
+}}
+if(document.getElementById('start'))document.getElementById('start').addEventListener('click',runSpeed);{auto}
+</script></body></html>'''.encode("utf-8")
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        return
+
+    def send_common_headers(self, status, content_type, length=0):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/health":
+            body = b"ok"
+            self.send_common_headers(200, "text/plain; charset=utf-8", len(body)); self.wfile.write(body); return
+        token = urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
+        payload = verify_token(token)
+        if not payload:
+            body = "链接无效或已过期，请回 Telegram 重新生成。".encode("utf-8")
+            self.send_common_headers(403, "text/plain; charset=utf-8", len(body)); self.wfile.write(body); return
+        if parsed.path in ("/", ""):
+            cfg = config(); body = page(token, payload["k"], str(cfg["worker_url"]))
+            self.send_common_headers(200, "text/html; charset=utf-8", len(body)); self.wfile.write(body); return
+        if parsed.path == "/ping" and payload["k"] == "latency":
+            self.send_common_headers(204, "text/plain", 0); return
+        if parsed.path == "/download" and payload["k"] == "speed":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(DOWNLOAD_BYTES))
+            self.send_header("Content-Disposition", "attachment; filename=100mb.test")
+            self.send_header("Cache-Control", "no-store, no-transform")
+            self.send_header("Content-Encoding", "identity")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            remaining = DOWNLOAD_BYTES
+            try:
+                while remaining:
+                    block = CHUNK[:min(len(CHUNK), remaining)]
+                    self.wfile.write(block); remaining -= len(block)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        body = b"not found"
+        self.send_common_headers(404, "text/plain", len(body)); self.wfile.write(body)
+
+
+server = ThreadingHTTPServer(("127.0.0.1", 18789), Handler)
+server.daemon_threads = True
+server.serve_forever()
+PYTEST
+  chmod 755 "$LOCAL_TEST_APP"
+  cat > "$LOCAL_TEST_SERVICE" <<EOF
+[Unit]
+Description=Ejectors local-device VPS speed test
+After=network-online.target
+ConditionPathExists=/var/lib/ejectors-local-test.json
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 $LOCAL_TEST_APP
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=$CONF
+RestrictAddressFamilies=AF_INET AF_UNIX
+MemoryMax=96M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
 write_service() {
   cat > "$SERVICE" <<EOF
 [Unit]
@@ -556,12 +800,16 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/var/lib /opt/universe-vps-manager /run /tmp
+ReadWritePaths=/var/lib /opt/universe-vps-manager -/etc/shared-caddy/routes /run /tmp
 
 [Install]
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
+  systemctl enable ejectors-local-speedtest.service >/dev/null
+  if [ -f /var/lib/ejectors-local-test.json ]; then
+    systemctl start ejectors-local-speedtest.service
+  fi
   systemctl enable ejectors-telegram-vps-agent.service >/dev/null
   systemctl restart ejectors-telegram-vps-agent.service
 }
@@ -616,6 +864,7 @@ install_agent() {
   install_deps
   write_config
   write_agent
+  write_local_test_server
   write_service
   if [ -f "$MODE_FILE" ]; then
     apply_cloudflare_only_mode
@@ -642,7 +891,7 @@ secret = hmac.new(token.encode(), b"ejectors-telegram-webhook-v1", hashlib.sha25
 health_url = str(agent["worker_url"]).rstrip("/") + "/health"
 health_request = urllib.request.Request(
     health_url,
-    headers={"User-Agent": "ejectors-telegram-vps-agent/1.1.5"},
+    headers={"User-Agent": "ejectors-telegram-vps-agent/1.2.0"},
 )
 with urllib.request.urlopen(health_request, timeout=15) as response:
     health = json.loads(response.read().decode())
@@ -710,6 +959,7 @@ upgrade_agent() {
   [ -f "$CONF" ] || { echo "尚未安装 Agent，请先运行：bash $0 install"; exit 1; }
   install_deps
   write_agent
+  write_local_test_server
   write_service
   if [ -f "$MODE_FILE" ]; then
     apply_cloudflare_only_mode
@@ -731,8 +981,13 @@ uninstall_agent() {
     echo "当前仍是 Cloudflare Webhook 模式。请先运行 deactivate 安全恢复本地轮询，再卸载。"
     exit 1
   fi
+  if [ -f /var/lib/ejectors-local-test.json ]; then
+    echo "本地测速入口仍在使用。请先在 Telegram 发送 /testdisable 并确认，避免遗留无效 Caddy 路由。"
+    exit 1
+  fi
   systemctl disable --now ejectors-telegram-vps-agent.service 2>/dev/null || true
-  rm -f "$SERVICE" "$APP" "$CONF" "$STATE" "$MODE_FILE" "$BRIEF_BACKUP"
+  systemctl disable --now ejectors-local-speedtest.service 2>/dev/null || true
+  rm -f "$SERVICE" "$APP" "$LOCAL_TEST_SERVICE" "$LOCAL_TEST_APP" "$CONF" "$STATE" "$MODE_FILE" "$BRIEF_BACKUP"
   systemctl daemon-reload
   echo "已移除 Cloudflare Telegram VPS Agent；原 Universe VPS Manager 文件未删除。"
 }
