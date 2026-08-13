@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 APP="/usr/local/lib/ejectors-telegram-vps-agent.py"
 LOCAL_TEST_APP="/usr/local/lib/ejectors-local-speedtest.py"
 CONF="/etc/ejectors-telegram-vps-agent.json"
@@ -140,7 +140,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 CONF_PATH = Path("/etc/ejectors-telegram-vps-agent.json")
 STATE_PATH = Path("/var/lib/ejectors-telegram-vps-agent-state.json")
 MANAGER_CONFIG = Path("/opt/universe-vps-manager/config.json")
@@ -352,27 +352,28 @@ def valid_service(name):
 
 
 def caddy_binary():
-    for candidate in (shutil.which("caddy"), "/usr/local/bin/caddy", "/usr/bin/caddy"):
+    for candidate in ("/usr/local/bin/caddy-naive", shutil.which("caddy"), "/usr/local/bin/caddy", "/usr/bin/caddy"):
         if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
             return candidate
     return ""
 
 
 def direct_test_site():
-    sites = sorted(Path("/etc/shared-caddy/sites").glob("filebrowser-*.caddy"))
+    roots = (Path("/etc/caddy-naive"), Path("/etc/shared-caddy"))
+    sites = [(root, site) for root in roots for site in sorted((root / "sites").glob("filebrowser-*.caddy"))]
     if not sites:
-        raise RuntimeError("未找到共享 Caddy 的 FileBrowser 站点，未做任何修改。")
+        raise RuntimeError("未在 /etc/caddy-naive 或 /etc/shared-caddy 找到 FileBrowser 站点，未做任何修改。")
     request = urllib.request.Request("https://api64.ipify.org", headers={"User-Agent": "ejectors-local-test-setup/1.2"})
     with urllib.request.urlopen(request, timeout=10) as response:
         public_ip = str(ipaddress.ip_address(response.read(128).decode().strip()))
     rejected = []
-    for site in sites:
+    for root, site in sites:
         text = site.read_text(encoding="utf-8")
         match = re.search(r"(?m)^\s*([A-Za-z0-9.-]+):443\s*\{", text)
         if not match:
             continue
         domain = match.group(1).lower()
-        route_dir = Path("/etc/shared-caddy/routes") / domain
+        route_dir = root / "routes" / domain
         if f"import {route_dir}/*.caddy" not in text:
             rejected.append(f"{domain} 缺少独立路由导入点")
             continue
@@ -396,15 +397,23 @@ def direct_test_site():
         if public_ip not in addresses:
             rejected.append(f"{domain} 未直接解析到本 VPS")
             continue
-        return domain, route_dir
+        caddyfile = root / "Caddyfile"
+        if not caddyfile.is_file():
+            rejected.append(f"{domain} 缺少 {caddyfile}")
+            continue
+        return domain, route_dir, caddyfile
     raise RuntimeError("；".join(rejected) or "没有找到可安全使用的直连 HTTPS 域名，未做任何修改。")
 
 
-def validate_and_reload_caddy():
+def validate_and_reload_caddy(caddyfile):
+    caddyfile = Path(caddyfile)
+    allowed = {Path("/etc/caddy-naive/Caddyfile"), Path("/etc/shared-caddy/Caddyfile")}
+    if caddyfile not in allowed or not caddyfile.is_file():
+        return False, "Caddy 主配置路径不在安全白名单"
     binary = caddy_binary()
     if not binary:
         return False, "未找到 Caddy 可执行文件"
-    code, out, err = run([binary, "validate", "--config", "/etc/shared-caddy/Caddyfile", "--adapter", "caddyfile"], 20)
+    code, out, err = run([binary, "validate", "--config", str(caddyfile), "--adapter", "caddyfile"], 20)
     if code != 0:
         return False, redact(err or out or "Caddy 配置校验失败")
     code, out, err = run(["systemctl", "reload", "shared-caddy"], 30)
@@ -413,7 +422,7 @@ def validate_and_reload_caddy():
 
 def setup_local_test():
     try:
-        domain, route_dir = direct_test_site()
+        domain, route_dir, caddyfile = direct_test_site()
     except Exception as exc:
         return False, redact(exc)
     route_dir.mkdir(parents=True, exist_ok=True)
@@ -432,7 +441,7 @@ def setup_local_test():
     os.chown(tmp, 0, route_dir.stat().st_gid)
     os.replace(tmp, route)
     url = f"https://{domain}/__ejectors-test"
-    save_json(LOCAL_TEST_STATE, {"url": url, "route": str(route), "domain": domain})
+    save_json(LOCAL_TEST_STATE, {"url": url, "route": str(route), "domain": domain, "caddyfile": str(caddyfile)})
     code, out, err = run(["systemctl", "start", "ejectors-local-speedtest.service"], 20)
     if code == 0:
         try:
@@ -441,7 +450,7 @@ def setup_local_test():
         except Exception as exc:
             code, err = 1, str(exc)
     if code == 0:
-        valid, message = validate_and_reload_caddy()
+        valid, message = validate_and_reload_caddy(caddyfile)
     else:
         valid, message = False, redact(err or out or "本地测速服务启动失败")
     if not valid:
@@ -460,7 +469,8 @@ def setup_local_test():
 def disable_local_test():
     cfg = load_json(LOCAL_TEST_STATE, {})
     route_text = str(cfg.get("route", "")) if isinstance(cfg, dict) else ""
-    expected_root = Path("/etc/shared-caddy/routes").resolve()
+    caddyfile = Path(str(cfg.get("caddyfile", ""))) if isinstance(cfg, dict) else Path("")
+    expected_roots = (Path("/etc/caddy-naive/routes").resolve(), Path("/etc/shared-caddy/routes").resolve())
     if not route_text:
         return True, "本地设备直连测试入口本来就是停用状态。"
     route = Path(route_text)
@@ -468,11 +478,11 @@ def disable_local_test():
         resolved = route.resolve()
     except Exception:
         return False, "测速路由路径无效，拒绝修改。"
-    if resolved.name != "ejectors-local-test.caddy" or expected_root not in resolved.parents:
+    if resolved.name != "ejectors-local-test.caddy" or not any(root in resolved.parents for root in expected_roots):
         return False, "测速路由路径不在安全白名单，拒绝修改。"
     previous = resolved.read_bytes() if resolved.exists() else None
     resolved.unlink(missing_ok=True)
-    valid, message = validate_and_reload_caddy()
+    valid, message = validate_and_reload_caddy(caddyfile)
     if not valid:
         if previous is not None:
             resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -800,7 +810,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/var/lib /opt/universe-vps-manager -/etc/shared-caddy/routes /run /tmp
+ReadWritePaths=/var/lib /opt/universe-vps-manager -/etc/caddy-naive/routes -/etc/shared-caddy/routes /run /tmp
 
 [Install]
 WantedBy=multi-user.target
@@ -891,7 +901,7 @@ secret = hmac.new(token.encode(), b"ejectors-telegram-webhook-v1", hashlib.sha25
 health_url = str(agent["worker_url"]).rstrip("/") + "/health"
 health_request = urllib.request.Request(
     health_url,
-    headers={"User-Agent": "ejectors-telegram-vps-agent/1.2.0"},
+    headers={"User-Agent": "ejectors-telegram-vps-agent/1.2.1"},
 )
 with urllib.request.urlopen(health_request, timeout=15) as response:
     health = json.loads(response.read().decode())
