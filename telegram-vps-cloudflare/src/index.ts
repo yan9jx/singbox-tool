@@ -513,10 +513,12 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     const previous = rows[0];
     const now = Date.now();
     if (!detail) {
+      if (!previous) return;
       if (previous?.active) {
         const labels: Record<string, string> = { offline: "节点已恢复上报", resource: "资源已恢复正常", service: "服务与端口已恢复正常" };
         await this.sendMessage(`✅ ${labels[key] ?? "异常已恢复"}\n[${node.name}]`);
       }
+      if (!previous.active && previous.consecutive === 0 && !previous.last_detail) return;
       await this.sql`
         INSERT INTO alert_states (node_id, alert_key, active, consecutive, last_sent, last_detail)
         VALUES (${node.node_id}, ${key}, 0, 0, ${previous?.last_sent ?? 0}, '')
@@ -528,6 +530,7 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     const consecutive = previous?.active ? previous.consecutive : (previous?.consecutive ?? 0) + 1;
     const activate = Boolean(previous?.active) || consecutive >= requiredConsecutive;
     const shouldSend = activate && (!previous?.active || now - previous.last_sent >= ALERT_REPEAT_MS);
+    if (previous?.active && !shouldSend && previous.last_detail === detail) return;
     if (shouldSend) {
       const labels: Record<string, string> = { offline: "节点离线", resource: "资源异常", service: "服务或端口异常" };
       await this.sendMessage(`🚨 ${labels[key] ?? "VPS 异常"}\n[${node.name}]\n\n${detail}`);
