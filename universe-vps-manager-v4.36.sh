@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.08.13-1"
+APP_VERSION="2026.08.13-2"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -399,6 +399,51 @@ def deepseek_chat(text):
         log_event(f"deepseek http error {e.code}: {detail or e.reason}")
     except Exception as e:
         log_event(f"deepseek error: {e}")
+
+    return False
+
+
+def deepseek_self_test():
+    api_key = str(CFG.get("deepseek_api_key", "")).strip()
+    if not api_key:
+        print("DeepSeek API Key 未配置。")
+        return False
+
+    payload = {
+        "model": "deepseek-v4-flash",
+        "thinking": {"type": "disabled"},
+        "messages": [
+            {"role": "system", "content": "仅回复 OK。"},
+            {"role": "user", "content": "连接测试"},
+        ],
+        "max_tokens": 8,
+    }
+    req = urllib.request.Request(
+        "https://api.deepseek.com/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            resp = json.loads(r.read().decode("utf-8"))
+        if resp.get("choices"):
+            print("DeepSeek API 连接测试成功。")
+            return True
+        print("DeepSeek API 返回内容异常。")
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="ignore")[:300]
+        except Exception:
+            pass
+        print(f"DeepSeek API 检查失败（HTTP {e.code}）：{detail or e.reason}")
+    except Exception as e:
+        print(f"DeepSeek API 检查失败：{e}")
 
     return False
 
@@ -1707,6 +1752,9 @@ def main():
     elif cmd == "check-telegram":
         if not telegram_self_test():
             sys.exit(1)
+    elif cmd == "check-deepseek":
+        if not deepseek_self_test():
+            sys.exit(1)
     elif cmd == "menu":
         if not send_panel():
             sys.exit(1)
@@ -1715,7 +1763,7 @@ def main():
     elif cmd == "init-traffic":
         init_traffic()
     else:
-        print("usage: vps_manager.py alive|resource|report|clean|bot-loop|bot|sync-updates|check-telegram|menu|status|init-traffic")
+        print("usage: vps_manager.py alive|resource|report|clean|bot-loop|bot|sync-updates|check-telegram|check-deepseek|menu|status|init-traffic")
 
 
 if __name__ == "__main__":
@@ -1830,12 +1878,136 @@ EOF
     tail -n 30 "$APP_DIR/logs/events.log" 2>/dev/null || true
     return 1
   fi
+  if python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if str(d.get("deepseek_api_key", "")).strip() else 1)' "$CONFIG_FILE"; then
+    if ! python3 "$PY_FILE" check-deepseek; then
+      echo "DeepSeek API 检查失败；Telegram 与原监控功能不受影响。"
+      return 1
+    fi
+  fi
 
   echo
   echo "✅ 安装完成"
   echo "安装目录：$APP_DIR"
   echo "按钮服务：universe-vps-manager-bot.service"
   echo "运行模式：精简消息内按钮，监控使用 cron"
+}
+
+restore_ai_setup() {
+  local config_backup="$1"
+  local manager_backup="$2"
+
+  cp -a "$config_backup" "$CONFIG_FILE" 2>/dev/null || true
+  cp -a "$manager_backup" "$PY_FILE" 2>/dev/null || true
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+  chmod +x "$PY_FILE" 2>/dev/null || true
+  systemctl restart universe-vps-manager-bot.service >/dev/null 2>&1 || true
+}
+
+setup_ai() {
+  local timestamp config_backup manager_backup
+
+  need_root
+
+  if [ ! -f "$CONFIG_FILE" ] || [ ! -f "$PY_FILE" ] || [ ! -f "$BOT_SERVICE" ]; then
+    echo "未检测到现有 Universe VPS Manager 安装。"
+    echo "请先不带参数运行本脚本完成完整安装。"
+    return 1
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "未检测到 python3，无法配置 AI。"
+    return 1
+  fi
+  if ! systemctl is-active --quiet universe-vps-manager-bot.service; then
+    echo "现有机器人服务未运行，请先检查 universe-vps-manager-bot.service。"
+    return 1
+  fi
+
+  echo "======================================"
+  echo "Universe VPS Manager - DeepSeek 配置"
+  echo "版本：$APP_VERSION"
+  echo "此操作不会修改 Bot Token、Chat ID、监控、流量或 cron。"
+  echo "======================================"
+  read -r -s -p "请输入 DeepSeek API Key: " DEEPSEEK_API_KEY
+  echo
+  DEEPSEEK_API_KEY="$(clean_input "$DEEPSEEK_API_KEY")"
+  if [ -z "$DEEPSEEK_API_KEY" ]; then
+    echo "API Key 不能为空，未做任何修改。"
+    return 1
+  fi
+
+  mkdir -p "$APP_DIR/backups"
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  config_backup="$APP_DIR/backups/config.json.before-ai-$timestamp"
+  manager_backup="$APP_DIR/backups/vps_manager.py.before-ai-$timestamp"
+  cp -a "$CONFIG_FILE" "$config_backup"
+  cp -a "$PY_FILE" "$manager_backup"
+
+  export DEEPSEEK_API_KEY CONFIG_FILE
+  if ! python3 - <<'PYAI'
+from pathlib import Path
+import json
+import os
+
+path = Path(os.environ["CONFIG_FILE"])
+data = json.loads(path.read_text(encoding="utf-8"))
+required = ("bot_token", "chat_id", "server_name")
+missing = [name for name in required if not str(data.get(name, "")).strip()]
+if missing:
+    raise SystemExit("现有配置缺少必要字段：" + ", ".join(missing))
+
+key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+if not key:
+    raise SystemExit("DeepSeek API Key 不能为空")
+
+data["deepseek_api_key"] = key
+tmp = path.with_name(path.name + ".ai-tmp")
+try:
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+finally:
+    if tmp.exists():
+        tmp.unlink()
+PYAI
+  then
+    unset DEEPSEEK_API_KEY
+    restore_ai_setup "$config_backup" "$manager_backup"
+    echo "AI 配置写入失败，已恢复原文件。"
+    return 1
+  fi
+  unset DEEPSEEK_API_KEY
+  chmod 600 "$CONFIG_FILE"
+
+  if ! write_manager; then
+    restore_ai_setup "$config_backup" "$manager_backup"
+    echo "机器人程序更新失败，已回滚。"
+    return 1
+  fi
+
+  if ! python3 "$PY_FILE" check-deepseek; then
+    restore_ai_setup "$config_backup" "$manager_backup"
+    echo "DeepSeek 验证失败，已恢复原配置和机器人程序。"
+    return 1
+  fi
+
+  if ! systemctl restart universe-vps-manager-bot.service; then
+    restore_ai_setup "$config_backup" "$manager_backup"
+    echo "机器人重启失败，已回滚。"
+    return 1
+  fi
+  sleep 1
+  if ! systemctl is-active --quiet universe-vps-manager-bot.service; then
+    restore_ai_setup "$config_backup" "$manager_backup"
+    echo "机器人启动检查失败，已回滚。"
+    journalctl -u universe-vps-manager-bot.service -n 30 --no-pager || true
+    return 1
+  fi
+
+  echo
+  echo "✅ DeepSeek AI 配置完成"
+  echo "Telegram 对话：/ai 你的问题"
+  echo "VPS 状态：我的 VPS 状态"
 }
 
 main() {
@@ -1852,4 +2024,8 @@ main() {
   install_bot_service
 }
 
-main "$@"
+if [ "${1:-}" = "--setup-ai" ]; then
+  setup_ai
+else
+  main "$@"
+fi
