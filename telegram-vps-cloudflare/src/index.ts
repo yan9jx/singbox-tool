@@ -581,7 +581,7 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
       await this.sendMessage(await this.statusText(), this.panelKeyboard());
     } else if (lower === "/thresholds" || lower.includes("告警阈值") || lower.includes("报警阈值")) {
       await this.sendMessage(await this.thresholdsText());
-    } else if (lower === "/latency" || ["延迟测试", "测试延迟", "网络延迟"].some((item) => lower.includes(item))) {
+    } else if (lower === "/latency" || ["测延迟", "测速", "延迟测试", "测试延迟", "网络延迟"].some((item) => lower.includes(item))) {
       await this.queueImmediate("latency", "auto", "VPS 延迟测试");
     } else if (["断线提醒", "掉线提醒", "离线提醒"].some((item) => lower.includes(item))) {
       await this.sendMessage(this.offlineReminderText());

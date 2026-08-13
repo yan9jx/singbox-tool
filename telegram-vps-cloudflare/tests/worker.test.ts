@@ -40,7 +40,7 @@ describe("standalone Telegram VPS Worker", () => {
       diagnostics: {
         alert_policy: { cpu_warn: 75, ram_warn: 82, swap_warn: 35, disk_warn: 88, bandwidth_mbps: 100, traffic_saturation_ratio: 80 },
       },
-    }, "Test VPS", "1.1.2")).toContain("CPU：≥ 75%");
+    }, "Test VPS", "1.1.3")).toContain("CPU：≥ 75%");
   });
 
   it("reports configuration readiness without exposing values", async () => {
