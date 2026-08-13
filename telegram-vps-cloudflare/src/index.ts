@@ -384,7 +384,7 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
       await this.queueImmediate("resume", "auto", "恢复告警");
     } else if (["/ping", "ping"].includes(lower)) {
       await this.sendMessage("pong");
-    } else if (["/balance", "/ai balance", "/ai 余额", "ai余额", "deepseek余额"].includes(lower)) {
+    } else if (["/balance", "/ai balance", "/ai 余额", "查询余额", "查余额", "余额", "ai余额", "deepseek余额"].includes(lower)) {
       await this.sendMessage(await this.balanceText());
     } else if (lower === "/brief on") {
       this.setState({ ...this.state, dailyBrief: true });
