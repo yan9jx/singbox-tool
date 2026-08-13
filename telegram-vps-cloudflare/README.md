@@ -11,7 +11,9 @@
 - 原控制面板按钮与重启流程
 - AI 发起的重启操作必须通过 2 分钟二次确认按钮
 - 多 VPS `/nodes`、`/use 节点ID`
+- Cloudflare 每小时状态播报，以及资源、服务、端口和离线上报告警（不调用 DeepSeek）
 - 北京时间 09:00 每日 AI 运维简报
+- 北京时间每周日 04:00 自动清理在线 VPS 缓存
 - 公开网页检索工具（DuckDuckGo Instant Answer）
 
 ## 安全迁移顺序
@@ -21,10 +23,16 @@
 3. 在每台 VPS 安装 `cloudflare-telegram-vps-agent.sh`，确认 Worker `/health` 显示在线节点。
 4. 在 VPS 运行 `bash /root/cloudflare-telegram-vps-agent.sh activate`。脚本会先预检，再设置 Webhook并停止旧 `getUpdates` 服务。
 
-`activate` 只停止 Telegram 长轮询服务。Universe VPS Manager 的监控 cron、告警发送、流量统计、节点服务和反向代理均保留。回退时运行：
+`activate` 会停止本地 Telegram 长轮询、整点播报、本地异常告警和本地 AI 简报。Universe VPS Manager 仍保留，用于状态采集、流量累计及安全命令执行；节点服务和反向代理不受影响。回退时运行：
 
 ```bash
 bash /root/cloudflare-telegram-vps-agent.sh deactivate
+```
+
+已安装旧版 Agent 时，可无交互升级：
+
+```bash
+bash /root/cloudflare-telegram-vps-agent.sh upgrade
 ```
 
 ## Worker Secrets

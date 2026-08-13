@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.0.2"
+VERSION="1.1.0"
 APP="/usr/local/lib/ejectors-telegram-vps-agent.py"
 CONF="/etc/ejectors-telegram-vps-agent.json"
 STATE="/var/lib/ejectors-telegram-vps-agent-state.json"
@@ -10,6 +10,9 @@ MODE_FILE="/var/lib/ejectors-telegram-webhook-active"
 BRIEF_MODE="/opt/universe-vps-manager/state/daily_brief_mode"
 BRIEF_BACKUP="/var/lib/ejectors-telegram-local-brief-mode.backup"
 OLD_BOT_SERVICE="universe-vps-manager-bot.service"
+MANAGER_CRON="/etc/cron.d/universe-vps-manager"
+MANAGER_CRON_BACKUP="/var/lib/ejectors-telegram-local-cron.backup"
+MANAGER_PAUSE_BACKUP="/var/lib/ejectors-telegram-local-pause.backup"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -132,7 +135,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 CONF_PATH = Path("/etc/ejectors-telegram-vps-agent.json")
 STATE_PATH = Path("/var/lib/ejectors-telegram-vps-agent-state.json")
 MANAGER_CONFIG = Path("/opt/universe-vps-manager/config.json")
@@ -196,8 +199,50 @@ def mem_info():
     }
 
 
+def cpu_percent():
+    def sample():
+        parts = Path("/proc/stat").read_text().splitlines()[0].split()[1:]
+        values = [int(value) for value in parts]
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        return sum(values), idle
+    try:
+        total1, idle1 = sample()
+        time.sleep(0.15)
+        total2, idle2 = sample()
+        delta = total2 - total1
+        return round((delta - (idle2 - idle1)) * 100 / delta, 1) if delta > 0 else 0
+    except Exception:
+        return 0
+
+
+def network_info(state):
+    _, route, _ = run(["ip", "route", "show", "default"], 3)
+    match = re.search(r"\bdev\s+([A-Za-z0-9_.:-]+)", route)
+    iface = match.group(1) if match else ""
+    try:
+        base = Path("/sys/class/net") / iface / "statistics"
+        rx = int((base / "rx_bytes").read_text().strip())
+        tx = int((base / "tx_bytes").read_text().strip())
+    except Exception:
+        return {"interface": iface, "rx_mbps": 0, "tx_mbps": 0}
+    now = time.time()
+    prior = state.get("network_sample", {}) if isinstance(state.get("network_sample"), dict) else {}
+    elapsed = now - float(prior.get("time", 0) or 0)
+    prior_rx = int(prior.get("rx", rx) or rx)
+    prior_tx = int(prior.get("tx", tx) or tx)
+    rx_delta = rx - prior_rx if rx >= prior_rx else 0
+    tx_delta = tx - prior_tx if tx >= prior_tx else 0
+    state["network_sample"] = {"time": now, "rx": rx, "tx": tx, "interface": iface}
+    return {
+        "interface": iface,
+        "rx_mbps": round(rx_delta * 8 / elapsed / 1_000_000, 2) if elapsed > 0 else 0,
+        "tx_mbps": round(tx_delta * 8 / elapsed / 1_000_000, 2) if elapsed > 0 else 0,
+    }
+
+
 def service_states(manager_cfg):
-    names = [manager_cfg.get("service_name", ""), "xray", "sing-box", "shared-caddy", "caddy", "nginx", "filebrowser"]
+    primary = str(manager_cfg.get("service_name", "")).strip()
+    names = [primary, "xray", "sing-box", "shared-caddy", "caddy", "nginx", "filebrowser", "filebrowser-nginx"]
     result = {}
     for name in dict.fromkeys(str(item).strip() for item in names if item):
         if not re.fullmatch(r"[A-Za-z0-9_.@-]+", name):
@@ -206,6 +251,12 @@ def service_states(manager_cfg):
         if exists != 0:
             continue
         _, state, _ = run(["systemctl", "is-active", name], 3)
+        enabled, _, _ = run(["systemctl", "is-enabled", name], 3)
+        # The configured node service is always expected. Other known services
+        # are monitored only when enabled or currently active, avoiding alerts
+        # for intentionally disabled leftovers from an old installation.
+        if name != primary and enabled != 0 and state != "active":
+            continue
         result[name] = state or "unknown"
     return result
 
@@ -219,7 +270,7 @@ def manager_status():
     return "未安装 Universe VPS Manager；显示基础系统状态。"
 
 
-def collect_snapshot():
+def collect_snapshot(state):
     manager_cfg = load_json(MANAGER_CONFIG, {})
     disk = shutil.disk_usage("/")
     try:
@@ -238,7 +289,17 @@ def collect_snapshot():
         load1, load5, load15 = os.getloadavg()
     except OSError:
         load1 = load5 = load15 = 0.0
+    listening_tcp_ports = []
+    for line in ports.splitlines():
+        columns = line.split()
+        if len(columns) < 4:
+            continue
+        port = columns[3].rsplit(":", 1)[-1].strip("[]")
+        if port.isdigit():
+            listening_tcp_ports.append(int(port))
+    expected_ports = [int(value) for value in re.findall(r"\d+", str(manager_cfg.get("check_port", "")))]
     diagnostics = {
+        "cpu": {"used_pct": cpu_percent(), "cores": os.cpu_count() or 1},
         "load": {"1m": round(load1, 2), "5m": round(load5, 2), "15m": round(load15, 2)},
         "memory": mem_info(),
         "disk": {
@@ -247,7 +308,18 @@ def collect_snapshot():
             "used_pct": round(disk.used * 100 / disk.total, 1) if disk.total else 0,
         },
         "uptime_seconds": uptime,
+        "network": network_info(state),
         "services": service_states(manager_cfg),
+        "expected_ports": sorted(set(expected_ports)),
+        "listening_tcp_ports": sorted(set(listening_tcp_ports)),
+        "alert_policy": {
+            "ram_warn": manager_cfg.get("ram_warn", 80),
+            "swap_warn": manager_cfg.get("swap_warn", 30),
+            "cpu_warn": manager_cfg.get("cpu_warn", 80),
+            "disk_warn": manager_cfg.get("disk_warn", 90),
+            "bandwidth_mbps": manager_cfg.get("bandwidth_mbps", 1000),
+            "traffic_saturation_ratio": manager_cfg.get("traffic_saturation_ratio", 90),
+        },
         "failed_units": redact(failed),
         "listening_ports": redact("\n".join(ports.splitlines()[:60])),
         "top_cpu": redact("\n".join(top_cpu.splitlines()[:12])),
@@ -279,10 +351,19 @@ def execute(command):
     if action == "refresh":
         return True, "本机状态已刷新。"
     if action == "clean":
-        if not MANAGER_APP.exists():
-            return False, "未安装 Universe VPS Manager。"
-        code, out, err = run([sys.executable, str(MANAGER_APP), "clean"], 30)
-        return code == 0, redact(out or err or ("缓存清理完成。" if code == 0 else "缓存清理失败。"))
+        before = mem_info()
+        run(["sync"], 5)
+        try:
+            Path("/proc/sys/vm/drop_caches").write_text("3\n")
+        except Exception as exc:
+            return False, f"缓存清理失败：{redact(exc)}"
+        run(["journalctl", "--vacuum-time=3d"], 15)
+        after = mem_info()
+        return True, (
+            f"缓存清理完成。清理前可用 {before['available_mb']}MB，"
+            f"清理后可用 {after['available_mb']}MB，"
+            f"变化 {after['available_mb'] - before['available_mb']:+d}MB。"
+        )
     if action == "pause10":
         return update_pause(10)
     if action == "resume":
@@ -343,7 +424,7 @@ def main():
     while True:
         try:
             if time.time() - last_collect >= 30 or not state["snapshot"]:
-                state["snapshot"] = collect_snapshot()
+                state["snapshot"] = collect_snapshot(state)
                 last_collect = time.time()
             payload = {
                 "version": VERSION,
@@ -373,7 +454,7 @@ def main():
             state["results"] = state["results"][-20:]
             state["completed"] = state["completed"][-100:]
             if executed:
-                state["snapshot"] = collect_snapshot()
+                state["snapshot"] = collect_snapshot(state)
                 last_collect = time.time()
             save_json(STATE_PATH, state)
             failures = 0
@@ -420,17 +501,73 @@ EOF
   systemctl enable --now ejectors-telegram-vps-agent.service
 }
 
+apply_cloudflare_only_mode() {
+  if [ -f "$MANAGER_CRON" ]; then
+    [ -f "$MANAGER_CRON_BACKUP" ] || cp -a "$MANAGER_CRON" "$MANAGER_CRON_BACKUP"
+    python3 - "$MANAGER_CRON" <<'PY'
+import os, pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+lines = path.read_text(encoding="utf-8").splitlines()
+lines = [line for line in lines if not re.search(r"\bpython3\s+\S*vps_manager\.py\s+report\b", line)]
+tmp = path.with_suffix(".tmp")
+tmp.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+os.chmod(tmp, 0o644)
+os.replace(tmp, path)
+PY
+  fi
+  if [ -f /opt/universe-vps-manager/config.json ]; then
+    python3 - "$MANAGER_PAUSE_BACKUP" <<'PY'
+import json, os, pathlib, sys
+path = pathlib.Path("/opt/universe-vps-manager/config.json")
+backup = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text(encoding="utf-8"))
+if not backup.exists():
+    backup.write_text(str(int(data.get("pause_until", 0) or 0)), encoding="utf-8")
+    os.chmod(backup, 0o600)
+data["pause_until"] = 4102444800
+tmp = path.with_suffix(".cloudflare-tmp")
+tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
+  fi
+}
+
+restore_local_monitoring_mode() {
+  if [ -f "$MANAGER_CRON_BACKUP" ]; then
+    cp -a "$MANAGER_CRON_BACKUP" "$MANAGER_CRON"
+    rm -f "$MANAGER_CRON_BACKUP"
+  fi
+  if [ -f "$MANAGER_PAUSE_BACKUP" ] && [ -f /opt/universe-vps-manager/config.json ]; then
+    python3 - "$MANAGER_PAUSE_BACKUP" <<'PY'
+import json, os, pathlib, sys
+path = pathlib.Path("/opt/universe-vps-manager/config.json")
+backup = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text(encoding="utf-8"))
+data["pause_until"] = int(backup.read_text(encoding="utf-8").strip() or 0)
+tmp = path.with_suffix(".restore-tmp")
+tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
+    rm -f "$MANAGER_PAUSE_BACKUP"
+  fi
+}
+
 install_agent() {
   need_root
   install_deps
   write_config
   write_agent
   write_service
+  if [ -f "$MODE_FILE" ]; then
+    apply_cloudflare_only_mode
+  fi
   sleep 2
   systemctl --no-pager --full status ejectors-telegram-vps-agent.service || true
   echo
   echo "✅ Cloudflare VPS Agent 已安装。"
-  echo "现有 Telegram 轮询服务尚未停止，监控 cron 和原功能均未改动。"
+  echo "现有 Telegram 轮询服务尚未停止，原功能尚未切换。"
   echo "待新 Worker 与 Webhook 验收完成后，再运行：bash $0 activate"
 }
 
@@ -448,7 +585,7 @@ secret = hmac.new(token.encode(), b"ejectors-telegram-webhook-v1", hashlib.sha25
 health_url = str(agent["worker_url"]).rstrip("/") + "/health"
 health_request = urllib.request.Request(
     health_url,
-    headers={"User-Agent": "ejectors-telegram-vps-agent/1.0.2"},
+    headers={"User-Agent": "ejectors-telegram-vps-agent/1.1.0"},
 )
 with urllib.request.urlopen(health_request, timeout=15) as response:
     health = json.loads(response.read().decode())
@@ -478,8 +615,9 @@ PY
   mkdir -p "$(dirname "$MODE_FILE")"
   printf '%s\n' "$(date -Is)" > "$MODE_FILE"
   chmod 600 "$MODE_FILE"
+  apply_cloudflare_only_mode
   echo "✅ 已切换为 Cloudflare Webhook 模式。"
-  echo "只停止了旧 Telegram getUpdates 服务；/etc/cron.d/universe-vps-manager 监控、告警和原节点服务保持不变。"
+  echo "本地 Telegram 整点播报、异常告警和 AI 简报已停用；状态采集、流量累计与节点功能保留。"
 }
 
 deactivate_webhook_mode() {
@@ -500,6 +638,7 @@ PY
     echo "Telegram Webhook 删除失败，为避免与 getUpdates 冲突，没有恢复本地轮询。"
     exit 1
   fi
+  restore_local_monitoring_mode
   rm -f "$MODE_FILE"
   if [ -f "$BRIEF_BACKUP" ]; then
     cp -a "$BRIEF_BACKUP" "$BRIEF_MODE"
@@ -507,6 +646,19 @@ PY
   fi
   systemctl enable --now "$OLD_BOT_SERVICE"
   echo "✅ 已恢复 VPS 本地 Telegram 轮询模式。"
+}
+
+upgrade_agent() {
+  need_root
+  [ -f "$CONF" ] || { echo "尚未安装 Agent，请先运行：bash $0 install"; exit 1; }
+  install_deps
+  write_agent
+  write_service
+  if [ -f "$MODE_FILE" ]; then
+    apply_cloudflare_only_mode
+  fi
+  echo "✅ Cloudflare VPS Agent 已升级到 $VERSION。"
+  show_status
 }
 
 show_status() {
@@ -530,9 +682,10 @@ uninstall_agent() {
 
 case "${1:-install}" in
   install|update) install_agent ;;
+  upgrade) upgrade_agent ;;
   activate) activate_webhook_mode ;;
   deactivate) deactivate_webhook_mode ;;
   status) show_status ;;
   uninstall) uninstall_agent ;;
-  *) echo "用法：$0 [install|update|activate|deactivate|status|uninstall]"; exit 1 ;;
+  *) echo "用法：$0 [install|update|upgrade|activate|deactivate|status|uninstall]"; exit 1 ;;
 esac

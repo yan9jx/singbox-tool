@@ -1,7 +1,7 @@
 import { exports as workerExports } from "cloudflare:workers";
 import { createExecutionContext, createScheduledController, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import worker, { type Env } from "../src/index";
+import worker, { PANEL_KEYBOARD, nodeIssues, type Env } from "../src/index";
 
 const AGENT_SECRET = "local-agent-secret-at-least-32-characters";
 
@@ -18,6 +18,26 @@ async function signature(secret: string, timestamp: string, body: string): Promi
 }
 
 describe("standalone Telegram VPS Worker", () => {
+  it("keeps the three control rows paired and detects structured VPS issues without AI", () => {
+    expect(PANEL_KEYBOARD).toEqual({
+      inline_keyboard: [
+        [{ text: "📊 状态刷新", callback_data: "status" }, { text: "🔍 状态更新", callback_data: "refresh_local" }],
+        [{ text: "🔄 重启节点", callback_data: "restart_node" }, { text: "🌐 重启反代", callback_data: "restart_proxy" }],
+        [{ text: "🖥 切换 VPS", callback_data: "nodes" }, { text: "♻️ 重启 VPS", callback_data: "reboot_ask" }],
+      ],
+    });
+    expect(nodeIssues({
+      diagnostics: {
+        cpu: { used_pct: 91 },
+        memory: { used_pct: 85, swap_used_pct: 2 },
+        disk: { used_pct: 40 },
+        services: { xray: "failed", caddy: "active" },
+        expected_ports: [443, 8443],
+        listening_tcp_ports: [443],
+      },
+    })).toEqual({ resource: "RAM 85%；CPU 91%", service: "xray: failed；端口未监听: 8443" });
+  });
+
   it("reports configuration readiness without exposing values", async () => {
     const response = await workerExports.default.fetch(new Request("https://worker.test/health"));
     expect(response.status).toBe(200);

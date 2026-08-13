@@ -15,6 +15,7 @@ interface ManagerState {
   aiMode: boolean;
   dailyBrief: boolean;
   selectedNode: string;
+  alertsPausedUntil: number;
 }
 
 interface CommandResult {
@@ -71,6 +72,13 @@ interface PendingRow {
   expires_at: number;
 }
 
+interface AlertStateRow {
+  active: number;
+  consecutive: number;
+  last_sent: number;
+  last_detail: string;
+}
+
 interface DeepSeekMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
@@ -91,6 +99,7 @@ interface DeepSeekResponse {
 const MAX_BODY_BYTES = 128 * 1024;
 const COMMAND_TTL_MS = 2 * 60 * 1000;
 const NODE_STALE_MS = 2 * 60 * 1000;
+const ALERT_REPEAT_MS = 30 * 60 * 1000;
 const TELEGRAM_TEXT_LIMIT = 4000;
 const VALID_ACTIONS = new Set([
   "refresh",
@@ -118,6 +127,63 @@ function asString(value: unknown, max = 256): string {
 function asInteger(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) ? value : 0;
 }
+
+function asNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+export function nodeIssues(snapshot: JsonObject): { resource: string; service: string } {
+  const diagnostics = isObject(snapshot.diagnostics) ? snapshot.diagnostics : {};
+  const policy = isObject(diagnostics.alert_policy) ? diagnostics.alert_policy : {};
+  const memory = isObject(diagnostics.memory) ? diagnostics.memory : {};
+  const disk = isObject(diagnostics.disk) ? diagnostics.disk : {};
+  const cpu = isObject(diagnostics.cpu) ? diagnostics.cpu : {};
+  const network = isObject(diagnostics.network) ? diagnostics.network : {};
+  const resource: string[] = [];
+
+  const memoryPct = asNumber(memory.used_pct);
+  const swapPct = asNumber(memory.swap_used_pct);
+  const cpuPct = asNumber(cpu.used_pct);
+  const diskPct = asNumber(disk.used_pct);
+  if (memoryPct >= (asNumber(policy.ram_warn) || 80)) resource.push(`RAM ${memoryPct}%`);
+  if (swapPct >= (asNumber(policy.swap_warn) || 30)) resource.push(`SWAP ${swapPct}%`);
+  if (cpuPct >= (asNumber(policy.cpu_warn) || 80)) resource.push(`CPU ${cpuPct}%`);
+  if (diskPct >= (asNumber(policy.disk_warn) || 90)) resource.push(`磁盘 ${diskPct}%`);
+
+  const bandwidth = asNumber(policy.bandwidth_mbps);
+  const saturationRatio = asNumber(policy.traffic_saturation_ratio) || 90;
+  const rxMbps = asNumber(network.rx_mbps);
+  const txMbps = asNumber(network.tx_mbps);
+  if (bandwidth > 0 && Math.max(rxMbps, txMbps) >= bandwidth * saturationRatio / 100) {
+    resource.push(`带宽接近跑满（入 ${rxMbps.toFixed(1)} / 出 ${txMbps.toFixed(1)} Mbps）`);
+  }
+
+  const service: string[] = [];
+  if (isObject(diagnostics.services)) {
+    for (const [name, state] of Object.entries(diagnostics.services)) {
+      if (typeof state === "string" && state !== "active") service.push(`${name}: ${state}`);
+    }
+  }
+  const expectedPorts = Array.isArray(diagnostics.expected_ports)
+    ? diagnostics.expected_ports.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0)
+    : [];
+  const listeningPorts = new Set(
+    Array.isArray(diagnostics.listening_tcp_ports)
+      ? diagnostics.listening_tcp_ports.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0)
+      : [],
+  );
+  const missingPorts = expectedPorts.filter((port) => !listeningPorts.has(port));
+  if (missingPorts.length > 0) service.push(`端口未监听: ${missingPorts.join(", ")}`);
+  return { resource: resource.join("；"), service: service.join("；") };
+}
+
+export const PANEL_KEYBOARD: JsonObject = {
+  inline_keyboard: [
+    [{ text: "📊 状态刷新", callback_data: "status" }, { text: "🔍 状态更新", callback_data: "refresh_local" }],
+    [{ text: "🔄 重启节点", callback_data: "restart_node" }, { text: "🌐 重启反代", callback_data: "restart_proxy" }],
+    [{ text: "🖥 切换 VPS", callback_data: "nodes" }, { text: "♻️ 重启 VPS", callback_data: "reboot_ask" }],
+  ],
+};
 
 function redact(text: string): string {
   return text
@@ -205,7 +271,7 @@ async function telegramApi(env: Env, method: string, payload: JsonObject): Promi
 }
 
 export class TelegramVpsAgent extends Agent<Env, ManagerState> {
-  override initialState: ManagerState = { aiMode: false, dailyBrief: true, selectedNode: "" };
+  override initialState: ManagerState = { aiMode: false, dailyBrief: true, selectedNode: "", alertsPausedUntil: 0 };
 
   override async onStart(): Promise<void> {
     await this.sql`
@@ -262,6 +328,17 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
         created_at INTEGER NOT NULL
       )
     `;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS alert_states (
+        node_id TEXT NOT NULL,
+        alert_key TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 0,
+        consecutive INTEGER NOT NULL DEFAULT 0,
+        last_sent INTEGER NOT NULL DEFAULT 0,
+        last_detail TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (node_id, alert_key)
+      )
+    `;
   }
 
   async syncNode(payload: NodeSyncPayload): Promise<{ commands: AgentCommand[]; server_time: number }> {
@@ -279,6 +356,16 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     `;
 
     if (!this.state.selectedNode) this.setState({ ...this.state, selectedNode: payload.node_id });
+
+    const node: NodeRow = {
+      node_id: payload.node_id,
+      name: payload.name,
+      version: payload.version,
+      reported_at: payload.reported_at,
+      last_seen: now,
+      snapshot_json: snapshotJson,
+    };
+    await this.evaluateNodeAlerts(node);
 
     for (const result of payload.command_results) {
       const rows = await this.sql<CommandRow>`
@@ -385,6 +472,77 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     log("info", "weekly_cleanup_queued", { scheduledTime, nodes: nodes.length });
   }
 
+  async runMonitorTick(scheduledTime: number): Promise<void> {
+    const runKey = `monitor:${scheduledTime}`;
+    const prior = await this.sql<{ run_key: string }>`SELECT run_key FROM scheduled_runs WHERE run_key = ${runKey}`;
+    if (prior.length > 0) return;
+    await this.sql`INSERT INTO scheduled_runs (run_key, created_at) VALUES (${runKey}, ${Date.now()})`;
+    await this.sql`DELETE FROM scheduled_runs WHERE created_at < ${Date.now() - 14 * 86_400_000}`;
+
+    const nodes = await this.sql<NodeRow>`SELECT * FROM nodes ORDER BY name ASC`;
+    const now = Date.now();
+    for (const node of nodes) {
+      const offline = now - node.last_seen > NODE_STALE_MS;
+      await this.updateAlert(node, "offline", offline ? `超过 ${Math.ceil(NODE_STALE_MS / 60_000)} 分钟没有上报` : "", 1);
+    }
+    if (new Date(scheduledTime).getUTCMinutes() !== 0) return;
+    for (const node of nodes.filter((item) => now - item.last_seen <= NODE_STALE_MS)) {
+      await this.sendMessage(`⏱ Cloudflare 每小时状态\n\n${this.formatNodeStatus(node)}`, this.panelKeyboard());
+    }
+  }
+
+  private alertsPaused(): boolean {
+    return Number(this.state.alertsPausedUntil ?? 0) > Date.now();
+  }
+
+  private async evaluateNodeAlerts(node: NodeRow): Promise<void> {
+    await this.updateAlert(node, "offline", "", 1);
+    const snapshot = safeJsonParse(node.snapshot_json);
+    if (!isObject(snapshot)) return;
+    const issues = nodeIssues(snapshot);
+    await this.updateAlert(node, "resource", issues.resource, 2);
+    await this.updateAlert(node, "service", issues.service, 2);
+  }
+
+  private async updateAlert(node: NodeRow, key: string, detail: string, requiredConsecutive: number): Promise<void> {
+    if (this.alertsPaused()) return;
+    const rows = await this.sql<AlertStateRow>`
+      SELECT active, consecutive, last_sent, last_detail FROM alert_states
+      WHERE node_id = ${node.node_id} AND alert_key = ${key}
+    `;
+    const previous = rows[0];
+    const now = Date.now();
+    if (!detail) {
+      if (previous?.active) {
+        const labels: Record<string, string> = { offline: "节点已恢复上报", resource: "资源已恢复正常", service: "服务与端口已恢复正常" };
+        await this.sendMessage(`✅ ${labels[key] ?? "异常已恢复"}\n[${node.name}]`);
+      }
+      await this.sql`
+        INSERT INTO alert_states (node_id, alert_key, active, consecutive, last_sent, last_detail)
+        VALUES (${node.node_id}, ${key}, 0, 0, ${previous?.last_sent ?? 0}, '')
+        ON CONFLICT(node_id, alert_key) DO UPDATE SET active = 0, consecutive = 0, last_detail = ''
+      `;
+      return;
+    }
+
+    const consecutive = previous?.active ? previous.consecutive : (previous?.consecutive ?? 0) + 1;
+    const activate = Boolean(previous?.active) || consecutive >= requiredConsecutive;
+    const shouldSend = activate && (!previous?.active || now - previous.last_sent >= ALERT_REPEAT_MS);
+    if (shouldSend) {
+      const labels: Record<string, string> = { offline: "节点离线", resource: "资源异常", service: "服务或端口异常" };
+      await this.sendMessage(`🚨 ${labels[key] ?? "VPS 异常"}\n[${node.name}]\n\n${detail}`);
+    }
+    await this.sql`
+      INSERT INTO alert_states (node_id, alert_key, active, consecutive, last_sent, last_detail)
+      VALUES (${node.node_id}, ${key}, ${activate ? 1 : 0}, ${consecutive}, ${shouldSend ? now : previous?.last_sent ?? 0}, ${detail})
+      ON CONFLICT(node_id, alert_key) DO UPDATE SET
+        active = excluded.active,
+        consecutive = excluded.consecutive,
+        last_sent = excluded.last_sent,
+        last_detail = excluded.last_detail
+    `;
+  }
+
   private async handleText(text: string): Promise<void> {
     const normalized = text.replace(/\s+/g, " ").trim();
     const lower = normalized.toLowerCase();
@@ -397,9 +555,11 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     } else if (lower.startsWith("/use ")) {
       await this.selectNode(normalized.slice(5).trim());
     } else if (["/pause10", "暂停"].includes(lower)) {
-      await this.queueImmediate("pause10", "auto", "暂停告警 10 分钟");
+      this.setState({ ...this.state, alertsPausedUntil: Date.now() + 10 * 60_000 });
+      await this.sendMessage("🟡 Cloudflare 异常告警已暂停 10 分钟。", this.panelKeyboard());
     } else if (["/resume", "恢复"].includes(lower)) {
-      await this.queueImmediate("resume", "auto", "恢复告警");
+      this.setState({ ...this.state, alertsPausedUntil: 0 });
+      await this.sendMessage("🟢 Cloudflare 异常告警已恢复。", this.panelKeyboard());
     } else if (["/ping", "ping"].includes(lower)) {
       await this.sendMessage("pong");
     } else if (["/balance", "/ai balance", "/ai 余额", "查询余额", "查余额", "余额", "ai余额", "deepseek余额"].includes(lower)) {
@@ -481,6 +641,10 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
   private async statusText(): Promise<string> {
     const node = await this.selectedNode();
     if (!node) return "尚未收到 VPS 代理上报。请先在 VPS 安装 Cloudflare Telegram Agent。";
+    return this.formatNodeStatus(node);
+  }
+
+  private formatNodeStatus(node: NodeRow): string {
     const snapshot = safeJsonParse(node.snapshot_json);
     const status = isObject(snapshot) ? asString(snapshot.status_text, 20_000) : "";
     const stale = Date.now() - node.last_seen > NODE_STALE_MS;
@@ -751,14 +915,7 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
   }
 
   private panelKeyboard(): JsonObject {
-    return {
-      inline_keyboard: [
-        [{ text: "📊 状态刷新", callback_data: "status" }, { text: "🔍 状态更新", callback_data: "refresh_local" }],
-        [{ text: "🔄 重启节点", callback_data: "restart_node" }, { text: "🌐 重启反代", callback_data: "restart_proxy" }],
-        [{ text: "🖥 切换 VPS", callback_data: "nodes" }],
-        [{ text: "♻️ 重启 VPS", callback_data: "reboot_ask" }],
-      ],
-    };
+    return PANEL_KEYBOARD;
   }
 
   private async nodesKeyboard(): Promise<JsonObject> {
@@ -868,6 +1025,14 @@ export default {
       ctx.waitUntil(
         agent.runWeeklyCleanup(controller.scheduledTime).catch((error: unknown) =>
           log("error", "weekly_cleanup_failed", { error: String(error) }),
+        ),
+      );
+      return;
+    }
+    if (controller.cron === "*/5 * * * *") {
+      ctx.waitUntil(
+        agent.runMonitorTick(controller.scheduledTime).catch((error: unknown) =>
+          log("error", "monitor_tick_failed", { error: String(error) }),
         ),
       );
       return;
