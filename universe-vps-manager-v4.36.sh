@@ -6,7 +6,7 @@ CONFIG_FILE="$APP_DIR/config.json"
 PY_FILE="$APP_DIR/vps_manager.py"
 CRON_FILE="/etc/cron.d/universe-vps-manager"
 BOT_SERVICE="/etc/systemd/system/universe-vps-manager-bot.service"
-APP_VERSION="2026.08.13-2"
+APP_VERSION="2026.08.13-3"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -236,6 +236,7 @@ def load_config():
 
 
 CFG = load_config()
+DEEPSEEK_HISTORY = []
 
 
 def state_path(name):
@@ -348,6 +349,7 @@ def deepseek_chat(text):
                     "必须调用 show_vps_status；不要猜测或编造服务器状态。"
                 ),
             },
+            *DEEPSEEK_HISTORY,
             {"role": "user", "content": text},
         ],
         "tools": [
@@ -388,6 +390,12 @@ def deepseek_chat(text):
 
         answer = str(message.get("content") or "").strip()
         if answer:
+            if ai_mode_enabled():
+                DEEPSEEK_HISTORY.extend([
+                    {"role": "user", "content": text},
+                    {"role": "assistant", "content": answer},
+                ])
+                del DEEPSEEK_HISTORY[:-12]
             send_message(answer[:4000])
             return True
     except urllib.error.HTTPError as e:
@@ -401,6 +409,15 @@ def deepseek_chat(text):
         log_event(f"deepseek error: {e}")
 
     return False
+
+
+def ai_mode_enabled():
+    return read_text(state_path("deepseek_mode"), "off") == "on"
+
+
+def set_ai_mode(enabled):
+    DEEPSEEK_HISTORY.clear()
+    write_text(state_path("deepseek_mode"), "on" if enabled else "off")
 
 
 def deepseek_self_test():
@@ -1656,6 +1673,8 @@ def handle_callback(cb):
 
 
 def handle_text(text):
+    ai_command = " ".join(text.split()).lower()
+
     if text in ("/start", "/menu", "菜单"):
         send_panel()
     elif text in ("/status", "状态", "状态刷新", "我的vps状态", "我的 VPS 状态", "VPS状态", "vps状态"):
@@ -1670,8 +1689,28 @@ def handle_text(text):
         send_message(f"🟢 已恢复告警\n[{CFG['server_name']}]", keyboard())
     elif text in ("/ping", "ping"):
         send_message("pong")
-    elif text == "/ai":
-        send_message("请发送：/ai 你的问题")
+    elif ai_command == "/ai on":
+        if not str(CFG.get("deepseek_api_key", "")).strip():
+            send_message("DeepSeek API Key 未配置，无法开启 AI 模式。")
+        else:
+            set_ai_mode(True)
+            send_message(
+                "🤖 AI 连续对话模式已开启。\n"
+                "后续普通文字会发送给 DeepSeek。\n"
+                "请勿发送密码、API Key 或 SSH 私钥。\n"
+                "发送 /ai off 可退出。"
+            )
+    elif ai_command == "/ai off":
+        set_ai_mode(False)
+        send_message("✅ AI 连续对话模式已关闭。")
+    elif ai_command == "/ai":
+        state = "开启" if ai_mode_enabled() else "关闭"
+        send_message(
+            f"当前 AI 连续对话模式：{state}\n"
+            "开启：/ai on\n"
+            "关闭：/ai off\n"
+            "单次提问：/ai 你的问题"
+        )
     elif text.startswith("/ai "):
         prompt = text[4:].strip()
         if prompt and not deepseek_chat(prompt):
@@ -1680,7 +1719,11 @@ def handle_text(text):
         send_message("⚠️ VPS 即将重启。")
         subprocess.Popen("sleep 2; reboot", shell=True)
     else:
-        send_message("发送 /start 打开控制面板。", keyboard())
+        if ai_mode_enabled():
+            if not deepseek_chat(text):
+                send_message("AI 暂时不可用，请稍后再试。")
+        else:
+            send_message("发送 /start 打开控制面板。", keyboard())
 
 
 def bot_poll():
@@ -1904,7 +1947,7 @@ restore_ai_setup() {
 }
 
 setup_ai() {
-  local timestamp config_backup manager_backup
+  local timestamp config_backup manager_backup existing_key
 
   need_root
 
@@ -1928,9 +1971,15 @@ setup_ai() {
   echo "版本：$APP_VERSION"
   echo "此操作不会修改 Bot Token、Chat ID、监控、流量或 cron。"
   echo "======================================"
-  read -r -s -p "请输入 DeepSeek API Key: " DEEPSEEK_API_KEY
+  existing_key="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1], encoding="utf-8")).get("deepseek_api_key", "")).strip())' "$CONFIG_FILE")"
+  if [ -n "$existing_key" ]; then
+    read -r -s -p "DeepSeek API Key [回车保留现有 Key]: " DEEPSEEK_API_KEY
+  else
+    read -r -s -p "请输入 DeepSeek API Key: " DEEPSEEK_API_KEY
+  fi
   echo
   DEEPSEEK_API_KEY="$(clean_input "$DEEPSEEK_API_KEY")"
+  DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-$existing_key}"
   if [ -z "$DEEPSEEK_API_KEY" ]; then
     echo "API Key 不能为空，未做任何修改。"
     return 1
@@ -2006,7 +2055,8 @@ PYAI
 
   echo
   echo "✅ DeepSeek AI 配置完成"
-  echo "Telegram 对话：/ai 你的问题"
+  echo "连续对话：/ai on（退出：/ai off）"
+  echo "单次提问：/ai 你的问题"
   echo "VPS 状态：我的 VPS 状态"
 }
 
