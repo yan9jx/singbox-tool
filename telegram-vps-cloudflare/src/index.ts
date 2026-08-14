@@ -151,6 +151,20 @@ function asInteger(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) ? value : 0;
 }
 
+export function formatBeijingTime(timestamp: number): string {
+  return `${new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().slice(0, 16).replace("T", " ")} 北京时间`;
+}
+
+export function normalizeBriefTimes(text: string): string {
+  return text.replace(
+    /\b(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?\s*(?:UTC|Z)\b/g,
+    (original, year: string, month: string, day: string, hour: string, minute: string, second = "00") => {
+      const timestamp = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+      return Number.isFinite(timestamp) ? formatBeijingTime(timestamp) : original;
+    },
+  );
+}
+
 function isDeepSeekModelId(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$/.test(value);
 }
@@ -535,11 +549,12 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     if (!this.state.dailyBrief) return;
     const context = await this.diagnosticsContext();
     if (!context) return;
+    const generatedAt = formatBeijingTime(Date.now());
     const answer = await this.deepSeekSimple([
-      { role: "system", content: "你是中文 VPS 运维助手。根据真实状态生成简洁的每日简报：总体结论、异常、风险、建议。禁止编造。" },
-      { role: "user", content: context },
+      { role: "system", content: "你是中文 VPS 运维助手。根据真实状态生成简洁的每日简报：总体结论、异常、风险、建议。禁止编造。所有时间必须使用用户提供的北京时间，禁止输出 UTC、Z 或其他时区。" },
+      { role: "user", content: `简报生成时间：${generatedAt}\n${context}` },
     ]);
-    if (answer) await this.sendMessage(`🧭 每日 AI 运维简报\n\n${answer}`, this.panelKeyboard());
+    if (answer) await this.sendMessage(`🧭 每日 AI 运维简报\n\n${normalizeBriefTimes(answer)}`, this.panelKeyboard());
   }
 
   async runWeeklyCleanup(scheduledTime: number): Promise<void> {
@@ -782,7 +797,7 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
   private async diagnosticsContext(): Promise<string> {
     const node = await this.selectedNode();
     if (!node) return "";
-    return redact(`节点：${node.name} (${node.node_id})\n最后上报：${new Date(node.last_seen).toISOString()}\n状态：${node.snapshot_json}`);
+    return redact(`节点：${node.name} (${node.node_id})\n最后上报：${formatBeijingTime(node.last_seen)}\n状态：${node.snapshot_json}`);
   }
 
   private async queueImmediate(action: string, target: string, label: string): Promise<void> {

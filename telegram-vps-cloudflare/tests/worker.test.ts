@@ -1,7 +1,7 @@
 import { exports as workerExports } from "cloudflare:workers";
 import { createExecutionContext, createScheduledController, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import worker, { alertPolicyText, deepSeekModelIds, PANEL_KEYBOARD, nodeIssues, type Env } from "../src/index";
+import worker, { alertPolicyText, deepSeekModelIds, formatBeijingTime, normalizeBriefTimes, PANEL_KEYBOARD, nodeIssues, type Env } from "../src/index";
 
 const AGENT_SECRET = "local-agent-secret-at-least-32-characters";
 
@@ -48,6 +48,9 @@ describe("standalone Telegram VPS Worker", () => {
       { id: "deepseek-v4-pro" },
       { id: "reasoner-next" },
     ] })).toEqual(["deepseek-v4-flash", "deepseek-v4-pro", "reasoner-next"]);
+    expect(formatBeijingTime(Date.UTC(2026, 7, 14, 1, 0))).toBe("2026-08-14 09:00 北京时间");
+    expect(normalizeBriefTimes("时间：2026-08-14 01:00 UTC\n报告生成于 2026-08-14T01:00 UTC"))
+      .toBe("时间：2026-08-14 09:00 北京时间\n报告生成于 2026-08-14 09:00 北京时间");
   });
 
   it("reports configuration readiness without exposing values", async () => {
