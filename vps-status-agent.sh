@@ -91,9 +91,9 @@ install -d -m 700 /var/lib/ejectors-vps-agent
 
 cat > "$APP" <<'PY'
 #!/usr/bin/env python3
-import argparse, json, os, platform, re, shutil, socket, subprocess, time, urllib.request
+import argparse, concurrent.futures, json, os, platform, re, shutil, socket, subprocess, time, urllib.request
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 
@@ -176,6 +176,50 @@ def command(args):
     try: return subprocess.run(args, text=True, capture_output=True, timeout=4).stdout.strip()
     except Exception: return ""
 
+def ping_target(target):
+    if not shutil.which("ping"):
+        return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable"}
+    env = dict(os.environ, LC_ALL="C", LANG="C")
+    try:
+        result = subprocess.run(
+            ["ping", "-n", "-q", "-c", "4", "-W", "1", target],
+            text=True, capture_output=True, timeout=7, env=env,
+        )
+        output = result.stdout + "\n" + result.stderr
+        loss_match = re.search(r"([\d.]+)%\s+packet loss", output)
+        latency_match = re.search(r"=\s*[\d.]+/([\d.]+)/", output)
+        loss = round(float(loss_match.group(1)), 1) if loss_match else 100.0
+        latency = round(float(latency_match.group(1)), 1) if latency_match else None
+        return {
+            "target": target,
+            "latency_ms": latency,
+            "loss_pct": loss,
+            "status": "ok" if loss < 100 else "loss",
+        }
+    except Exception:
+        return {"target": target, "latency_ms": None, "loss_pct": 100.0, "status": "loss"}
+
+def probe_carrier(probe):
+    targets = [str(value) for value in probe.get("targets", [])[:2] if value]
+    result = {"target": "", "latency_ms": None, "loss_pct": None, "status": "unavailable"}
+    for target in targets:
+        result = ping_target(target)
+        if result["status"] == "ok": break
+    result["carrier"] = str(probe.get("carrier", ""))
+    return result
+
+def network_quality(config):
+    if not config or not config.get("enabled") or not config.get("probes"):
+        return None
+    probes = list(config.get("probes", []))[:3]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as executor:
+        results = list(executor.map(probe_carrier, probes))
+    return {
+        "region": str(config.get("region", "")),
+        "measured_at": int(time.time()),
+        "probes": results,
+    }
+
 def service_info(label, unit_names, process_names):
     units = command(["systemctl", "list-unit-files", "--type=service", "--no-legend"])
     processes = command(["ps", "-eo", "comm="]).splitlines()
@@ -225,7 +269,7 @@ def os_name():
     except Exception:
         return platform.system()
 
-def collect(conf):
+def collect(conf, probe_config=None):
     memory, swap = meminfo()
     disk = shutil.disk_usage("/")
     services = [
@@ -240,7 +284,7 @@ def collect(conf):
     try:
         with open("/proc/sys/kernel/random/boot_id") as f: boot_id = f.read().strip()
     except Exception: pass
-    return {
+    payload = {
         "node_id": conf["NODE_ID"], "name": conf["NODE_NAME"],
         "provider": conf.get("PROVIDER", ""), "location": conf.get("LOCATION", ""),
         "hostname": socket.gethostname(), "os": os_name(), "kernel": platform.release(), "arch": platform.machine(),
@@ -252,6 +296,9 @@ def collect(conf):
         "reachability": {"outbound": "normal", "inbound_probe": "unknown"},
         "agent_version": VERSION,
     }
+    quality = network_quality(probe_config)
+    if quality: payload["network_quality"] = quality
+    return payload
 
 def post(conf, endpoint, payload):
     body = json.dumps(payload, separators=(",", ":")).encode()
@@ -259,7 +306,8 @@ def post(conf, endpoint, payload):
         "Content-Type": "application/json", "Authorization": "Bearer " + conf["INGEST_TOKEN"], "User-Agent": "ejectors-vps-agent/" + VERSION,
     })
     with urllib.request.urlopen(req, timeout=15) as response:
-        return response.read().decode()
+        try: return json.loads(response.read().decode())
+        except Exception: return {}
 
 def main():
     parser = argparse.ArgumentParser()
@@ -276,9 +324,12 @@ def main():
         try: post(conf, "/api/v1/shutdown", payload)
         except Exception: pass
         return
+    probe_config = None
     while True:
         try:
-            post(conf, "/api/v1/heartbeat", collect(conf))
+            response = post(conf, "/api/v1/heartbeat", collect(conf, probe_config))
+            if isinstance(response, dict) and isinstance(response.get("probe_config"), dict):
+                probe_config = response["probe_config"]
         except Exception as exc:
             print(time.strftime("%F %T"), "report failed:", exc, flush=True)
         if not args.loop: return
