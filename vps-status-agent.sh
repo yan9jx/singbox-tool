@@ -91,9 +91,9 @@ install -d -m 700 /var/lib/ejectors-vps-agent
 
 cat > "$APP" <<'PY'
 #!/usr/bin/env python3
-import argparse, concurrent.futures, glob, json, os, platform, re, shutil, socket, subprocess, time, urllib.request
+import argparse, concurrent.futures, glob, json, os, platform, re, shutil, socket, statistics, subprocess, time, urllib.request
 
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
@@ -259,7 +259,9 @@ def ping_target(target):
         output = result.stdout + "\n" + result.stderr
         loss_match = re.search(r"([\d.]+)%\s+packet loss", output)
         latency_match = re.search(r"=\s*[\d.]+/([\d.]+)/", output)
-        loss = round(float(loss_match.group(1)), 1) if loss_match else 100.0
+        if not loss_match:
+            return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable"}
+        loss = round(float(loss_match.group(1)), 1)
         latency = round(float(latency_match.group(1)), 1) if latency_match else None
         return {
             "target": target,
@@ -268,16 +270,35 @@ def ping_target(target):
             "status": "ok" if loss < 100 else "loss",
         }
     except Exception:
-        return {"target": target, "latency_ms": None, "loss_pct": 100.0, "status": "loss"}
+        return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable"}
 
 def probe_carrier(probe):
-    targets = [str(value) for value in probe.get("targets", [])[:2] if value]
-    result = {"target": "", "latency_ms": None, "loss_pct": None, "status": "unavailable"}
-    for target in targets:
-        result = ping_target(target)
-        if result["status"] == "ok": break
-    result["carrier"] = str(probe.get("carrier", ""))
-    return result
+    targets = list(dict.fromkeys(str(value) for value in probe.get("targets", [])[:5] if value))
+    base = {
+        "carrier": str(probe.get("carrier", "")),
+        "target": "",
+        "latency_ms": None,
+        "loss_pct": None,
+        "status": "unavailable",
+        "targets_tested": len(targets),
+        "responsive_targets": 0,
+    }
+    if not targets: return base
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
+        results = list(executor.map(ping_target, targets))
+    responsive = [item for item in results if item["status"] == "ok" and item["latency_ms"] is not None]
+    if not responsive: return base
+    latency = round(float(statistics.median(item["latency_ms"] for item in responsive)), 1)
+    loss = round(float(statistics.median(item["loss_pct"] for item in responsive)), 1)
+    representative = min(responsive, key=lambda item: abs(item["latency_ms"] - latency))
+    return {
+        **base,
+        "target": representative["target"],
+        "latency_ms": latency,
+        "loss_pct": loss,
+        "status": "ok",
+        "responsive_targets": len(responsive),
+    }
 
 def network_quality(config):
     if not config or not config.get("enabled") or not config.get("probes"):
