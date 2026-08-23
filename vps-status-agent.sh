@@ -91,9 +91,9 @@ install -d -m 700 /var/lib/ejectors-vps-agent
 
 cat > "$APP" <<'PY'
 #!/usr/bin/env python3
-import argparse, concurrent.futures, json, os, platform, re, shutil, socket, subprocess, time, urllib.request
+import argparse, concurrent.futures, glob, json, os, platform, re, shutil, socket, subprocess, time, urllib.request
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 
@@ -220,14 +220,35 @@ def network_quality(config):
         "probes": results,
     }
 
-def service_info(label, unit_names, process_names):
+def service_snapshot():
     units = command(["systemctl", "list-unit-files", "--type=service", "--no-legend"])
-    processes = command(["ps", "-eo", "comm="]).splitlines()
+    processes = {item.strip() for item in command(["ps", "-eo", "comm="]).splitlines() if item.strip()}
+    return units, processes
+
+def service_info(label, unit_names, units):
     installed = any(re.search(rf"^{re.escape(unit)}\.service\s", units, re.M) for unit in unit_names)
-    installed = installed or any(shutil.which(name) for name in process_names) or any(p.strip() in process_names for p in processes)
-    running = any(command(["systemctl", "is-active", unit]) == "active" for unit in unit_names)
-    running = running or any(p.strip() in process_names for p in processes)
+    running = installed and any(command(["systemctl", "is-active", unit]) == "active" for unit in unit_names)
     return {"name": label, "installed": bool(installed), "running": bool(running)}
+
+def naive_service_info(units, processes):
+    marker_paths = [
+        "/etc/naiveproxy/node-info.env",
+        "/etc/systemd/system/naiveproxy.service",
+        "/etc/systemd/system/caddy-naive.service",
+    ]
+    marker_patterns = [
+        "/etc/caddy-naive/sites/naive-*.caddy",
+        "/etc/caddy-naive/routes/*/naive.caddy",
+        "/etc/caddy-naive/routes/*/naive-connect.caddy",
+    ]
+    installed = any(os.path.isfile(path) for path in marker_paths)
+    installed = installed or any(glob.glob(pattern) for pattern in marker_patterns)
+    unit_names = ["naiveproxy", "caddy-naive", "shared-caddy", "caddy"]
+    running = installed and (
+        any(command(["systemctl", "is-active", unit]) == "active" for unit in unit_names)
+        or any(name in processes for name in ["naive", "naiveproxy", "caddy-naive", "caddy"])
+    )
+    return {"name": "Naive", "installed": bool(installed), "running": bool(running)}
 
 def listening_ports():
     output = command(["ss", "-H", "-lntup"])
@@ -272,10 +293,12 @@ def os_name():
 def collect(conf, probe_config=None):
     memory, swap = meminfo()
     disk = shutil.disk_usage("/")
+    units, processes = service_snapshot()
     services = [
-        service_info("xray", ["xray"], ["xray"]),
-        service_info("sing-box", ["sing-box", "singbox"], ["sing-box", "singbox"]),
-        service_info("文件浏览器", ["filebrowser"], ["filebrowser"]),
+        service_info("xray", ["xray", "xray-xhttp", "reality-xhttp"], units),
+        service_info("sing-box", ["sing-box", "singbox"], units),
+        naive_service_info(units, processes),
+        service_info("文件浏览器", ["filebrowser"], units),
     ]
     installed = [item for item in services if item["installed"]]
     alerts = [f'{item["name"]} 未运行' for item in installed if not item["running"]]
