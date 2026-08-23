@@ -18,7 +18,7 @@ action="${1:-install}"
 case "$action" in
   uninstall)
     systemctl disable --now ejectors-vps-agent.service ejectors-vps-agent-update.timer 2>/dev/null || true
-    rm -f "$SERVICE" "$UPDATE_SERVICE" "$UPDATE_TIMER" "$UPDATE_APP" "$APP" "$CONF" /var/lib/ejectors-vps-agent.json
+    rm -f "$SERVICE" "$UPDATE_SERVICE" "$UPDATE_TIMER" "$UPDATE_APP" "$APP" "$CONF" /var/lib/ejectors-vps-agent.json /var/lib/ejectors-vps-agent/update.json
     systemctl daemon-reload
     echo "VPS 状态上报已卸载；网页会在约 150 秒后显示离线。"
     exit 0
@@ -93,9 +93,11 @@ cat > "$APP" <<'PY'
 #!/usr/bin/env python3
 import argparse, concurrent.futures, glob, json, os, platform, re, shutil, socket, subprocess, time, urllib.request
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
+UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
+UPDATE_SERVICE = "ejectors-vps-agent-update.service"
 
 def read_conf():
     data = {}
@@ -113,11 +115,80 @@ def read_json(path, default):
     except Exception:
         return default
 
-def write_state(data):
-    os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    tmp = STATE + ".tmp"
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f: json.dump(data, f)
-    os.replace(tmp, STATE)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+def write_state(data):
+    write_json(STATE, data)
+
+def version_parts(value):
+    if not isinstance(value, str) or not re.fullmatch(r"\d+(?:\.\d+){1,3}", value): return None
+    return tuple(int(part) for part in value.split("."))
+
+def compare_versions(left, right):
+    a, b = version_parts(left), version_parts(right)
+    if a is None or b is None: return None
+    width = max(len(a), len(b))
+    a += (0,) * (width - len(a)); b += (0,) * (width - len(b))
+    return (a > b) - (a < b)
+
+def agent_update_status():
+    data = read_json(UPDATE_STATE, {})
+    if not isinstance(data, dict): return None
+    request_id = data.get("request_id", "")
+    target_version = data.get("target_version", "")
+    status = data.get("status", "")
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id) or version_parts(target_version) is None or status not in {"accepted", "succeeded", "failed"}:
+        return None
+    if status == "accepted" and compare_versions(VERSION, target_version) >= 0:
+        data.update({"status": "succeeded", "version": VERSION, "updated_at": int(time.time()), "error": ""})
+        write_json(UPDATE_STATE, data)
+    return {
+        "request_id": request_id,
+        "target_version": target_version,
+        "version": VERSION,
+        "status": data["status"],
+        "updated_at": int(data.get("updated_at", 0)),
+        "error": str(data.get("error", ""))[:120] if data["status"] == "failed" else "",
+    }
+
+def handle_agent_action(action):
+    if not isinstance(action, dict) or action.get("type") != "agent_update": return
+    request_id = action.get("request_id", "")
+    target_version = action.get("target_version", "")
+    requested_at = action.get("requested_at")
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id) or version_parts(target_version) is None or not isinstance(requested_at, int) or requested_at <= 0:
+        return
+    current = agent_update_status()
+    if current and current["request_id"] == request_id and current["status"] in {"accepted", "succeeded", "failed"}:
+        return
+    now = int(time.time())
+    update = {
+        "request_id": request_id,
+        "target_version": target_version,
+        "version": VERSION,
+        "status": "succeeded" if compare_versions(VERSION, target_version) >= 0 else "accepted",
+        "updated_at": now,
+        "error": "",
+    }
+    write_json(UPDATE_STATE, update)
+    if update["status"] == "succeeded": return
+    try:
+        result = subprocess.run(
+            ["systemctl", "start", "--no-block", UPDATE_SERVICE],
+            text=True, capture_output=True, timeout=5,
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "systemctl 启动更新服务失败").strip()[:120]
+            update.update({"status": "failed", "updated_at": int(time.time()), "error": message})
+            write_json(UPDATE_STATE, update)
+    except Exception as exc:
+        update.update({"status": "failed", "updated_at": int(time.time()), "error": str(exc)[:120]})
+        write_json(UPDATE_STATE, update)
 
 def meminfo():
     values = {}
@@ -321,6 +392,8 @@ def collect(conf, probe_config=None):
     }
     quality = network_quality(probe_config)
     if quality: payload["network_quality"] = quality
+    update = agent_update_status()
+    if update: payload["agent_update_status"] = update
     return payload
 
 def post(conf, endpoint, payload):
@@ -353,6 +426,7 @@ def main():
             response = post(conf, "/api/v1/heartbeat", collect(conf, probe_config))
             if isinstance(response, dict) and isinstance(response.get("probe_config"), dict):
                 probe_config = response["probe_config"]
+            if isinstance(response, dict): handle_agent_action(response.get("agent_action"))
         except Exception as exc:
             print(time.strftime("%F %T"), "report failed:", exc, flush=True)
         if not args.loop: return
