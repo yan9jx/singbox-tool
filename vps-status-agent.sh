@@ -93,7 +93,7 @@ cat > "$APP" <<'PY'
 #!/usr/bin/env python3
 import argparse, concurrent.futures, glob, json, os, platform, re, shutil, socket, statistics, subprocess, time, urllib.request
 
-VERSION = "1.2.3"
+VERSION = "1.2.4"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
@@ -288,9 +288,11 @@ def probe_carrier(probe):
         results = list(executor.map(ping_target, targets))
     responsive = [item for item in results if item["status"] == "ok" and item["latency_ms"] is not None]
     if not responsive: return base
-    latency = round(float(statistics.median(item["latency_ms"] for item in responsive)), 1)
-    loss = round(float(statistics.median(item["loss_pct"] for item in responsive)), 1)
-    representative = min(responsive, key=lambda item: abs(item["latency_ms"] - latency))
+    ranked = sorted(responsive, key=lambda item: (item["loss_pct"], item["latency_ms"]))
+    selected = ranked[:min(3, len(ranked))]
+    latency = round(float(statistics.median(item["latency_ms"] for item in selected)), 1)
+    loss = round(float(statistics.median(item["loss_pct"] for item in selected)), 1)
+    representative = min(selected, key=lambda item: abs(item["latency_ms"] - latency))
     return {
         **base,
         "target": representative["target"],
