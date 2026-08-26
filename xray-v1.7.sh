@@ -4,7 +4,7 @@
 # Xray 只监听 127.0.0.1 本地端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v2.7"
+SCRIPT_VERSION="v2.8"
 XRAY_ROOT="/opt/xray-xhttp"
 XRAY_BIN="$XRAY_ROOT/xray"
 XRAY_DIR="/etc/xray-xhttp"
@@ -615,6 +615,90 @@ show_status() { systemctl status xray-xhttp --no-pager; }
 show_logs() { journalctl -u xray-xhttp -n 100 --no-pager; }
 restart_xray() { require_node_files; local port; port="$(info_value LOCAL_PORT)"; systemctl restart xray-xhttp; wait_for_xray_listener "$port" || die "Xray 重启后未正常监听。"; echo "Xray 已重启。"; }
 
+upgrade_xray() {
+  require_node_files
+  [[ -x "$XRAY_BIN" ]] || die "未找到已安装的 Xray 内核。"
+
+  local machine asset current latest tmp zip digest expected binary backup port newest
+  machine="$(uname -m)"
+  case "$machine" in
+    x86_64|amd64) asset="Xray-linux-64.zip" ;;
+    aarch64|arm64) asset="Xray-linux-arm64-v8a.zip" ;;
+    *) die "不支持的 CPU 架构：$machine" ;;
+  esac
+
+  current="$("$XRAY_BIN" version 2>/dev/null | awk 'NR == 1 { print $2 }')" ||
+    die "无法读取当前 Xray 版本。"
+  [[ -n "$current" ]] || die "无法读取当前 Xray 版本。"
+  latest="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)" ||
+    die "无法获取 Xray 最新稳定版本。"
+  [[ -n "$latest" ]] || die "无法获取 Xray 最新稳定版本。"
+
+  if [[ "$current" == "${latest#v}" ]]; then
+    echo "已是最新稳定版本：v$current"
+    return 0
+  fi
+
+  newest="$(printf '%s\n%s\n' "$current" "${latest#v}" | sort -V | tail -n1)"
+  if [[ "$newest" == "$current" ]]; then
+    echo "当前版本 v$current 高于最新稳定版本 $latest，可能是预发布版；为避免降级，本次不更新。"
+    return 0
+  fi
+
+  echo "当前版本：v$current"
+  echo "最新稳定版本：$latest"
+  confirm_yes "是否更新 Xray-core？" || { echo "已取消更新。"; return 0; }
+
+  tmp="$(mktemp -d)"
+  zip="$tmp/xray.zip"
+  digest="$tmp/xray.zip.dgst"
+  if ! curl -fL "https://github.com/XTLS/Xray-core/releases/download/${latest}/${asset}" -o "$zip"; then
+    rm -rf "$tmp"
+    die "Xray 下载失败，原版本未改动。"
+  fi
+  if ! curl -fL "https://github.com/XTLS/Xray-core/releases/download/${latest}/${asset}.dgst" -o "$digest"; then
+    rm -rf "$tmp"
+    die "Xray 校验文件下载失败，原版本未改动。"
+  fi
+  expected="$(sed -n 's/^SHA2-256= *\([0-9a-fA-F]\{64\}\)$/\1/p' "$digest" | head -n1)"
+  if [[ -z "$expected" ]] || ! printf '%s  %s\n' "$expected" "$zip" | sha256sum -c - >/dev/null; then
+    rm -rf "$tmp"
+    die "Xray 安装包 SHA-256 校验失败，原版本未改动。"
+  fi
+  if ! unzip -q "$zip" -d "$tmp"; then
+    rm -rf "$tmp"
+    die "Xray 安装包解压失败，原版本未改动。"
+  fi
+  binary="$tmp/xray"
+  if [[ ! -x "$binary" ]]; then
+    rm -rf "$tmp"
+    die "Xray 安装包不完整，原版本未改动。"
+  fi
+  if ! "$binary" run -test -c "$XRAY_CONFIG"; then
+    rm -rf "$tmp"
+    die "新 Xray 无法通过现有配置校验，原版本未改动。"
+  fi
+
+  backup="${XRAY_BIN}.previous"
+  cp -a "$XRAY_BIN" "$backup"
+  install -m 755 "$binary" "$XRAY_BIN"
+  rm -rf "$tmp"
+  port="$(info_value LOCAL_PORT)"
+
+  if ! systemctl restart xray-xhttp ||
+     ! systemctl is-active --quiet xray-xhttp ||
+     ! wait_for_xray_listener "$port"; then
+    install -m 755 "$backup" "$XRAY_BIN"
+    systemctl restart xray-xhttp || true
+    wait_for_xray_listener "$port" || true
+    rm -f "$backup"
+    die "新 Xray 启动或监听检查失败，已回滚到 v$current。"
+  fi
+
+  rm -f "$backup"
+  echo "Xray-core 已从 v$current 更新到 $latest。"
+}
+
 uninstall_node() {
   confirm_yes "是否卸载本脚本创建的 XHTTP 节点？" || return
   local conf=""
@@ -646,6 +730,7 @@ menu() {
 6. 卸载 XHTTP 节点
 7. 加入 / 更新聚合订阅
 8. 退出聚合订阅
+9. 检查 / 更新 Xray-core
 0. 退出
 EOF
   local choice
@@ -659,6 +744,7 @@ EOF
     6) uninstall_node ;;
     7) generate_subscription ;;
     8) remove_subscription_node ;;
+    9) upgrade_xray ;;
     0) exit 0 ;;
     *) die "无效选项。" ;;
   esac
@@ -671,6 +757,7 @@ case "${1:-}" in
   status) show_status ;;
   logs) show_logs ;;
   restart) restart_xray ;;
+  update|upgrade) upgrade_xray ;;
   subscription|subscribe|sub) generate_subscription ;;
   unsubscribe|unsub) remove_subscription_node ;;
   uninstall) uninstall_node ;;
