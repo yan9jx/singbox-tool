@@ -40,12 +40,12 @@ case "$(uname -m)" in
     ;;
 esac
 
-printf '\n[1/8] Installing system prerequisites...\n'
+printf '\n[1/9] Installing system prerequisites...\n'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates curl git
 
-printf '\n[2/8] Checking swap...\n'
+printf '\n[2/9] Checking swap...\n'
 if [[ -z "$(swapon --show=NAME --noheadings 2>/dev/null)" ]]; then
   if [[ -e /swapfile ]]; then
     printf '/swapfile already exists but is not active; leaving it unchanged.\n' >&2
@@ -65,7 +65,7 @@ else
   printf 'Active swap already exists; no changes made.\n'
 fi
 
-printf '\n[3/8] Downloading the official OpenClaw installer...\n'
+printf '\n[3/9] Downloading the official OpenClaw installer...\n'
 installer_path="$(mktemp /tmp/openclaw-install.XXXXXX.sh)"
 cleanup() {
   rm -f -- "$installer_path"
@@ -87,36 +87,95 @@ if ! command -v openclaw >/dev/null 2>&1; then
   exit 1
 fi
 
-printf '\n[4/8] Installing the official DeepSeek provider...\n'
+printf '\n[4/9] Installing the official DeepSeek provider...\n'
 openclaw plugins install @openclaw/deepseek-provider
 
-printf '\n[5/8] Starting interactive DeepSeek onboarding...\n'
+printf '\n[5/9] Starting interactive DeepSeek onboarding...\n'
 printf 'Enter the DeepSeek API key only at the OpenClaw prompt. Do not paste it into chat.\n'
-openclaw onboard --auth-choice deepseek-api-key --install-daemon
+openclaw onboard --auth-choice deepseek-api-key --skip-daemon --skip-health --skip-ui
 
-printf '\n[6/8] Applying conservative root-host security defaults...\n'
+printf '\n[6/9] Applying conservative root-host security defaults...\n'
 openclaw config set gateway.bind loopback
 openclaw exec-policy preset deny-all
-loginctl enable-linger root
 
-printf '\n[7/8] Installing Tencent official WeChat plugin...\n'
-openclaw plugins install @tencent-weixin/openclaw-weixin
+if [[ "$(ps -p 1 -o comm=)" != "systemd" ]]; then
+  printf 'This root installer requires systemd as PID 1 for persistent Gateway startup.\n' >&2
+  exit 1
+fi
+
+openclaw_bin="$(command -v openclaw)"
+if [[ "$openclaw_bin" != /* ]]; then
+  printf 'Cannot determine an absolute path for the OpenClaw command.\n' >&2
+  exit 1
+fi
+
+tee /etc/systemd/system/openclaw-gateway.service >/dev/null <<EOF
+[Unit]
+Description=OpenClaw Gateway
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WorkingDirectory=/root
+ExecStart=$openclaw_bin gateway --port 18789
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=78
+TimeoutStopSec=30
+TimeoutStartSec=30
+SuccessExitStatus=0 143
+OOMPolicy=continue
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable openclaw-gateway.service
+
+printf '\n[7/9] Installing Tencent official WeChat plugin...\n'
+if openclaw plugins inspect openclaw-weixin >/dev/null 2>&1; then
+  printf 'Tencent official WeChat plugin is already installed; keeping the existing copy.\n'
+else
+  openclaw plugins install @tencent-weixin/openclaw-weixin
+fi
 openclaw config set plugins.entries.openclaw-weixin.enabled true
 
+printf '\n[8/9] Starting the root system Gateway service...\n'
+systemctl restart openclaw-gateway.service
+sleep 3
+if ! systemctl is-active --quiet openclaw-gateway.service; then
+  systemctl status openclaw-gateway.service --no-pager -l >&2 || true
+  printf 'Gateway service did not become active. Check: journalctl -u openclaw-gateway.service -n 120 --no-pager\n' >&2
+  exit 1
+fi
+
+printf '\n[9/9] Connecting the official WeChat channel...\n'
 printf '\nA QR code will be displayed. Scan it with WeChat and confirm on your phone.\n'
 openclaw channels login --channel openclaw-weixin
 
-printf '\n[8/8] Restarting and verifying the Gateway...\n'
-openclaw gateway restart
-openclaw doctor
-openclaw gateway status
+printf '\nRestarting and verifying the root system Gateway service...\n'
+systemctl restart openclaw-gateway.service
+sleep 3
+if ! systemctl is-active --quiet openclaw-gateway.service; then
+  systemctl status openclaw-gateway.service --no-pager -l >&2 || true
+  printf 'Gateway service stopped after WeChat login. Check: journalctl -u openclaw-gateway.service -n 120 --no-pager\n' >&2
+  exit 1
+fi
 
 printf '\nInstallation completed.\n'
 printf 'OpenClaw version: '
 openclaw --version
 printf '\nUseful commands:\n'
-printf '  openclaw gateway status\n'
-printf '  openclaw logs --follow\n'
+printf '  systemctl status openclaw-gateway.service --no-pager\n'
+printf '  journalctl -u openclaw-gateway.service -f\n'
 printf '  openclaw models list --provider deepseek\n'
 printf '  openclaw channels login --channel openclaw-weixin\n'
 printf '\nHost command execution is disabled because the Gateway runs as root.\n'
