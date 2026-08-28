@@ -299,6 +299,34 @@ function scheduleRestart(state) {
   child.unref();
 }
 
+function scheduleSessionReset(state, sessionKey) {
+  if (typeof sessionKey !== "string" || !sessionKey.startsWith("agent:") || sessionKey.length > 512) {
+    throw new Error("invalid session key");
+  }
+  const unit = `openclaw-auto-reset-${Date.now()}`;
+  const child = spawn(
+    state.systemdRunBin,
+    [
+      "--quiet",
+      `--unit=${unit}`,
+      "--on-active=2s",
+      "--collect",
+      state.openclawBin,
+      "gateway",
+      "call",
+      "sessions.reset",
+      "--params",
+      JSON.stringify({ key: sessionKey }),
+    ],
+    { detached: true, stdio: "ignore" },
+  );
+  child.unref();
+}
+
+function isWeChatContext(ctx) {
+  return ctx.channel === "openclaw-weixin" || ctx.messageProvider === "openclaw-weixin";
+}
+
 function requestProviderDelete(ctx, state, platform) {
   const record = state.providers[platform];
   if (!record) return text("这个平台没有由 AI Key 管理器添加的 API 配置。");
@@ -492,7 +520,7 @@ export default definePluginEntry({
     api.on(
       "before_agent_reply",
       (event, ctx) => {
-        if (ctx.channel !== "openclaw-weixin" && ctx.messageProvider !== "openclaw-weixin") return;
+        if (!isWeChatContext(ctx)) return;
         const request = parseNaturalRequest(event.cleanedBody);
         if (!request) return;
 
@@ -573,6 +601,46 @@ export default definePluginEntry({
       },
       { eligibleTriggers: ["user"], priority: 100 },
     );
+
+    api.on(
+      "before_prompt_build",
+      (_event, ctx) => {
+        if (!isWeChatContext(ctx)) return;
+        return {
+          appendSystemContext:
+            "默认且始终使用简体中文回复。代码、命令、URL、产品名、模型名和用户明确要求保留的原文可以保持原样；其余说明、错误解释和结论必须使用中文。",
+        };
+      },
+      { priority: 100 },
+    );
+
+    api.on(
+      "message_sending",
+      (event, ctx) => {
+        if (!isWeChatContext(ctx) || typeof event.content !== "string") return;
+        const content = event.content;
+        if (/auto-compaction could not recover|context is too large and auto-compaction/i.test(content)) {
+          try {
+            const state = loadState();
+            scheduleSessionReset(state, ctx.sessionKey);
+            return {
+              content: "⚠️ 上下文压缩失败，正在自动创建新的对话。请在几秒后重新发送刚才的问题。",
+            };
+          } catch {
+            return {
+              content: "⚠️ 上下文压缩失败。请发送 /new 开始新对话后，再重新发送刚才的问题。",
+            };
+          }
+        }
+        if (/the ai service is temporarily overloaded|experiencing high demand|code=unavailable/i.test(content)) {
+          return { content: "⚠️ AI 服务当前繁忙，请稍后再试。" };
+        }
+        if (/^✅\s*new session started\.?$/i.test(content.trim())) {
+          return { content: "✅ 已开始新的对话。" };
+        }
+      },
+      { priority: 100 },
+    );
   },
 });
 EOF
@@ -584,6 +652,29 @@ printf '\nInstalling the local WeChat provider-admin plugin...\n'
 openclaw plugins install "$plugin_dir" --force
 openclaw config set plugins.entries.wechat-ai-provider-admin.enabled true
 openclaw config set plugins.entries.wechat-ai-provider-admin.hooks.allowConversationAccess true
+
+# Keep normal agent replies Chinese and make built-in localized strings prefer zh-CN.
+mkdir -p /etc/systemd/system/openclaw-gateway.service.d
+cat > /etc/systemd/system/openclaw-gateway.service.d/locale.conf <<'EOF'
+[Service]
+Environment=OPENCLAW_LOCALE=zh-CN
+EOF
+systemctl daemon-reload
+
+# Compact earlier and preserve a smaller recent tail. This avoids waiting until
+# there is too little context remaining to complete a reliable summary.
+openclaw config set agents.defaults.compaction.enabled true
+openclaw config set agents.defaults.compaction.mode safeguard
+openclaw config set agents.defaults.compaction.reserveTokens 40000
+openclaw config set agents.defaults.compaction.reserveTokensFloor 40000
+openclaw config set agents.defaults.compaction.keepRecentTokens 12000
+openclaw config set agents.defaults.compaction.recentTurnsPreserve 3
+openclaw config set agents.defaults.compaction.maxHistoryShare 0.65
+openclaw config set agents.defaults.compaction.qualityGuard.enabled true
+openclaw config set agents.defaults.compaction.qualityGuard.maxRetries 1
+openclaw config set agents.defaults.compaction.midTurnPrecheck.enabled true
+openclaw config set agents.defaults.compaction.truncateAfterCompaction true
+openclaw config set agents.defaults.compaction.notifyUser false
 systemctl restart openclaw-gateway.service
 sleep 4
 if ! systemctl is-active --quiet openclaw-gateway.service; then
