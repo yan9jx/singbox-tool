@@ -625,7 +625,7 @@ export default definePluginEntry({
         if (!isWeChatContext(ctx)) return;
         return {
           appendSystemContext:
-            "默认且始终使用简体中文回复。代码、命令、URL、产品名、模型名和用户明确要求保留的原文可以保持原样；其余说明、错误解释和结论必须使用中文。",
+            "默认且始终使用简体中文回复。代码、命令、URL、产品名、模型名和用户明确要求保留的原文可以保持原样；其余说明、错误解释和结论必须使用中文。不要向用户输出工具调用的原始失败文本、命令、文件路径、堆栈或错误码；工具失败时用自然中文简述，并在安全可行时换一种方式继续处理。",
         };
       },
       { priority: 100 },
@@ -655,6 +655,13 @@ export default definePluginEntry({
       (event, ctx) => {
         if (!isWeChatContext(ctx) || typeof event.content !== "string") return;
         const content = event.content;
+        // Tool access remains enabled. Only hide the raw, atmosphere-breaking
+        // transport error that some runtimes render as "Exec failed: ...".
+        if (/(?:^|\n)\s*(?:⚠\s*🛠\s*)?exec failed\s*:/i.test(content)) {
+          return {
+            content: "我刚才尝试处理这项操作时没有成功，但助手功能仍然可用。我会换一种方式继续；你也可以直接再告诉我希望我做什么。",
+          };
+        }
         if (/auto-compaction could not recover|context is too large and auto-compaction/i.test(content)) {
           try {
             const state = loadState();
