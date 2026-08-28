@@ -179,6 +179,7 @@ function loadState() {
     throw new Error("invalid state");
   }
   state.providers ??= {};
+  state.pendingDelete ??= null;
   return state;
 }
 
@@ -264,6 +265,12 @@ function parseNaturalRequest(body) {
 
   const apiKey = source.match(/(?:api\s*key|api|key|密钥)\s*:\s*([^\s，,；;。！？!]+)/i)?.[1];
   const model = source.match(/(?:模型|model)\s*:\s*([^\s，,；;。！？!]+)/i)?.[1];
+  if (/(?:确认\s*(?:删除|移除|清除)|(?:删除|移除|清除)\s*确认)/.test(source)) {
+    return { kind: "delete-confirm", platform };
+  }
+  if (/(?:删除|移除|清除)/.test(source) && /(?:api|key|密钥|配置)/i.test(source)) {
+    return { kind: "delete-request", platform };
+  }
   if (apiKey && /(?:添加|新增|配置|加入)/.test(source)) {
     return { kind: "add", platform, apiKey, model };
   }
@@ -290,6 +297,27 @@ function scheduleRestart(state) {
     { detached: true, stdio: "ignore" },
   );
   child.unref();
+}
+
+function requestProviderDelete(ctx, state, platform) {
+  const record = state.providers[platform];
+  if (!record) return text("这个平台没有由 AI Key 管理器添加的 API 配置。");
+  state.pendingDelete = {
+    platform,
+    senderId: ctx.senderId,
+    expiresAt: Date.now() + 5 * 60_000,
+  };
+  saveState(state);
+  return text(`将删除 ${platform} 的 API Key 和本机 Provider 配置。请在 5 分钟内回复：确认删除 ${platform}`);
+}
+
+function deleteProvider(state, platform) {
+  const record = state.providers[platform];
+  if (!record) throw new Error("provider not managed");
+  runOpenClaw(state, ["config", "unset", `models.providers.${providerId(platform)}`]);
+  delete state.providers[platform];
+  state.pendingDelete = null;
+  saveState(state);
 }
 
 function addProvider(state, platform, apiKey, model, customBaseUrl, customApi) {
@@ -361,6 +389,8 @@ function helpMessage() {
     "/aikey session 平台 模型名   （只改当前会话）",
     "/aikey fallback add 平台 模型名",
     "/aikey fallback clear",
+    "自然语言：帮我添加 OpenAI API：你的Key，模型：gpt-4.1",
+    "删除：帮我删除 Gemini 的 API 配置，然后回复 确认删除 Gemini。",
     "支持平台：deepseek、siliconflow、doubao、kimi、openai、gemini、claude、grok、openrouter、qwen、zhipu。",
     "API Key 不会在回复中显示；请勿在群聊中发送。",
   ].join("\n");
@@ -474,6 +504,26 @@ export default definePluginEntry({
         }
         const denied = requireOwner(ctx, state);
         if (denied) return { handled: true, reply: denied };
+
+        if (request.kind === "delete-request") {
+          return { handled: true, reply: requestProviderDelete(ctx, state, request.platform) };
+        }
+        if (request.kind === "delete-confirm") {
+          const pending = state.pendingDelete;
+          if (!pending || pending.platform !== request.platform || pending.senderId !== ctx.senderId || pending.expiresAt < Date.now()) {
+            return { handled: true, reply: text("没有可确认的删除操作，或确认已过期。请先重新说“帮我删除该平台的 API 配置”。") };
+          }
+          try {
+            deleteProvider(state, request.platform);
+            scheduleRestart(state);
+            return {
+              handled: true,
+              reply: text(`已删除 ${request.platform} 的 API Key 和 Provider 配置；Gateway 将在约 2 秒后重启。`),
+            };
+          } catch {
+            return { handled: true, reply: text("删除失败；原有管理记录已保留，请检查 Gateway 状态后重试。") };
+          }
+        }
 
         if (!request.model) {
           return {
