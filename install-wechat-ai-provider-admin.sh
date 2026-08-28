@@ -84,6 +84,13 @@ cat > "$plugin_dir/openclaw.plugin.json" <<'EOF'
   "name": "WeChat AI Provider Admin",
   "description": "Owner-claimed WeChat commands for local model-provider management.",
   "entry": "./index.js",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  },
   "commandAliases": [
     {
       "name": "aikey",
@@ -214,6 +221,56 @@ function checkModelAndKey(apiKey, model) {
   if (!model || model.length > MAX_MODEL_LENGTH || /\s/.test(model)) {
     throw new Error("invalid model");
   }
+}
+
+const NATURAL_PLATFORM_ALIASES = [
+  ["硅基流动", "siliconflow"],
+  ["siliconflow", "siliconflow"],
+  ["open router", "openrouter"],
+  ["openrouter", "openrouter"],
+  ["通义千问", "qwen"],
+  ["dashscope", "qwen"],
+  ["智谱", "zhipu"],
+  ["bigmodel", "zhipu"],
+  ["open ai", "openai"],
+  ["openai", "openai"],
+  ["anthropic", "claude"],
+  ["claude", "claude"],
+  ["deepseek", "deepseek"],
+  ["豆包", "doubao"],
+  ["doubao", "doubao"],
+  ["月之暗面", "kimi"],
+  ["kimi", "kimi"],
+  ["gemini", "gemini"],
+  ["google", "gemini"],
+  ["grok", "grok"],
+  ["qwen", "qwen"],
+  ["zhipu", "zhipu"],
+];
+
+function normalizeNaturalText(value) {
+  return String(value ?? "").replace(/\u3000/g, " ").replace(/：/g, ":");
+}
+
+function naturalPlatform(source) {
+  const lower = source.toLowerCase();
+  return NATURAL_PLATFORM_ALIASES.find(([alias]) => lower.includes(alias))?.[1];
+}
+
+function parseNaturalRequest(body) {
+  const source = normalizeNaturalText(body);
+  const platform = naturalPlatform(source);
+  if (!platform) return null;
+
+  const apiKey = source.match(/(?:api\s*key|api|key|密钥)\s*:\s*([^\s，,；;。！？!]+)/i)?.[1];
+  const model = source.match(/(?:模型|model)\s*:\s*([^\s，,；;。！？!]+)/i)?.[1];
+  if (apiKey && /(?:添加|新增|配置|加入)/.test(source)) {
+    return { kind: "add", platform, apiKey, model };
+  }
+  if (model && /(?:切换|换成|改用|设为|设置为)/.test(source)) {
+    return { kind: "use", platform, model };
+  }
+  return null;
 }
 
 function runOpenClaw(state, args) {
@@ -401,6 +458,71 @@ export default definePluginEntry({
         return text(helpMessage());
       },
     });
+
+    api.on(
+      "before_agent_reply",
+      (event, ctx) => {
+        if (ctx.channel !== "openclaw-weixin" && ctx.messageProvider !== "openclaw-weixin") return;
+        const request = parseNaturalRequest(event.cleanedBody);
+        if (!request) return;
+
+        let state;
+        try {
+          state = loadState();
+        } catch {
+          return { handled: true, reply: text("AI Key 管理插件状态文件不可用。请在服务器重新运行安装脚本。") };
+        }
+        const denied = requireOwner(ctx, state);
+        if (denied) return { handled: true, reply: denied };
+
+        if (!request.model) {
+          return {
+            handled: true,
+            reply: text("已识别为添加 API，但还缺模型名。请例如发送：帮我添加 OpenAI API：你的Key，模型：gpt-4.1。"),
+          };
+        }
+
+        if (request.kind === "add") {
+          try {
+            checkModelAndKey(request.apiKey, request.model);
+            const ref = addProvider(state, request.platform, request.apiKey, request.model);
+            scheduleRestart(state);
+            return {
+              handled: true,
+              reply: text(`已添加 ${request.platform}/${request.model}，Key 未回显，也不会交给模型。Gateway 将在约 2 秒后重启。`),
+            };
+          } catch {
+            return {
+              handled: true,
+              reply: text("添加失败。请检查平台、Key 和模型名；Key 未显示也未写入回复。"),
+            };
+          }
+        }
+
+        const record = state.providers[request.platform];
+        if (!record || !record.models.includes(request.model)) {
+          return {
+            handled: true,
+            reply: text("该平台或模型尚未添加。请先发送：帮我添加该平台 API：你的Key，模型：模型名。"),
+          };
+        }
+        try {
+          const ref = `${providerId(request.platform)}/${request.model}`;
+          runOpenClaw(state, ["models", "set", ref]);
+          scheduleRestart(state);
+          return {
+            handled: true,
+            reply: text(`默认模型已切换为 ${ref}；Gateway 将在约 2 秒后重启。当前已固定模型的会话可发送 /model default -s 继承新默认值。`),
+          };
+        } catch {
+          return {
+            handled: true,
+            reply: text("模型切换失败；请稍后发送 /model status 检查。"),
+          };
+        }
+      },
+      { eligibleTriggers: ["user"], priority: 100 },
+    );
   },
 });
 EOF
@@ -411,6 +533,7 @@ chmod 600 "$plugin_dir/package.json" "$plugin_dir/openclaw.plugin.json" "$plugin
 printf '\nInstalling the local WeChat provider-admin plugin...\n'
 openclaw plugins install "$plugin_dir" --force
 openclaw config set plugins.entries.wechat-ai-provider-admin.enabled true
+openclaw config set plugins.entries.wechat-ai-provider-admin.hooks.allowConversationAccess true
 systemctl restart openclaw-gateway.service
 sleep 4
 if ! systemctl is-active --quiet openclaw-gateway.service; then
