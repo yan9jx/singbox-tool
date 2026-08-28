@@ -781,21 +781,49 @@ NODE
   printf 'This OpenClaw version does not support free keyword-memory configuration; skipped it without affecting the bot.\n' >&2
 fi
 
-# Compaction remains proportional to the active model window: retained history
-# is capped at 70% for every model. The fixed 24K/16K amounts are only safety
-# margins and a recent-tail floor, so small-context models are not starved.
-openclaw config set agents.defaults.compaction.enabled true
-openclaw config set agents.defaults.compaction.mode safeguard
-openclaw config set agents.defaults.compaction.reserveTokens 24000
-openclaw config set agents.defaults.compaction.reserveTokensFloor 24000
-openclaw config set agents.defaults.compaction.keepRecentTokens 16000
-openclaw config set agents.defaults.compaction.recentTurnsPreserve 4
-openclaw config set agents.defaults.compaction.maxHistoryShare 0.70
-openclaw config set agents.defaults.compaction.qualityGuard.enabled true
-openclaw config set agents.defaults.compaction.qualityGuard.maxRetries 1
-openclaw config set agents.defaults.compaction.midTurnPrecheck.enabled true
-openclaw config set agents.defaults.compaction.truncateAfterCompaction true
-openclaw config set agents.defaults.compaction.notifyUser false
+# Compaction remains proportional to the active model window. Some 2026.7
+# builds compact automatically but reject newer control knobs. Preserve the
+# compatible knobs and silently skip unknown ones instead of aborting setup.
+if openclaw --version 2>&1 | grep -q 'OpenClaw 2026\.7\.'; then
+  "$node_bin" - /root/.openclaw/openclaw.json <<'NODE'
+const fs = require("fs");
+const path = process.argv[2];
+try {
+  const config = JSON.parse(fs.readFileSync(path, "utf8"));
+  const compaction = config.agents?.defaults?.compaction;
+  if (compaction && Object.hasOwn(compaction, "enabled")) {
+    delete compaction.enabled;
+    fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  }
+} catch (error) {
+  console.error(`Could not repair legacy compaction config: ${error.message}`);
+  process.exit(1);
+}
+NODE
+fi
+
+set_compaction_if_supported() {
+  local config_path="$1"
+  local config_value="$2"
+  local output
+  if output="$(openclaw config set "$config_path" "$config_value" 2>&1)"; then
+    printf '%s\n' "$output"
+  else
+    printf 'Skipped unsupported compaction setting %s on this OpenClaw version.\n' "$config_path" >&2
+  fi
+}
+
+set_compaction_if_supported agents.defaults.compaction.mode safeguard
+set_compaction_if_supported agents.defaults.compaction.reserveTokens 24000
+set_compaction_if_supported agents.defaults.compaction.reserveTokensFloor 24000
+set_compaction_if_supported agents.defaults.compaction.keepRecentTokens 16000
+set_compaction_if_supported agents.defaults.compaction.recentTurnsPreserve 4
+set_compaction_if_supported agents.defaults.compaction.maxHistoryShare 0.70
+set_compaction_if_supported agents.defaults.compaction.qualityGuard.enabled true
+set_compaction_if_supported agents.defaults.compaction.qualityGuard.maxRetries 1
+set_compaction_if_supported agents.defaults.compaction.midTurnPrecheck.enabled true
+set_compaction_if_supported agents.defaults.compaction.truncateAfterCompaction true
+set_compaction_if_supported agents.defaults.compaction.notifyUser false
 systemctl restart openclaw-gateway.service
 sleep 4
 if ! systemctl is-active --quiet openclaw-gateway.service; then
