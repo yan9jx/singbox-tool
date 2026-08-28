@@ -36,6 +36,11 @@ fi
 
 openclaw_bin="$(command -v openclaw)"
 systemd_run_bin="$(command -v systemd-run)"
+node_bin="$(command -v node || true)"
+if [[ -z "$node_bin" ]]; then
+  printf 'Node.js is required by OpenClaw but was not found in PATH.\n' >&2
+  exit 1
+fi
 plugin_dir=/opt/openclaw-wechat-ai-provider-admin
 state_dir=/root/.openclaw/wechat-ai-provider-admin
 state_file="$state_dir/state.json"
@@ -110,6 +115,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 const STATE_FILE = "/root/.openclaw/wechat-ai-provider-admin/state.json";
 const MAX_KEY_LENGTH = 512;
 const MAX_MODEL_LENGTH = 160;
+const RESET_PENDING = new Set();
 
 const PLATFORMS = {
   deepseek: {
@@ -303,24 +309,33 @@ function scheduleSessionReset(state, sessionKey) {
   if (typeof sessionKey !== "string" || !sessionKey.startsWith("agent:") || sessionKey.length > 512) {
     throw new Error("invalid session key");
   }
+  if (RESET_PENDING.has(sessionKey)) return;
+  RESET_PENDING.add(sessionKey);
+  const clearPending = setTimeout(() => RESET_PENDING.delete(sessionKey), 30_000);
+  clearPending.unref();
   const unit = `openclaw-auto-reset-${Date.now()}`;
-  const child = spawn(
-    state.systemdRunBin,
-    [
-      "--quiet",
-      `--unit=${unit}`,
-      "--on-active=2s",
-      "--collect",
-      state.openclawBin,
-      "gateway",
-      "call",
-      "sessions.reset",
-      "--params",
-      JSON.stringify({ key: sessionKey }),
-    ],
-    { detached: true, stdio: "ignore" },
-  );
-  child.unref();
+  try {
+    const child = spawn(
+      state.systemdRunBin,
+      [
+        "--quiet",
+        `--unit=${unit}`,
+        "--on-active=2s",
+        "--collect",
+        state.openclawBin,
+        "gateway",
+        "call",
+        "sessions.reset",
+        "--params",
+        JSON.stringify({ key: sessionKey }),
+      ],
+      { detached: true, stdio: "ignore" },
+    );
+    child.unref();
+  } catch (error) {
+    RESET_PENDING.delete(sessionKey);
+    throw error;
+  }
 }
 
 function isWeChatContext(ctx) {
@@ -365,11 +380,13 @@ function addProvider(state, platform, apiKey, model, customBaseUrl, customApi) {
   const id = providerId(platform);
   const record = state.providers[platform] ?? { label: definition.label, models: [] };
   const modelNames = record.models.includes(model) ? record.models : [...record.models, model];
+  // Do not invent a context limit for newly added third-party models. The
+  // installer synchronizes every model for which OpenClaw's catalog has
+  // authoritative native metadata; unknown custom models keep no fake cap.
   const modelEntries = modelNames.map((modelId) => ({
     id: modelId,
     name: `${definition.label} ${modelId}`,
     input: ["text"],
-    contextWindow: 128000,
     maxTokens: 8192,
   }));
   runOpenClaw(state, [
@@ -614,6 +631,25 @@ export default definePluginEntry({
       { priority: 100 },
     );
 
+    // Schedule the fresh session at the terminal failure point as well as in
+    // the delivery-rewrite hook below. This catches a compaction failure even
+    // when a channel returns no ordinary outgoing error message.
+    api.on(
+      "agent_end",
+      (event, ctx) => {
+        if (!isWeChatContext(ctx)) return;
+        const errorText = String(event.error?.message ?? event.error ?? event.reason ?? "");
+        if (!/auto-compaction|compaction.*(?:fail|recover)|context is too large/i.test(errorText)) return;
+        try {
+          scheduleSessionReset(loadState(), ctx.sessionKey);
+        } catch {
+          // The visible handler below tells the owner how to recover if reset
+          // scheduling is unavailable; never replace the original error here.
+        }
+      },
+      { priority: 100 },
+    );
+
     api.on(
       "message_sending",
       (event, ctx) => {
@@ -661,15 +697,73 @@ Environment=OPENCLAW_LOCALE=zh-CN
 EOF
 systemctl daemon-reload
 
-# Compact earlier and preserve a smaller recent tail. This avoids waiting until
-# there is too little context remaining to complete a reliable summary.
+# Synchronize every configured model that OpenClaw can identify with an
+# authoritative native context window. `contextTokens` is set to that same
+# value so no old generic 128K/200K runtime cap remains. Models without catalog
+# metadata are deliberately skipped instead of being assigned a guessed limit.
+sync_file="$(mktemp /tmp/openclaw-context-sync.XXXXXX.mjs)"
+cat > "$sync_file" <<'NODE'
+import fs from "node:fs";
+import { execFileSync } from "node:child_process";
+
+const [openclawBin, configPath] = process.argv.slice(2);
+const raw = JSON.parse(fs.readFileSync(0, "utf8"));
+const rows = Array.isArray(raw) ? raw : Array.isArray(raw.models) ? raw.models : raw.items;
+if (!Array.isArray(rows)) throw new Error("OpenClaw returned an unrecognized models-list JSON shape");
+const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+const providers = config.models?.providers ?? {};
+const desired = new Map();
+
+for (const [providerId, provider] of Object.entries(providers)) {
+  if (!Array.isArray(provider?.models)) continue;
+  const catalogProvider = providerId.startsWith("wechat-") ? providerId.slice("wechat-".length) : providerId;
+  for (const model of provider.models) {
+    if (typeof model?.id !== "string" || !model.id) continue;
+    const key = `${catalogProvider}/${model.id}`;
+    const row = rows.find((candidate) => candidate?.key === key);
+    const contextWindow = Number(row?.contextWindow);
+    if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+      console.log(`Skipped ${providerId}/${model.id}: no authoritative context window in the OpenClaw catalog.`);
+      continue;
+    }
+    const entries = desired.get(providerId) ?? [];
+    entries.push({ id: model.id, contextWindow, contextTokens: contextWindow });
+    desired.set(providerId, entries);
+  }
+}
+
+let count = 0;
+for (const [providerId, models] of desired) {
+  execFileSync(
+    openclawBin,
+    ["config", "set", `models.providers.${providerId}.models`, JSON.stringify(models), "--strict-json", "--merge"],
+    { stdio: "inherit", env: { ...process.env, HOME: "/root" } },
+  );
+  count += models.length;
+}
+console.log(`Synchronized runtime context caps for ${count} catalog-known configured model(s).`);
+NODE
+openclaw models list --all --json | "$node_bin" "$sync_file" "$openclaw_bin" /root/.openclaw/openclaw.json
+rm -f "$sync_file"
+
+# Free, local keyword memory: this intentionally disables remote vector
+# embeddings, so DeepSeek/OpenAI embedding keys are neither needed nor read.
+# It preserves MEMORY.md and reminder files, then rebuilds the local FTS index.
+openclaw config set memory.search.enabled true
+openclaw config set memory.search.provider none
+openclaw config set memory.search.fallback none
+openclaw memory index --force --verbose
+
+# Compaction remains proportional to the active model window: retained history
+# is capped at 70% for every model. The fixed 24K/16K amounts are only safety
+# margins and a recent-tail floor, so small-context models are not starved.
 openclaw config set agents.defaults.compaction.enabled true
 openclaw config set agents.defaults.compaction.mode safeguard
-openclaw config set agents.defaults.compaction.reserveTokens 40000
-openclaw config set agents.defaults.compaction.reserveTokensFloor 40000
-openclaw config set agents.defaults.compaction.keepRecentTokens 12000
-openclaw config set agents.defaults.compaction.recentTurnsPreserve 3
-openclaw config set agents.defaults.compaction.maxHistoryShare 0.65
+openclaw config set agents.defaults.compaction.reserveTokens 24000
+openclaw config set agents.defaults.compaction.reserveTokensFloor 24000
+openclaw config set agents.defaults.compaction.keepRecentTokens 16000
+openclaw config set agents.defaults.compaction.recentTurnsPreserve 4
+openclaw config set agents.defaults.compaction.maxHistoryShare 0.70
 openclaw config set agents.defaults.compaction.qualityGuard.enabled true
 openclaw config set agents.defaults.compaction.qualityGuard.maxRetries 1
 openclaw config set agents.defaults.compaction.midTurnPrecheck.enabled true
