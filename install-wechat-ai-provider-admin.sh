@@ -755,11 +755,31 @@ rm -f "$sync_file"
 
 # Free, local keyword memory: this intentionally disables remote vector
 # embeddings, so DeepSeek/OpenAI embedding keys are neither needed nor read.
-# It preserves MEMORY.md and reminder files, then rebuilds the local FTS index.
-openclaw config set memory.search.enabled true
-openclaw config set memory.search.provider none
-openclaw config set memory.search.fallback none
-openclaw memory index --force --verbose
+# OpenClaw 2026.7 does not yet expose the top-level memory schema. Detect that
+# older build instead of leaving an invalid partial config that stops setup.
+if openclaw config set memory.search.provider none; then
+  openclaw config set memory.search.enabled true
+  openclaw config set memory.search.fallback none
+  if ! openclaw memory index --force --verbose; then
+    printf 'Warning: free keyword-memory index was not rebuilt; the bot will still work normally.\n' >&2
+  fi
+else
+  "$node_bin" - /root/.openclaw/openclaw.json <<'NODE'
+const fs = require("fs");
+const path = process.argv[2];
+try {
+  const config = JSON.parse(fs.readFileSync(path, "utf8"));
+  if (Object.hasOwn(config, "memory")) {
+    delete config.memory;
+    fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  }
+} catch (error) {
+  console.error(`Could not remove unsupported memory config: ${error.message}`);
+  process.exit(1);
+}
+NODE
+  printf 'This OpenClaw version does not support free keyword-memory configuration; skipped it without affecting the bot.\n' >&2
+fi
 
 # Compaction remains proportional to the active model window: retained history
 # is capped at 70% for every model. The fixed 24K/16K amounts are only safety
