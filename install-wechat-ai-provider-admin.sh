@@ -863,6 +863,12 @@ export default definePluginEntry({
         if (!isWeChatContext(ctx) || typeof event.content !== "string") return;
         const content = event.content;
         const compact = content.trim();
+        // A cron reminder must never expose the Gateway's English scheduling
+        // envelope. If a provider ignores the Chinese-only prompt, keep the
+        // delivery useful and warm instead of forwarding mixed system text.
+        if (isCronRunContext(ctx) && /[A-Za-z]{3,}/.test(compact)) {
+          return { content: "⏰ 到提醒时间啦，别忘了你刚才安排的事情哦～" };
+        }
         // Gateway and provider errors must never leak to the WeChat user as
         // raw English transport text. These patterns intentionally replace the
         // whole message because an error string is not a useful answer.
