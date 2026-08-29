@@ -894,7 +894,7 @@ export default definePluginEntry({
         }
         // Tool access remains enabled. Only hide the raw, atmosphere-breaking
         // transport error that some runtimes render as "Exec failed: ...".
-        if (/(?:^|\n)\s*(?:⚠\s*🛠\s*)?exec failed\s*:/i.test(content)) {
+        if (/(?:^|\n)\s*(?:⚠\uFE0F?\s*🛠\uFE0F?\s*)?exec failed\s*:/i.test(content)) {
           return {
             content: "我刚才尝试处理这项操作时没有成功，但助手功能仍然可用。我会换一种方式继续；你也可以直接再告诉我希望我做什么。",
           };
