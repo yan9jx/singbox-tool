@@ -578,6 +578,17 @@ function isWeChatContext(ctx) {
   return ctx.channel === "openclaw-weixin" || ctx.messageProvider === "openclaw-weixin";
 }
 
+function isNaturalSessionResetRequest(input) {
+  const normalized = String(input ?? "").trim().replace(/[\s，。！？、.!?]/g, "");
+  return new Set([
+    "新开对话",
+    "开始新对话",
+    "开个新对话",
+    "重新开始对话",
+    "重新开始聊天",
+  ]).has(normalized);
+}
+
 function requestProviderDelete(ctx, state, platform) {
   const record = state.providers[platform];
   if (!record) return text("这个平台没有由 AI Key 管理器添加的 API 配置。");
@@ -674,6 +685,7 @@ function helpMessage() {
     "自然语言：帮我添加 OpenAI API：你的Key，模型：gpt-4.1",
     "删除：帮我删除 Gemini 的 API 配置，然后回复 确认删除 Gemini。",
     "状态查询：上下文压缩阈值是多少、查内存和 swap、查 SearXNG 状态、查长期记忆索引。",
+    "会话：直接发送“新开对话”即可开始新的对话。",
     "支持平台：deepseek、siliconflow、doubao、kimi、openai、gemini、claude、grok、openrouter、qwen、zhipu。",
     "API Key 不会在回复中显示；请勿在群聊中发送。",
   ].join("\n");
@@ -791,6 +803,15 @@ export default definePluginEntry({
           state = loadState();
         } catch {
           return { handled: true, reply: text("重要操作确认组件暂时不可用。请在服务器重新运行安装脚本。") };
+        }
+
+        if (isNaturalSessionResetRequest(event.cleanedBody)) {
+          try {
+            scheduleSessionReset(state, ctx.sessionKey);
+            return { handled: true, reply: text("好的，正在为你开始新的对话。请稍等两秒后再发新的问题。") };
+          } catch {
+            return { handled: true, reply: text("暂时无法自动开始新对话，请发送 /new 后再试。") };
+          }
         }
 
         const confirmedRequest = parseHighRiskConfirmation(event.cleanedBody);
