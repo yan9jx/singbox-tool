@@ -782,6 +782,19 @@ export default definePluginEntry({
       (event, ctx) => {
         if (!isWeChatContext(ctx) || typeof event.content !== "string") return;
         const content = event.content;
+        const compact = content.trim();
+        // Gateway and provider errors must never leak to the WeChat user as
+        // raw English transport text. These patterns intentionally replace the
+        // whole message because an error string is not a useful answer.
+        if (/^(?:error|failed|invalid request|permission denied|unauthorized|forbidden|not found|internal server error|service unavailable|gateway error|command failed|tool call failed)\b/i.test(compact)) {
+          return { content: "刚才的服务操作没有成功，但机器人仍可用。我会改用中文继续处理；请重新发送你的需求。" };
+        }
+        if (/rate limit exceeded|too many requests|quota exceeded/i.test(compact)) {
+          return { content: "当前请求过于频繁或额度暂不可用，请稍后再试。" };
+        }
+        if (/timeout|timed out|request aborted|connection (?:reset|refused|failed)/i.test(compact)) {
+          return { content: "连接服务超时或中断，请稍后重新发送。" };
+        }
         // Tool access remains enabled. Only hide the raw, atmosphere-breaking
         // transport error that some runtimes render as "Exec failed: ...".
         if (/(?:^|\n)\s*(?:⚠\s*🛠\s*)?exec failed\s*:/i.test(content)) {
@@ -807,6 +820,20 @@ export default definePluginEntry({
         }
         if (/^✅\s*new session started\.?$/i.test(content.trim())) {
           return { content: "✅ 已开始新的对话。" };
+        }
+        // Normal answers are requested in Chinese by the system context above.
+        // If a provider still returns a full English-only answer, do not pass it
+        // through as user-visible feedback. Code blocks, URLs and model names
+        // are excluded from the language test so valid technical replies stay
+        // intact when accompanied by Chinese explanation.
+        const prose = compact
+          .replace(/```[\s\S]*?```/g, "")
+          .replace(/`[^`]*`/g, "")
+          .replace(/https?:\/\/\S+/g, "");
+        const chineseChars = (prose.match(/[\u4e00-\u9fff]/g) ?? []).length;
+        const englishWords = prose.match(/[A-Za-z]{3,}/g) ?? [];
+        if (chineseChars === 0 && englishWords.length >= 4) {
+          return { content: "刚才的回复未能正确转换为中文。请重新发送问题，我会用中文重新处理。" };
         }
       },
       { priority: 100 },
