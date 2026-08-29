@@ -469,6 +469,35 @@ function needsHighRiskConfirmation(value) {
   return /(?:删除|移除|清空|清除|格式化|重置|恢复出厂|关机|重启|停止|卸载|安装|升级|覆盖|替换|开放端口|防火墙|权限|用户|密码|密钥|令牌|api\s*key|\brm\b|\bchmod\b|\bchown\b|\bcurl\b|\bwget\b|\bapt(?:-get)?\b|\bsystemctl\b|\bdocker\b|\biptables\b|\bufw\b|\bnft\b|\bcrontab\b|openclaw\s+(?:config|approvals|exec-policy)|tools\.exec)/i.test(source);
 }
 
+function isWeChatReminderJob(event) {
+  const target = String(event?.sessionKey ?? event?.job?.sessionTarget ?? "");
+  return target.includes(":openclaw-weixin:");
+}
+
+async function enforceWeChatReminderDelivery(event, gatewayCtx) {
+  // Natural-language reminders made from this private WeChat conversation must
+  // always reach the same chat. This closes the gap where a model creates a
+  // cron job but omits `delivery: announce` (or mistakenly uses `none`).
+  if (event?.action !== "added" || !event?.jobId || !isWeChatReminderJob(event)) return;
+  const rawDelivery = event.job?.delivery;
+  const delivery = rawDelivery && typeof rawDelivery === "object" ? rawDelivery : {};
+  if (delivery.mode === "announce") return;
+  const cron = gatewayCtx?.getCron?.();
+  if (!cron) return;
+  try {
+    await cron.update(event.jobId, {
+      delivery: {
+        ...delivery,
+        mode: "announce",
+        channel: delivery.channel || "last",
+      },
+    });
+  } catch {
+    // Do not break a newly-created reminder if a future Gateway revision
+    // changes its cron patch schema. The prompt guidance remains as fallback.
+  }
+}
+
 function requestHighRiskConfirmation(ctx, state, request) {
   const actor = confirmationActor(ctx);
   if (!actor) return text("无法识别当前会话，不能执行重要操作。");
@@ -787,6 +816,15 @@ export default definePluginEntry({
             "面向用户的最终回复、状态说明、错误解释必须只使用简体中文。不得发送独立英文句子、英文系统提示或英文错误原文；代码、命令、URL、产品名、模型名和用户明确要求保留的原文可以保持原样。若工具或服务返回英文，只保留必要产品名和代码标识，并用中文概述，绝不原样转发。不要向用户输出工具调用的原始失败文本、命令、文件路径、堆栈或错误码；工具失败时用自然中文简述，并在安全可行时换一种方式继续处理。用户以自然语言要求备忘、定时提醒或到点通知时，使用 OpenClaw 的定时任务，并明确选择 announce 推送到当前微信通道；绝不创建 delivery 为 none 的提醒，也不要仅依赖 sessions_send。创建后先核对任务的推送方式和下一次执行时间，再用中文告知用户。对于重要操作，用户可在一条完整消息中明确授权，例如“确认重启 SearXNG”；这已经是授权和操作本身，立即执行，不要再要求确认。未带“确认”的重要操作由插件提示用户改用该格式。",
         };
       },
+      { priority: 100 },
+    );
+
+    // Default every reminder created from the private WeChat session to
+    // announcement delivery. This is a post-create safety net, independent of
+    // whether the Agent remembered to supply delivery settings in its tool call.
+    api.on(
+      "cron_changed",
+      (event, gatewayCtx) => enforceWeChatReminderDelivery(event, gatewayCtx),
       { priority: 100 },
     );
 
