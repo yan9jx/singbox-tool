@@ -186,6 +186,7 @@ function loadState() {
   }
   state.providers ??= {};
   state.pendingDelete ??= null;
+  state.pendingHighRisk ??= null;
   return state;
 }
 
@@ -426,6 +427,30 @@ function parseNaturalStatusRequest(body) {
   if (/(?:微信机器人|微信通道|网关).*(?:状态|查|查询|查看)/.test(source)) return "gateway";
   if (/^(?:查|查询|查看|看看)\s*(?:全部|所有)?状态/.test(source)) return "all";
   return null;
+}
+
+function normalizedConfirmation(value) {
+  return normalizeNaturalText(value).replace(/[。！!，,、\s]/g, "").toLowerCase();
+}
+
+function isHighRiskConfirmation(value) {
+  return /^(?:确认执行|确认|继续执行|同意执行|我确认)$/.test(normalizedConfirmation(value));
+}
+
+function needsHighRiskConfirmation(value) {
+  const source = normalizeNaturalText(value).toLowerCase();
+  if (!source || source.startsWith("/aikey")) return false;
+  return /(?:删除|移除|清空|清除|格式化|重置|恢复出厂|关机|重启|停止|卸载|安装|升级|覆盖|替换|开放端口|防火墙|权限|用户|密码|密钥|令牌|api\s*key|\brm\b|\bchmod\b|\bchown\b|\bcurl\b|\bwget\b|\bapt(?:-get)?\b|\bsystemctl\b|\bdocker\b|\biptables\b|\bufw\b|\bnft\b|\bcrontab\b|openclaw\s+(?:config|approvals|exec-policy)|tools\.exec)/i.test(source);
+}
+
+function requestHighRiskConfirmation(ctx, state) {
+  if (!ctx.senderId) return text("无法读取当前发送者，不能执行重要操作。");
+  state.pendingHighRisk = {
+    senderId: ctx.senderId,
+    expiresAt: Date.now() + 5 * 60_000,
+  };
+  saveState(state);
+  return text("这是重要操作，暂未执行。请在 5 分钟内单独发送“确认执行”进行二次确认；超时后自动取消。普通查询无需确认。");
 }
 
 function scheduleRestart(state) {
@@ -676,12 +701,44 @@ export default definePluginEntry({
     // owner-claimed provider-management entry point.
 
     api.on(
+      "before_agent_reply",
+      (event, ctx) => {
+        if (!isWeChatContext(ctx)) return;
+        let state;
+        try {
+          state = loadState();
+        } catch {
+          return { handled: true, reply: text("重要操作确认组件暂时不可用。请在服务器重新运行安装脚本。") };
+        }
+
+        if (isHighRiskConfirmation(event.cleanedBody)) {
+          const pending = state.pendingHighRisk;
+          if (!pending || pending.senderId !== ctx.senderId || pending.expiresAt < Date.now()) {
+            state.pendingHighRisk = null;
+            saveState(state);
+            return { handled: true, reply: text("没有等待确认的重要操作，或确认已超时。请重新发送需要执行的操作。") };
+          }
+          state.pendingHighRisk = null;
+          saveState(state);
+          // Let the Agent receive this second confirmation in the same session.
+          // It can then act on the immediately preceding deferred request.
+          return;
+        }
+
+        if (needsHighRiskConfirmation(event.cleanedBody)) {
+          return { handled: true, reply: requestHighRiskConfirmation(ctx, state) };
+        }
+      },
+      { eligibleTriggers: ["user"], priority: 110 },
+    );
+
+    api.on(
       "before_prompt_build",
       (_event, ctx) => {
         if (!isWeChatContext(ctx)) return;
         return {
           appendSystemContext:
-            "面向用户的最终回复、状态说明、错误解释必须只使用简体中文。不得发送独立英文句子、英文系统提示或英文错误原文；代码、命令、URL、产品名、模型名和用户明确要求保留的原文可以保持原样。若工具或服务返回英文，只保留必要产品名和代码标识，并用中文概述，绝不原样转发。不要向用户输出工具调用的原始失败文本、命令、文件路径、堆栈或错误码；工具失败时用自然中文简述，并在安全可行时换一种方式继续处理。用户以自然语言要求备忘、定时提醒或到点通知时，使用 OpenClaw 的定时任务，并明确选择 announce 推送到当前微信通道；绝不创建 delivery 为 none 的提醒，也不要仅依赖 sessions_send。创建后先核对任务的推送方式和下一次执行时间，再用中文告知用户。",
+            "面向用户的最终回复、状态说明、错误解释必须只使用简体中文。不得发送独立英文句子、英文系统提示或英文错误原文；代码、命令、URL、产品名、模型名和用户明确要求保留的原文可以保持原样。若工具或服务返回英文，只保留必要产品名和代码标识，并用中文概述，绝不原样转发。不要向用户输出工具调用的原始失败文本、命令、文件路径、堆栈或错误码；工具失败时用自然中文简述，并在安全可行时换一种方式继续处理。用户以自然语言要求备忘、定时提醒或到点通知时，使用 OpenClaw 的定时任务，并明确选择 announce 推送到当前微信通道；绝不创建 delivery 为 none 的提醒，也不要仅依赖 sessions_send。创建后先核对任务的推送方式和下一次执行时间，再用中文告知用户。重要操作会先由插件提示二次确认；当用户随后单独发送“确认执行”时，根据同一会话中紧邻的已延后操作继续执行，不再要求第三次确认。",
         };
       },
       { priority: 100 },
