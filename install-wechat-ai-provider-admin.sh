@@ -232,6 +232,7 @@ function checkModelAndKey(apiKey, model) {
 }
 
 const NATURAL_PLATFORM_ALIASES = [
+  ["深度求索", "deepseek"],
   ["硅基流动", "siliconflow"],
   ["siliconflow", "siliconflow"],
   ["open router", "openrouter"],
@@ -246,10 +247,12 @@ const NATURAL_PLATFORM_ALIASES = [
   ["claude", "claude"],
   ["deepseek", "deepseek"],
   ["豆包", "doubao"],
+  ["火山方舟", "doubao"],
   ["doubao", "doubao"],
   ["月之暗面", "kimi"],
   ["kimi", "kimi"],
   ["gemini", "gemini"],
+  ["谷歌", "gemini"],
   ["google", "gemini"],
   ["grok", "grok"],
   ["qwen", "qwen"],
@@ -287,12 +290,70 @@ function parseNaturalRequest(body) {
   return null;
 }
 
+function parseNaturalModelAddition(body) {
+  const source = normalizeNaturalText(body);
+  const platform = naturalPlatform(source);
+  const model =
+    source.match(/^新增\s*模型\s+[^\s，,；;。！？!]+\s+([^\s，,；;。！？!]+)/i)?.[1]
+    ?? source.match(/(?:添加|新增|加入)\s*模型\s+([^\s，,；;。！？!]+)/i)?.[1]
+    ?? source.match(/(?:模型|model)\s*:\s*([^\s，,；;。！？!]+)/i)?.[1];
+  const hasApiKey = /(?:api\s*key|api|key|密钥)\s*:/i.test(source);
+  if (!platform || !model || hasApiKey) return null;
+  if (!/(?:添加|新增|加入)/.test(source) || !/(?:模型|model)/i.test(source)) return null;
+  return { platform, model };
+}
+
 function runOpenClaw(state, args) {
-  execFileSync(state.openclawBin, args, {
+  return execFileSync(state.openclawBin, args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 30_000,
     env: { ...process.env, HOME: "/root" },
+  });
+}
+
+function modelCatalogMetadata(state, platform, modelNames) {
+  const raw = readFixedOutput(state.openclawBin, ["models", "list", "--all", "--json"], 30_000);
+  if (!raw) return new Map();
+  try {
+    const parsed = JSON.parse(raw);
+    const rows = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.models) ? parsed.models : parsed?.items);
+    if (!Array.isArray(rows)) return new Map();
+    const wanted = new Set(modelNames);
+    const result = new Map();
+    for (const row of rows) {
+      const key = String(row?.key ?? "");
+      const prefix = `${platform}/`;
+      if (!key.startsWith(prefix)) continue;
+      const modelId = key.slice(prefix.length);
+      if (!wanted.has(modelId)) continue;
+      const contextWindow = Number(row.contextWindow);
+      const maxTokens = Number(row.maxTokens ?? row.maxOutputTokens ?? row.maxOutput);
+      result.set(modelId, {
+        contextWindow: Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null,
+        maxTokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : null,
+      });
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
+function providerModelEntries(definition, modelNames, metadata) {
+  return modelNames.map((modelId) => {
+    const known = metadata.get(modelId);
+    const entry = {
+      id: modelId,
+      name: `${definition.label} ${modelId}`,
+      input: ["text"],
+    };
+    if (known?.contextWindow) {
+      entry.contextWindow = known.contextWindow;
+      entry.contextTokens = known.contextWindow;
+    }
+    if (known?.maxTokens) entry.maxTokens = known.maxTokens;
+    return entry;
   });
 }
 
@@ -415,6 +476,122 @@ function readBackupStatus() {
     return `备份状态：${local}；${cloudAccess}；${cloudSuccess}。`;
   } catch {
     return "备份状态暂时无法读取，请稍后再试。";
+  }
+}
+
+function jobNextRunAtMs(job) {
+  const fromState = Number(job?.state?.nextRunAtMs);
+  if (Number.isFinite(fromState) && fromState > 0) return fromState;
+  const fromSchedule = Date.parse(String(job?.schedule?.at ?? ""));
+  return Number.isFinite(fromSchedule) ? fromSchedule : null;
+}
+
+const INTERNAL_REMINDER_NAMES = new Set(["系统监控通知", "备份失败通知", "每月备份演练结果"]);
+
+function allPendingWeChatReminders(state) {
+  const raw = readFixedOutput(state.openclawBin, ["cron", "list", "--all", "--json"], 20_000);
+  if (raw === null) throw new Error("cron list unavailable");
+  const parsed = JSON.parse(raw);
+  const jobs = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.jobs) ? parsed.jobs : []);
+  return jobs
+    .filter((job) => job?.enabled !== false)
+    .filter((job) => job?.schedule?.kind === "at")
+    .filter((job) => job?.payload?.kind === "agentTurn")
+    .filter((job) => job?.delivery?.mode === "announce" && job?.delivery?.channel === "openclaw-weixin")
+    .filter((job) => !INTERNAL_REMINDER_NAMES.has(String(job?.name ?? "").trim()))
+    .map((job) => ({ ...job, nextRunAtMs: jobNextRunAtMs(job) }))
+    .filter((job) => Number.isFinite(job.nextRunAtMs) && job.nextRunAtMs > Date.now())
+    .sort((left, right) => left.nextRunAtMs - right.nextRunAtMs);
+}
+
+function reminderDisplayName(job) {
+  const name = String(job?.name ?? "提醒").trim().replace(/\s+/g, " ");
+  return name.length > 50 ? `${name.slice(0, 50)}…` : name;
+}
+
+function reminderTime(job) {
+  return new Date(job.nextRunAtMs).toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function allRemindersReply(state) {
+  try {
+    const jobs = allPendingWeChatReminders(state);
+    if (jobs.length === 0) return "目前没有尚未执行的提醒。";
+    const lines = jobs.map((job, index) => `${index + 1}. ${reminderTime(job)}：${reminderDisplayName(job)}`);
+    return `所有尚未执行的提醒共 ${jobs.length} 条：\n${lines.join("\n")}\n\n要取消其中一条，直接发送“取消提醒 2”；要全部取消，发送“取消所有提醒”。`;
+  } catch {
+    return "暂时无法读取所有提醒，请稍后再试。";
+  }
+}
+
+function reminderIndexFromText(input) {
+  const match = normalizeNaturalText(input).match(/^取消(?:第)?(\d+)(?:条)?提醒$/);
+  if (!match) return null;
+  const index = Number(match[1]);
+  return Number.isSafeInteger(index) && index > 0 ? index : null;
+}
+
+function cancelReminderByIndexReply(state, index) {
+  try {
+    const job = allPendingWeChatReminders(state)[index - 1];
+    if (!job) return `没有找到第 ${index} 条提醒。先发送“查看所有提醒”确认一下清单。`;
+    const jobId = String(job?.jobId ?? job?.id ?? "");
+    if (!jobId) throw new Error("missing job id");
+    runOpenClaw(state, ["cron", "rm", jobId]);
+    return `已取消第 ${index} 条提醒：${reminderTime(job)} 的“${reminderDisplayName(job)}”。`;
+  } catch {
+    return "取消这条提醒时没有完成。现有提醒已保留，请稍后再试。";
+  }
+}
+
+function cancelAllRemindersReply(state) {
+  try {
+    const jobs = allPendingWeChatReminders(state);
+    if (jobs.length === 0) return "目前没有尚未执行的提醒，所以没有删除任何内容。";
+    let removed = 0;
+    for (const job of jobs) {
+      const jobId = String(job?.jobId ?? job?.id ?? "");
+      if (!jobId) continue;
+      runOpenClaw(state, ["cron", "rm", jobId]);
+      removed += 1;
+    }
+    return `已取消所有尚未执行的提醒，共 ${removed} 条。已经送达的提醒和系统任务都没有动。`;
+  } catch {
+    return "取消所有提醒时没有完成。现有提醒已保留，请稍后再试。";
+  }
+}
+
+function readDiskDetails() {
+  try {
+    const df = readFixedOutput("/bin/df", ["-P", "/"]);
+    const line = df?.split("\n").find((entry) => /\s\/\s*$/.test(entry));
+    const columns = line?.trim().split(/\s+/) ?? [];
+    const disk = columns.length >= 5 ? `磁盘已用 ${columns[4]}，可用 ${columns[3]}` : "磁盘总览暂时无法读取";
+    const directories = [
+      ["系统目录", "/usr"],
+      ["服务数据", "/var"],
+      ["管理员文件", "/root"],
+      ["应用目录", "/opt"],
+      ["临时文件", "/tmp"],
+      ["用户目录", "/home"],
+    ];
+    const details = directories.map(([label, directory]) => {
+      const output = readFixedOutput("/usr/bin/du", ["-sx", "-B1M", directory]);
+      const size = Number(output?.match(/^(\d+)/)?.[1] ?? 0);
+      return { label, size };
+    }).filter((item) => item.size > 0).sort((left, right) => right.size - left.size).slice(0, 4);
+    const largest = details.length ? details.map((item) => `${item.label}约 ${item.size}MB`).join("、") : "暂未读取到目录占用";
+    return `磁盘明细：${disk}；主要占用为 ${largest}。`;
+  } catch {
+    return "磁盘明细暂时无法读取，请稍后再试。";
   }
 }
 
@@ -667,15 +844,7 @@ function addProvider(state, platform, apiKey, model, customBaseUrl, customApi) {
   const id = providerId(platform);
   const record = state.providers[platform] ?? { label: definition.label, models: [] };
   const modelNames = record.models.includes(model) ? record.models : [...record.models, model];
-  // Do not invent a context limit for newly added third-party models. The
-  // installer synchronizes every model for which OpenClaw's catalog has
-  // authoritative native metadata; unknown custom models keep no fake cap.
-  const modelEntries = modelNames.map((modelId) => ({
-    id: modelId,
-    name: `${definition.label} ${modelId}`,
-    input: ["text"],
-    maxTokens: 8192,
-  }));
+  const modelEntries = providerModelEntries(definition, modelNames, modelCatalogMetadata(state, platform, modelNames));
   runOpenClaw(state, [
     "config",
     "set",
@@ -708,6 +877,37 @@ function addProvider(state, platform, apiKey, model, customBaseUrl, customApi) {
   return `${id}/${model}`;
 }
 
+function addModelToProvider(state, platform, model) {
+  if (!model || model.length > MAX_MODEL_LENGTH || /\s/.test(model)) throw new Error("invalid model");
+  const definition = PLATFORMS[platform];
+  const record = state.providers[platform];
+  if (!definition || !record) throw new Error("provider not managed");
+  if (record.models.includes(model)) return { ref: `${providerId(platform)}/${model}`, added: false };
+
+  const modelNames = [...record.models, model];
+  const modelEntries = providerModelEntries(definition, modelNames, modelCatalogMetadata(state, platform, modelNames));
+  const id = providerId(platform);
+  runOpenClaw(state, [
+    "config",
+    "set",
+    `models.providers.${id}.models`,
+    JSON.stringify(modelEntries),
+    "--strict-json",
+    "--merge",
+  ]);
+  runOpenClaw(state, [
+    "config",
+    "set",
+    "agents.defaults.models",
+    JSON.stringify({ [`${id}/${model}`]: { alias: `${definition.label}-${model}` } }),
+    "--strict-json",
+    "--merge",
+  ]);
+  record.models = modelNames;
+  saveState(state);
+  return { ref: `${id}/${model}`, added: true };
+}
+
 function helpMessage() {
   return [
     "AI Key 管理命令（只限认领者）：",
@@ -715,6 +915,7 @@ function helpMessage() {
     "/aikey claim 一次性认领码",
     "/aikey platforms",
     "/aikey add 平台 API_KEY 模型名",
+    "/aikey model-add 平台 模型名   （已有 API 时新增模型，不必再发 Key）",
     "/aikey add custom API_KEY 模型名 https://接口地址/v1 openai-completions",
     "/aikey list",
     "/aikey use 平台 模型名   （改默认模型）",
@@ -722,11 +923,13 @@ function helpMessage() {
     "/aikey fallback add 平台 模型名",
     "/aikey fallback clear",
     "/aikey status [all|compaction|memory|system|searxng|gateway]",
-    "自然语言：帮我添加 OpenAI API：你的Key，模型：gpt-4.1",
+    "自然语言：添加 DeepSeek，API：你的Key，模型：deepseek-chat",
+    "新增模型：给 DeepSeek 添加模型：deepseek-reasoner（已有 API 时无需再发 Key）",
     "删除：帮我删除 Gemini 的 API 配置，然后回复 确认删除 Gemini。",
     "状态查询：上下文压缩阈值是多少、查内存和 swap、查 SearXNG 状态、查长期记忆索引。",
     "会话：直接发送“新开对话”即可开始新的对话。",
-    "运维：查看备份、重新索引记忆；立即备份后发送“确认立即备份”；清理空间后发送“确认清理空间”。",
+    "提醒：查看所有提醒；取消提醒 2；取消所有提醒后发送“确认取消所有提醒”。",
+    "运维：查看备份、查看磁盘明细、重新索引记忆；立即备份后发送“确认立即备份”；清理空间后发送“确认清理空间”。",
     "支持平台：deepseek、siliconflow、doubao、kimi、openai、gemini、claude、grok、openrouter、qwen、zhipu。",
     "API Key 不会在回复中显示；请勿在群聊中发送。",
   ].join("\n");
@@ -793,6 +996,18 @@ export default definePluginEntry({
             return text("添加失败。检查平台名、模型名和接口格式；Key 未显示也未写入回复。发送 /aikey help 查看格式。");
           }
         }
+        if (action === "model-add") {
+          const [platformRaw, model] = parts;
+          const platform = (platformRaw ?? "").toLowerCase();
+          try {
+            const result = addModelToProvider(state, platform, model);
+            return text(result.added
+              ? `已为 ${platform} 新增模型 ${model}。默认模型没有改变；需要切换时发送 /model ${result.ref} -s。`
+              : `${platform}/${model} 已在模型列表中，默认模型没有改变。`);
+          } catch {
+            return text("新增模型失败。请确认该平台已通过 /aikey add 添加，且模型名填写正确。Key 未显示也未写入回复。");
+          }
+        }
         if (action === "fallback" && parts[0] === "clear") {
           try {
             runOpenClaw(state, ["models", "fallbacks", "clear"]);
@@ -846,9 +1061,77 @@ export default definePluginEntry({
           return { handled: true, reply: text("重要操作确认组件暂时不可用。请在服务器重新运行安装脚本。") };
         }
 
+        const naturalModelAddition = parseNaturalModelAddition(event.cleanedBody);
+        if (naturalModelAddition) {
+          const denied = requireOwner(ctx, state);
+          if (denied) return { handled: true, reply: denied };
+          try {
+            const result = addModelToProvider(state, naturalModelAddition.platform, naturalModelAddition.model);
+            return {
+              handled: true,
+              reply: text(result.added
+                ? `已为 ${naturalModelAddition.platform} 新增模型 ${naturalModelAddition.model}。默认模型没有改变；需要切换时发送 /model ${result.ref} -s。`
+                : `${naturalModelAddition.platform}/${naturalModelAddition.model} 已在模型列表中，默认模型没有改变。`),
+            };
+          } catch {
+            return { handled: true, reply: text("新增模型失败。请确认该平台已添加过 API，且模型名填写正确。") };
+          }
+        }
+
+        const naturalProviderRequest = parseNaturalRequest(event.cleanedBody);
+        if (naturalProviderRequest?.kind === "add") {
+          const denied = requireOwner(ctx, state);
+          if (denied) return { handled: true, reply: denied };
+          if (!naturalProviderRequest.model) {
+            return {
+              handled: true,
+              reply: text(`已识别 ${naturalProviderRequest.platform}。还缺模型名；为避免猜错模型，请把 API 和模型名放在同一条消息，例如：添加 ${naturalProviderRequest.platform}，API：你的密钥，模型：模型名。`),
+            };
+          }
+          try {
+            const ref = addProvider(state, naturalProviderRequest.platform, naturalProviderRequest.apiKey, naturalProviderRequest.model);
+            scheduleRestart(state);
+            return {
+              handled: true,
+              reply: text(`已添加 ${naturalProviderRequest.platform}/${naturalProviderRequest.model}，密钥未回显。网关将在约两秒后重启；之后可发送 /model ${ref} -s 切换当前对话。`),
+            };
+          } catch {
+            return { handled: true, reply: text("添加失败。请检查平台名、模型名和密钥格式；密钥未显示也未写入回复。") };
+          }
+        }
+
         if (isOneOfNaturalCommands(event.cleanedBody, ["查看备份", "检查备份", "备份状态"])) {
           const denied = requireOwner(ctx, state);
           return { handled: true, reply: denied ?? text(readBackupStatus()) };
+        }
+
+        if (isOneOfNaturalCommands(event.cleanedBody, ["查看所有提醒", "查看提醒", "所有提醒"])) {
+          const denied = requireOwner(ctx, state);
+          return { handled: true, reply: denied ?? text(allRemindersReply(state)) };
+        }
+
+        const reminderIndex = reminderIndexFromText(event.cleanedBody);
+        if (reminderIndex !== null) {
+          const denied = requireOwner(ctx, state);
+          return { handled: true, reply: denied ?? text(cancelReminderByIndexReply(state, reminderIndex)) };
+        }
+
+        if (isOneOfNaturalCommands(event.cleanedBody, ["取消所有提醒"])) {
+          const denied = requireOwner(ctx, state);
+          return {
+            handled: true,
+            reply: denied ?? text("我会重新读取所有尚未执行的提醒并全部取消；系统任务、已送达提醒不会动。确定的话，直接单独发送“确认取消所有提醒”即可，不依赖前一条消息。"),
+          };
+        }
+
+        if (isOneOfNaturalCommands(event.cleanedBody, ["确认取消所有提醒"])) {
+          const denied = requireOwner(ctx, state);
+          return { handled: true, reply: denied ?? text(cancelAllRemindersReply(state)) };
+        }
+
+        if (isOneOfNaturalCommands(event.cleanedBody, ["查看磁盘明细", "查磁盘明细", "磁盘明细"])) {
+          const denied = requireOwner(ctx, state);
+          return { handled: true, reply: denied ?? text(readDiskDetails()) };
         }
 
         if (isOneOfNaturalCommands(event.cleanedBody, ["立即备份", "马上备份", "现在备份"])) {
