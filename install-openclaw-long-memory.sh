@@ -106,18 +106,34 @@ if [[ -z "$siliconflow_api_key" ]]; then
   exit 1
 fi
 
-# Current OpenClaw validates every assignment. Setting the first memory key is
-# also an explicit compatibility check: old 2026.7 builds reject this schema.
+# OpenClaw 2026.7.x uses the legacy, per-agent schema. Later releases moved
+# this to top-level memory.search. Detect the installed schema without
+# replacing any config subtree: config set only changes individual leaves.
 config_changed=1
-openclaw config set memory.search.enabled true
-openclaw config set memory.search.provider openai-compatible
-openclaw config set memory.search.model BAAI/bge-m3
-openclaw config set memory.search.fallback none
-openclaw config set memory.search.remote.baseUrl https://api.siliconflow.cn/v1
-openclaw config set memory.search.remote.apiKey "$siliconflow_api_key"
-openclaw config set memory.search.rememberAcrossConversations true
-openclaw config set memory.search.sources '["memory","sessions"]' --strict-json
-openclaw config set experimental.sessionMemory true
+if openclaw config set agents.defaults.memorySearch.enabled true; then
+  memory_schema=legacy
+  printf 'Using the OpenClaw 2026.7-compatible memorySearch schema.\n'
+  openclaw config set agents.defaults.memorySearch.provider openai
+  openclaw config set agents.defaults.memorySearch.model BAAI/bge-m3
+  openclaw config set agents.defaults.memorySearch.fallback none
+  openclaw config set agents.defaults.memorySearch.remote.baseUrl https://api.siliconflow.cn/v1
+  openclaw config set agents.defaults.memorySearch.remote.apiKey "$siliconflow_api_key"
+  openclaw config set agents.defaults.memorySearch.remote.batch.enabled false
+  openclaw config set agents.defaults.memorySearch.experimental.sessionMemory true
+  openclaw config set agents.defaults.memorySearch.sources '["memory","sessions"]' --strict-json
+else
+  memory_schema=current
+  printf 'Using the current memory.search schema.\n'
+  openclaw config set memory.search.enabled true
+  openclaw config set memory.search.provider openai-compatible
+  openclaw config set memory.search.model BAAI/bge-m3
+  openclaw config set memory.search.fallback none
+  openclaw config set memory.search.remote.baseUrl https://api.siliconflow.cn/v1
+  openclaw config set memory.search.remote.apiKey "$siliconflow_api_key"
+  openclaw config set memory.search.rememberAcrossConversations true
+  openclaw config set memory.search.sources '["memory","sessions"]' --strict-json
+  openclaw config set experimental.sessionMemory true
+fi
 unset siliconflow_api_key
 
 workspace_dir=/root/.openclaw/workspace
