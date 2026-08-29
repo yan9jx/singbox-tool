@@ -947,6 +947,104 @@ cat > /etc/systemd/system/openclaw-gateway.service.d/locale.conf <<'EOF'
 [Service]
 Environment=OPENCLAW_LOCALE=zh-CN
 EOF
+
+# OpenClaw 2026.7 still hard-codes several cron prompt templates to English.
+# Apply a narrow, idempotent local patch at every Gateway start so reminder
+# prompts themselves are Chinese instead of relying on a send-time interceptor.
+cat > /usr/local/sbin/openclaw-zh-cron-template-patch.js <<'NODE'
+"use strict";
+
+const fs = require("node:fs");
+const path = require("node:path");
+const childProcess = require("node:child_process");
+
+const distDir = "/usr/lib/node_modules/openclaw/dist";
+const backupDir = "/root/.openclaw/backups/zh-cron-template-patch";
+
+function findDistFiles(prefix) {
+  const matches = fs.readdirSync(distDir)
+    .filter((name) => name.startsWith(prefix) && name.endsWith(".js"))
+    .sort()
+    .map((name) => path.join(distDir, name));
+  if (matches.length === 0) {
+    console.warn(`[中文定时提示补丁] 未找到 ${prefix}*.js，跳过该类文件。`);
+  }
+  return matches;
+}
+
+function patchFile(filePath, replacements) {
+  const original = fs.readFileSync(filePath, "utf8");
+  let updated = original;
+  let changed = false;
+  let recognized = false;
+  for (const [from, to] of replacements) {
+    if (updated.includes(from)) {
+      updated = updated.split(from).join(to);
+      changed = true;
+      recognized = true;
+    } else if (updated.includes(to)) recognized = true;
+  }
+  if (!recognized || !changed) return;
+
+  fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+  const backupPath = path.join(backupDir, `${path.basename(filePath)}.before-zh-cron`);
+  if (!fs.existsSync(backupPath)) fs.writeFileSync(backupPath, original, { mode: 0o600 });
+
+  const tempPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.zh-cron-tmp.js`);
+  fs.writeFileSync(tempPath, updated, { mode: 0o644 });
+  try {
+    childProcess.execFileSync(process.execPath, ["--check", tempPath], { stdio: "pipe" });
+    fs.renameSync(tempPath, filePath);
+    console.log(`[中文定时提示补丁] 已更新 ${path.basename(filePath)}`);
+  } catch (error) {
+    try { fs.unlinkSync(tempPath); } catch {}
+    throw new Error(`补丁语法校验失败，未修改 ${path.basename(filePath)}：${error.message}`);
+  }
+}
+
+function patchDistFiles(prefix, replacements) {
+  for (const filePath of findDistFiles(prefix)) patchFile(filePath, replacements);
+}
+
+try {
+  patchDistFiles("isolated-agent-", [
+    ["with an explicit target", "，请明确指定接收人"],
+    ["for the current chat", "，发送到当前聊天"],
+    ["Use the message tool if you need to notify the user directly ${targetHint}. If you do not send directly, your final plain-text reply will be delivered automatically.", "如需直接通知用户，请使用消息工具${targetHint}。如果不直接发送，最终纯文本回复会自动推送。"],
+    ["Return your response as plain text; it will be delivered automatically. If the task explicitly calls for messaging a specific external recipient, note who/where it should go instead of sending it yourself.", "请直接用中文输出回复；最终纯文本会自动推送给用户。如任务明确要求联系特定外部接收人，请说明应发送给谁或发送到哪里，不要自行额外发送。"],
+  ]);
+  patchDistFiles("date-time-", [
+    ["new Intl.DateTimeFormat(\"en-US\", {\n\t\t\ttimeZone,\n\t\t\tweekday: \"long\",", "new Intl.DateTimeFormat(\"zh-CN\", {\n\t\t\ttimeZone,\n\t\t\tweekday: \"long\","],
+    ["return `${map.weekday}, ${map.month} ${dayNum}${suffix}, ${map.year} - ${timePart}`;", "return `${map.year}年${map.month}月${dayNum}日 ${map.weekday} ${timePart}`;"],
+    ["return `${map.year}年${map.month}${dayNum}日 ${map.weekday} ${timePart}`;", "return `${map.year}年${map.month}月${dayNum}日 ${map.weekday} ${timePart}`;"],
+  ]);
+  patchDistFiles("current-time-", [
+    ["timeLine: `Current time: ${formattedTime} (${userTimezone})\\nReference UTC: ${date.toISOString().replace(\"T\", \" \").slice(0, 16) + \" UTC\"}`", "timeLine: `当前时间：${formattedTime}\\n参考世界协调时间：${date.toISOString().replace(\"T\", \" \").slice(0, 16)}`"],
+    ["/^Current time: .+? \\([^)]+\\)\\nReference UTC: \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2} UTC$/gm", "/^当前时间：.+?\\n参考世界协调时间：\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$/gm"],
+    ["(?=Current time:)", "(?=当前时间：)"],
+  ]);
+  patchDistFiles("selection-", [
+    ["Current time: ", "当前时间："],
+  ]);
+  patchDistFiles("cron-", [
+    ["schedule.at is in the past: ${resolveTimestampMsToIsoString(atMs)} (${Math.floor(-diffMs / ONE_MINUTE_MS)} minutes ago). Current time: ${nowDate}", "计划执行时间已过：${resolveTimestampMsToIsoString(atMs)}（已过去 ${Math.floor(-diffMs / ONE_MINUTE_MS)} 分钟）。当前时间：${nowDate}"],
+  ]);
+  patchFile(path.join(distDir, "extensions", "memory-core", "index.js"), [
+    ["Current time:", "当前时间："],
+  ]);
+  console.log("[中文定时提示补丁] 检查完成。");
+} catch (error) {
+  // A changed upstream bundle must never stop the running Gateway. The warning
+  // is visible in journald and can be reviewed before adjusting this installer.
+  console.warn(`[中文定时提示补丁] 未完成：${error.message}`);
+}
+NODE
+chmod 700 /usr/local/sbin/openclaw-zh-cron-template-patch.js
+cat > /etc/systemd/system/openclaw-gateway.service.d/zh-cron-templates.conf <<'EOF'
+[Service]
+ExecStartPre=/usr/bin/node /usr/local/sbin/openclaw-zh-cron-template-patch.js
+EOF
+node /usr/local/sbin/openclaw-zh-cron-template-patch.js
 systemctl daemon-reload
 
 # The owner explicitly requested natural-language host actions from WeChat
