@@ -394,6 +394,38 @@ function readGatewayStatus(state) {
   return `微信机器人：${active}；${wechat}。`;
 }
 
+function readBackupStatus() {
+  const backupDir = "/root/.openclaw/backups/automatic";
+  const successMark = "/var/lib/openclaw-ops/onedrive-backup.last-success";
+  try {
+    const archives = fs.readdirSync(backupDir)
+      .filter((name) => /^openclaw-auto-.*\.tgz$/.test(name))
+      .map((name) => ({ name, stat: fs.statSync(path.join(backupDir, name)) }))
+      .sort((left, right) => right.stat.mtimeMs - left.stat.mtimeMs);
+    const latest = archives[0];
+    const local = latest
+      ? `本机备份正常，最近一次为 ${new Date(latest.stat.mtimeMs).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}`
+      : "未找到本机自动备份";
+    const rcloneBin = fs.existsSync("/usr/bin/rclone") ? "/usr/bin/rclone" : "/usr/local/bin/rclone";
+    const cloudProbe = fs.existsSync(rcloneBin) ? readFixedOutput(rcloneBin, ["lsf", "onedrive-crypt:"], 15_000) : null;
+    const cloudAccess = cloudProbe === null ? "OneDrive 当前无法访问" : "OneDrive 可访问";
+    const cloudSuccess = fs.existsSync(successMark)
+      ? `最近同步成功为 ${new Date(fs.statSync(successMark).mtimeMs).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}`
+      : "尚未找到 OneDrive 成功记录";
+    return `备份状态：${local}；${cloudAccess}；${cloudSuccess}。`;
+  } catch {
+    return "备份状态暂时无法读取，请稍后再试。";
+  }
+}
+
+function startKnownSystemService(service) {
+  const child = spawn("/bin/systemctl", ["start", "--no-block", service], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+}
+
 function normalizeStatusTopic(value) {
   const source = normalizeNaturalText(value).toLowerCase();
   if (/压缩|compaction|上下文/.test(source)) return "compaction";
@@ -589,6 +621,14 @@ function isNaturalSessionResetRequest(input) {
   ]).has(normalized);
 }
 
+function normalizedNaturalCommand(input) {
+  return String(input ?? "").trim().replace(/[\s，。！？、.!?]/g, "");
+}
+
+function isOneOfNaturalCommands(input, commands) {
+  return commands.includes(normalizedNaturalCommand(input));
+}
+
 function requestProviderDelete(ctx, state, platform) {
   const record = state.providers[platform];
   if (!record) return text("这个平台没有由 AI Key 管理器添加的 API 配置。");
@@ -686,6 +726,7 @@ function helpMessage() {
     "删除：帮我删除 Gemini 的 API 配置，然后回复 确认删除 Gemini。",
     "状态查询：上下文压缩阈值是多少、查内存和 swap、查 SearXNG 状态、查长期记忆索引。",
     "会话：直接发送“新开对话”即可开始新的对话。",
+    "运维：查看备份、重新索引记忆；立即备份后发送“确认立即备份”；清理空间后发送“确认清理空间”。",
     "支持平台：deepseek、siliconflow、doubao、kimi、openai、gemini、claude、grok、openrouter、qwen、zhipu。",
     "API Key 不会在回复中显示；请勿在群聊中发送。",
   ].join("\n");
@@ -803,6 +844,60 @@ export default definePluginEntry({
           state = loadState();
         } catch {
           return { handled: true, reply: text("重要操作确认组件暂时不可用。请在服务器重新运行安装脚本。") };
+        }
+
+        if (isOneOfNaturalCommands(event.cleanedBody, ["查看备份", "检查备份", "备份状态"])) {
+          const denied = requireOwner(ctx, state);
+          return { handled: true, reply: denied ?? text(readBackupStatus()) };
+        }
+
+        if (isOneOfNaturalCommands(event.cleanedBody, ["立即备份", "马上备份", "现在备份"])) {
+          const denied = requireOwner(ctx, state);
+          return {
+            handled: true,
+            reply: denied ?? text("可以。如要执行，直接单独发送“确认立即备份”即可；不需要先发送这句话。我会马上创建本机备份并同步到 OneDrive，失败会立即提醒你。"),
+          };
+        }
+
+        if (isOneOfNaturalCommands(event.cleanedBody, ["确认立即备份"])) {
+          const denied = requireOwner(ctx, state);
+          if (denied) return { handled: true, reply: denied };
+          try {
+            startKnownSystemService("openclaw-server-backup.service");
+            return { handled: true, reply: text("已开始立即备份。本机备份会同步到 OneDrive；完成后会更新备份记录，如有失败会马上提醒你。") };
+          } catch {
+            return { handled: true, reply: text("暂时无法启动备份任务，请稍后再试。") };
+          }
+        }
+
+        if (isOneOfNaturalCommands(event.cleanedBody, ["重新索引记忆", "刷新记忆索引", "更新记忆索引"])) {
+          const denied = requireOwner(ctx, state);
+          if (denied) return { handled: true, reply: denied };
+          try {
+            startKnownSystemService("openclaw-memory-index.service");
+            return { handled: true, reply: text("已开始重新索引长期记忆，完成后新资料就能更好地被检索到。") };
+          } catch {
+            return { handled: true, reply: text("暂时无法启动记忆索引，请稍后再试。") };
+          }
+        }
+
+        if (isOneOfNaturalCommands(event.cleanedBody, ["清理空间", "清理缓存"])) {
+          const denied = requireOwner(ctx, state);
+          return {
+            handled: true,
+            reply: denied ?? text("这会清理可再生缓存、过期日志和临时文件，不会碰 OpenClaw 数据或备份。如要执行，直接单独发送“确认清理空间”即可；不需要先发送这句话。"),
+          };
+        }
+
+        if (isOneOfNaturalCommands(event.cleanedBody, ["确认清理空间"])) {
+          const denied = requireOwner(ctx, state);
+          if (denied) return { handled: true, reply: denied };
+          try {
+            startKnownSystemService("openclaw-space-cleanup.service");
+            return { handled: true, reply: text("已开始清理空间，只会处理可再生缓存、过期日志和临时文件，不会删除 OpenClaw 数据或备份。") };
+          } catch {
+            return { handled: true, reply: text("暂时无法启动空间清理，请稍后再试。") };
+          }
         }
 
         if (isNaturalSessionResetRequest(event.cleanedBody)) {
