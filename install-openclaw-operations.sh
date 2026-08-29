@@ -70,6 +70,9 @@ if command -v rclone >/dev/null 2>&1 && rclone listremotes 2>/dev/null | grep -q
     issues+=("OneDrive 异地备份已超过 8 天未成功")
   fi
 fi
+if systemctl is-failed --quiet openclaw-space-cleanup.service 2>/dev/null; then
+  issues+=("每周空间清理任务失败")
+fi
 
 get_session_key() {
   node - "$admin_state" "$session_file" <<'NODE'
@@ -161,6 +164,50 @@ chmod 600 "$state_file"
 MONITOR
 chmod 700 /usr/local/sbin/openclaw-health-monitor.sh
 
+cat > /usr/local/sbin/openclaw-space-cleanup.sh <<'CLEANUP'
+#!/usr/bin/env bash
+# Only remove regenerable caches. Never remove OpenClaw data, backups,
+# configured Docker images, or user files.
+set -Eeuo pipefail
+
+state_dir=/var/lib/openclaw-ops
+state_file="$state_dir/space-cleanup.last"
+mkdir -p "$state_dir"
+chmod 700 "$state_dir"
+
+available_before_kb=$(df -Pk / | awk 'END {print $4}')
+
+# Root's Go module/build caches are reproducible downloads and compiled output.
+# systemd does not always infer root's Go cache paths, so pin those paths only.
+if command -v go >/dev/null 2>&1 && [[ -d /root/go/pkg/mod || -d /root/.cache/go-build ]]; then
+  (
+    export GOPATH=/root/go
+    export GOMODCACHE=/root/go/pkg/mod
+    export GOCACHE=/root/.cache/go-build
+    go clean -modcache -cache
+  )
+fi
+
+# Keep package metadata but discard downloaded package archives.
+apt-get clean
+
+# Retain two weeks of logs; systemd decides exactly which temporary files are safe.
+journalctl --vacuum-time=14d
+systemd-tmpfiles --clean
+
+# This removes dangling images only. It never removes an image used by SearXNG.
+if command -v docker >/dev/null 2>&1; then
+  docker image prune --filter dangling=true --force
+fi
+
+available_after_kb=$(df -Pk / | awk 'END {print $4}')
+freed_kb=$((available_after_kb - available_before_kb))
+printf 'time=%s\nfreed_kb=%s\n' "$(date --iso-8601=seconds)" "$freed_kb" > "$state_file"
+chmod 600 "$state_file"
+printf '空间清理完成：释放约 %sMB\n' "$((freed_kb / 1024))"
+CLEANUP
+chmod 700 /usr/local/sbin/openclaw-space-cleanup.sh
+
 cat > /usr/local/sbin/openclaw-server-backup.sh <<'BACKUP'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -251,6 +298,30 @@ Unit=openclaw-daily-health-report.service
 WantedBy=timers.target
 EOF
 
+cat > /etc/systemd/system/openclaw-space-cleanup.service <<'EOF'
+[Unit]
+Description=Safely clean regenerable VPS caches
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/openclaw-space-cleanup.sh
+EOF
+
+cat > /etc/systemd/system/openclaw-space-cleanup.timer <<'EOF'
+[Unit]
+Description=Clean regenerable VPS caches every Sunday
+
+[Timer]
+OnCalendar=Sun *-*-* 05:10:00
+Persistent=true
+Unit=openclaw-space-cleanup.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
 cat > /etc/systemd/system/openclaw-memory-index.service <<'EOF'
 [Unit]
 Description=Incremental OpenClaw long-memory index
@@ -299,12 +370,13 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now openclaw-health-monitor.timer openclaw-daily-health-report.timer openclaw-memory-index.timer openclaw-server-backup.timer
+systemctl enable --now openclaw-health-monitor.timer openclaw-daily-health-report.timer openclaw-memory-index.timer openclaw-server-backup.timer openclaw-space-cleanup.timer
 systemctl start openclaw-health-monitor.service
 openclaw memory index --agent main
 
 echo "已完成："
 echo "- VPS 监控：每 5 分钟，仅异常与恢复时微信告警；不自动重启服务。"
 echo "- 每日简报：每天 09:00 微信推送内存、磁盘、服务与备份摘要。"
+echo "- 空间清理：每周日 05:10 清理 Go/软件包缓存、过期日志、系统临时文件和 Docker 悬挂镜像。"
 echo "- 长期记忆：每 6 小时增量索引。"
 echo "- VPS 备份：每周日凌晨执行，本机与已配置的 OneDrive 各保留最近 4 份。"
