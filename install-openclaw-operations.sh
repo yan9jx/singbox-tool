@@ -27,6 +27,14 @@ openclaw_bin="$(command -v openclaw)"
 mkdir -p "$state_dir"
 chmod 700 "$state_dir"
 
+daily_report=false
+if [[ "${1:-}" == "--daily-report" ]]; then
+  daily_report=true
+elif [[ $# -gt 0 ]]; then
+  echo "未知参数：$1" >&2
+  exit 2
+fi
+
 issues=()
 if ! systemctl is-active --quiet openclaw-gateway.service; then
   issues+=("OpenClaw 网关未运行")
@@ -97,6 +105,32 @@ enqueue_notice() {
     --message "请只用一两句自然、关切的简体中文把下面系统通知直接告诉用户；不要解释内部机制、不要输出英文或命令：$text" \
     --description "VPS 系统监控通知" >/dev/null
 }
+
+if [[ "$daily_report" == true ]]; then
+  total_mb=$(free -m | awk '/^Mem:/ {print $2}')
+  gateway_status="正常"
+  searxng_status="正常"
+  systemctl is-active --quiet openclaw-gateway.service || gateway_status="异常"
+  docker inspect -f '{{.State.Running}}' openclaw-searxng 2>/dev/null | grep -qx true || searxng_status="异常"
+
+  local_backup_status="未找到"
+  if [[ -n "$latest_backup" ]]; then
+    local_backup_status="$(date -d "@${latest_backup%.*}" '+%m月%d日 %H:%M')"
+  fi
+
+  cloud_backup_status="未配置"
+  if command -v rclone >/dev/null 2>&1 && rclone listremotes 2>/dev/null | grep -qx 'onedrive-crypt:'; then
+    cloud_success=/var/lib/openclaw-ops/onedrive-backup.last-success
+    if [[ -f "$cloud_success" ]]; then
+      cloud_backup_status="$(date -d "@$(stat -c %Y "$cloud_success")" '+%m月%d日 %H:%M')"
+    else
+      cloud_backup_status="未成功记录"
+    fi
+  fi
+
+  enqueue_notice "🩺 早上好，VPS 健康简报：内存可用 ${available_mb}MB（共 ${total_mb}MB），交换分区已用 ${swap_used_mb}MB，磁盘已用 ${disk_used_pct}%；网关 ${gateway_status}，SearXNG ${searxng_status}；最近本机备份：${local_backup_status}，OneDrive 备份：${cloud_backup_status}。" || exit 0
+  exit 0
+fi
 
 current="正常"
 if (( ${#issues[@]} > 0 )); then
@@ -193,6 +227,30 @@ Unit=openclaw-health-monitor.service
 WantedBy=timers.target
 EOF
 
+cat > /etc/systemd/system/openclaw-daily-health-report.service <<'EOF'
+[Unit]
+Description=Send OpenClaw daily VPS health report to WeChat
+After=network-online.target docker.service openclaw-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/openclaw-health-monitor.sh --daily-report
+EOF
+
+cat > /etc/systemd/system/openclaw-daily-health-report.timer <<'EOF'
+[Unit]
+Description=Send OpenClaw daily VPS health report at 09:00
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+Unit=openclaw-daily-health-report.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
 cat > /etc/systemd/system/openclaw-memory-index.service <<'EOF'
 [Unit]
 Description=Incremental OpenClaw long-memory index
@@ -241,11 +299,12 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now openclaw-health-monitor.timer openclaw-memory-index.timer openclaw-server-backup.timer
+systemctl enable --now openclaw-health-monitor.timer openclaw-daily-health-report.timer openclaw-memory-index.timer openclaw-server-backup.timer
 systemctl start openclaw-health-monitor.service
 openclaw memory index --agent main
 
 echo "已完成："
 echo "- VPS 监控：每 5 分钟，仅异常与恢复时微信告警；不自动重启服务。"
+echo "- 每日简报：每天 09:00 微信推送内存、磁盘、服务与备份摘要。"
 echo "- 长期记忆：每 6 小时增量索引。"
 echo "- VPS 备份：每周日凌晨执行，本机与已配置的 OneDrive 各保留最近 4 份。"
