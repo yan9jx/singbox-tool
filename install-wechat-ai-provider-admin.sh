@@ -473,6 +473,17 @@ function isCronRunContext(ctx) {
   return ctx?.trigger === "cron" || (typeof ctx?.sessionKey === "string" && ctx.sessionKey.includes(":cron:"));
 }
 
+const ALLOWED_ENGLISH_TERMS = /\b(?:OpenClaw|SearXNG|Docker|Gateway|API|Key|DeepSeek|SiliconFlow|BAAI|bge|SQLite|FTS|RAM|Swap|VPS|GitHub|WeChat|Linux|Ubuntu|Windows|SSH|JSON|YAML|SQL|HTTP|HTTPS|URL|IP|TCP|UDP|DNS|TLS|cron|announce|delivery|none|sessions_send|exec|root|systemctl|node|npm|bash|PowerShell|Python|Nginx|Caddy|Cloudflare|DeepSeek|OpenAI|Claude|Gemini|Qwen|Kimi|Grok|Zhipu|Doubao)\b/gi;
+
+function hasUntranslatedEnglishProse(value) {
+  const prose = String(value ?? "")
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`[^`]*`/g, "")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(ALLOWED_ENGLISH_TERMS, "");
+  return (prose.match(/\b[A-Za-z]{3,}\b/g) ?? []).length >= 2;
+}
+
 function isWeChatReminderJob(event) {
   const targets = [event?.sessionKey, event?.job?.sessionTarget]
     .filter((value) => typeof value === "string")
@@ -860,7 +871,7 @@ export default definePluginEntry({
     api.on(
       "message_sending",
       (event, ctx) => {
-        if (!isWeChatContext(ctx) || typeof event.content !== "string") return;
+        if ((!isWeChatContext(ctx) && !isCronRunContext(ctx)) || typeof event.content !== "string") return;
         const content = event.content;
         const compact = content.trim();
         // A cron reminder must never expose the Gateway's English scheduling
@@ -912,14 +923,8 @@ export default definePluginEntry({
         // through as user-visible feedback. Code blocks, URLs and model names
         // are excluded from the language test so valid technical replies stay
         // intact when accompanied by Chinese explanation.
-        const prose = compact
-          .replace(/```[\s\S]*?```/g, "")
-          .replace(/`[^`]*`/g, "")
-          .replace(/https?:\/\/\S+/g, "");
-        const chineseChars = (prose.match(/[\u4e00-\u9fff]/g) ?? []).length;
-        const englishWords = prose.match(/[A-Za-z]{3,}/g) ?? [];
-        if (chineseChars === 0 && englishWords.length >= 4) {
-          return { content: "刚才的回复未能正确转换为中文。请重新发送问题，我会用中文重新处理。" };
+        if (hasUntranslatedEnglishProse(compact)) {
+          return { content: "刚才的回复混入了未转换的英文提示。我会用中文重新处理，请把刚才的问题再发一次。" };
         }
       },
       { priority: 100 },
