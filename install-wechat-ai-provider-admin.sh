@@ -670,102 +670,10 @@ export default definePluginEntry({
       },
     });
 
-    api.on(
-      "before_agent_reply",
-      (event, ctx) => {
-        if (!isWeChatContext(ctx)) return;
-        const statusTopic = parseNaturalStatusRequest(event.cleanedBody);
-        if (statusTopic) {
-          let state;
-          try {
-            state = loadState();
-          } catch {
-            return { handled: true, reply: text("状态查询插件暂时不可用。请在服务器重新运行安装脚本。") };
-          }
-          const denied = requireOwner(ctx, state);
-          if (denied) return { handled: true, reply: denied };
-          return { handled: true, reply: text(statusReply(state, statusTopic)) };
-        }
-        const request = parseNaturalRequest(event.cleanedBody);
-        if (!request) return;
-
-        let state;
-        try {
-          state = loadState();
-        } catch {
-          return { handled: true, reply: text("AI Key 管理插件状态文件不可用。请在服务器重新运行安装脚本。") };
-        }
-        const denied = requireOwner(ctx, state);
-        if (denied) return { handled: true, reply: denied };
-
-        if (request.kind === "delete-request") {
-          return { handled: true, reply: requestProviderDelete(ctx, state, request.platform) };
-        }
-        if (request.kind === "delete-confirm") {
-          const pending = state.pendingDelete;
-          if (!pending || pending.platform !== request.platform || pending.senderId !== ctx.senderId || pending.expiresAt < Date.now()) {
-            return { handled: true, reply: text("没有可确认的删除操作，或确认已过期。请先重新说“帮我删除该平台的 API 配置”。") };
-          }
-          try {
-            deleteProvider(state, request.platform);
-            scheduleRestart(state);
-            return {
-              handled: true,
-              reply: text(`已删除 ${request.platform} 的 API Key 和 Provider 配置；Gateway 将在约 2 秒后重启。`),
-            };
-          } catch {
-            return { handled: true, reply: text("删除失败；原有管理记录已保留，请检查 Gateway 状态后重试。") };
-          }
-        }
-
-        if (!request.model) {
-          return {
-            handled: true,
-            reply: text("已识别为添加 API，但还缺模型名。请例如发送：帮我添加 OpenAI API：你的Key，模型：gpt-4.1。"),
-          };
-        }
-
-        if (request.kind === "add") {
-          try {
-            checkModelAndKey(request.apiKey, request.model);
-            const ref = addProvider(state, request.platform, request.apiKey, request.model);
-            scheduleRestart(state);
-            return {
-              handled: true,
-              reply: text(`已添加 ${request.platform}/${request.model}，Key 未回显，也不会交给模型。Gateway 将在约 2 秒后重启。`),
-            };
-          } catch {
-            return {
-              handled: true,
-              reply: text("添加失败。请检查平台、Key 和模型名；Key 未显示也未写入回复。"),
-            };
-          }
-        }
-
-        const record = state.providers[request.platform];
-        if (!record || !record.models.includes(request.model)) {
-          return {
-            handled: true,
-            reply: text("该平台或模型尚未添加。请先发送：帮我添加该平台 API：你的Key，模型：模型名。"),
-          };
-        }
-        try {
-          const ref = `${providerId(request.platform)}/${request.model}`;
-          runOpenClaw(state, ["models", "set", ref]);
-          scheduleRestart(state);
-          return {
-            handled: true,
-            reply: text(`默认模型已切换为 ${ref}；Gateway 将在约 2 秒后重启。当前已固定模型的会话可发送 /model default -s 继承新默认值。`),
-          };
-        } catch {
-          return {
-            handled: true,
-            reply: text("模型切换失败；请稍后发送 /model status 检查。"),
-          };
-        }
-      },
-      { eligibleTriggers: ["user"], priority: 100 },
-    );
+    // Do not intercept ordinary natural-language WeChat messages here. They
+    // must reach the normal Agent so the owner can use natural language for
+    // server work and reminders. The explicit /aikey command remains the only
+    // owner-claimed provider-management entry point.
 
     api.on(
       "before_prompt_build",
@@ -773,7 +681,7 @@ export default definePluginEntry({
         if (!isWeChatContext(ctx)) return;
         return {
           appendSystemContext:
-            "面向用户的最终回复、状态说明、错误解释必须只使用简体中文。不得发送独立英文句子、英文系统提示或英文错误原文；代码、命令、URL、产品名、模型名和用户明确要求保留的原文可以保持原样。若工具或服务返回英文，只保留必要产品名和代码标识，并用中文概述，绝不原样转发。不要向用户输出工具调用的原始失败文本、命令、文件路径、堆栈或错误码；工具失败时用自然中文简述，并在安全可行时换一种方式继续处理。",
+            "面向用户的最终回复、状态说明、错误解释必须只使用简体中文。不得发送独立英文句子、英文系统提示或英文错误原文；代码、命令、URL、产品名、模型名和用户明确要求保留的原文可以保持原样。若工具或服务返回英文，只保留必要产品名和代码标识，并用中文概述，绝不原样转发。不要向用户输出工具调用的原始失败文本、命令、文件路径、堆栈或错误码；工具失败时用自然中文简述，并在安全可行时换一种方式继续处理。用户以自然语言要求备忘、定时提醒或到点通知时，使用 OpenClaw 的定时任务，并明确选择 announce 推送到当前微信通道；绝不创建 delivery 为 none 的提醒，也不要仅依赖 sessions_send。创建后先核对任务的推送方式和下一次执行时间，再用中文告知用户。",
         };
       },
       { priority: 100 },
@@ -851,6 +759,31 @@ cat > /etc/systemd/system/openclaw-gateway.service.d/locale.conf <<'EOF'
 Environment=OPENCLAW_LOCALE=zh-CN
 EOF
 systemctl daemon-reload
+
+# The owner explicitly requested natural-language host actions from WeChat
+# without per-action approval. This intentionally overrides the restrictive
+# policy from the base root installer. It is appropriate only for a private,
+# trusted WeChat bot because the gateway runs as root.
+config_file=/root/.openclaw/openclaw.json
+if [[ -f "$config_file" ]]; then
+  mkdir -p /root/.openclaw/backups
+  cp -pf "$config_file" /root/.openclaw/backups/openclaw.before-unattended-root-exec.json
+  chmod 600 /root/.openclaw/backups/openclaw.before-unattended-root-exec.json
+fi
+openclaw exec-policy preset allow-all
+openclaw config set tools.exec.host gateway
+openclaw config set tools.exec.mode full
+openclaw approvals set --stdin <<'EOF'
+{
+  "version": 1,
+  "defaults": {
+    "security": "full",
+    "ask": "off",
+    "askFallback": "full"
+  }
+}
+EOF
+printf 'Unattended root command execution is enabled for the Gateway. Use only with a private, trusted WeChat bot.\n'
 
 # Synchronize every configured model that OpenClaw can identify with an
 # authoritative native context window. `contextTokens` is set to that same
