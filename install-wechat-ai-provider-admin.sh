@@ -437,6 +437,16 @@ function isHighRiskConfirmation(value) {
   return /^(?:确认执行|确认|继续执行|同意执行|我确认)$/.test(normalizedConfirmation(value));
 }
 
+function parseHighRiskConfirmation(value) {
+  const source = normalizeNaturalText(value).trim();
+  const match = source.match(/^(?:确认执行|继续执行|同意执行|确认)\s*(?:[:：]\s*|\s*)(.+)$/i);
+  return match?.[1]?.trim() || null;
+}
+
+function normalizedOperation(value) {
+  return normalizeNaturalText(value).replace(/[\s:：，,。！!、]/g, "").toLowerCase();
+}
+
 function confirmationActor(ctx) {
   if (typeof ctx.senderId === "string" && ctx.senderId.length > 0 && ctx.senderId.length <= 512) {
     return `sender:${ctx.senderId}`;
@@ -469,7 +479,7 @@ function requestHighRiskConfirmation(ctx, state, request) {
     expiresAt: Date.now() + 5 * 60_000,
   };
   saveState(state);
-  return text("这是重要操作，暂未执行。请在 5 分钟内单独发送“确认执行”进行二次确认；超时后自动取消。普通查询无需确认。");
+  return text(`这是重要操作，暂未执行。请在 5 分钟内单独发送“确认${originalRequest}”进行二次确认；必须带上完整原操作，超时后自动取消。普通查询无需确认。`);
 }
 
 function scheduleRestart(state) {
@@ -721,7 +731,7 @@ export default definePluginEntry({
 
     api.on(
       "before_agent_reply",
-      async (event, ctx) => {
+      (event, ctx) => {
         if (!isWeChatContext(ctx)) return;
         let state;
         try {
@@ -730,38 +740,30 @@ export default definePluginEntry({
           return { handled: true, reply: text("重要操作确认组件暂时不可用。请在服务器重新运行安装脚本。") };
         }
 
-        if (isHighRiskConfirmation(event.cleanedBody)) {
+        const confirmedRequest = parseHighRiskConfirmation(event.cleanedBody);
+        if (confirmedRequest || isHighRiskConfirmation(event.cleanedBody)) {
           const pending = state.pendingHighRisk;
           if (!pending || pending.actor !== confirmationActor(ctx) || pending.expiresAt < Date.now()) {
             state.pendingHighRisk = null;
             saveState(state);
             return { handled: true, reply: text("没有等待确认的重要操作，或确认已超时。请重新发送需要执行的操作。") };
           }
-          if (typeof pending.request !== "string" || !pending.request.trim() || typeof ctx.sessionKey !== "string" || !ctx.sessionKey.startsWith("agent:")) {
+          if (typeof pending.request !== "string" || !pending.request.trim()) {
             state.pendingHighRisk = null;
             saveState(state);
-            return { handled: true, reply: text("这条待确认操作缺少可安全恢复的会话信息。请重新发送原操作后再确认。") };
+            return { handled: true, reply: text("这条待确认操作缺少原始内容。请重新发送原操作后再确认。") };
           }
-          try {
-            await api.session.workflow.enqueueNextTurnInjection({
-              sessionKey: ctx.sessionKey,
-              placement: "prepend_context",
-              ttlMs: 60_000,
-              idempotencyKey: `high-risk-confirm-${pending.expiresAt}`,
-              text: [
-                "系统安全确认已完成：用户刚刚在同一会话中确认执行以下重要操作。",
-                "立即按原请求执行；不要把“确认执行”误当成普通查询，也不要再次要求确认。",
-                "原始请求：",
-                pending.request.trim(),
-              ].join("\n"),
-            });
-          } catch {
-            return { handled: true, reply: text("确认提交失败，原操作尚未执行。请稍后再次单独发送“确认执行”。") };
+          if (!confirmedRequest) {
+            return { handled: true, reply: text(`请带上完整原操作确认：确认${pending.request.trim()}`) };
+          }
+          if (normalizedOperation(confirmedRequest) !== normalizedOperation(pending.request)) {
+            return { handled: true, reply: text(`确认内容与待执行操作不一致。请发送：确认${pending.request.trim()}`) };
           }
           state.pendingHighRisk = null;
           saveState(state);
-          // The Agent receives the saved request as a host-managed injection.
-          // It must never infer a previous request from unrelated session history.
+          // The whole confirmed request is visible to the Agent in this turn.
+          // It therefore executes the exact operation instead of inferring a
+          // previous request from unrelated conversation history.
           return;
         }
 
@@ -778,7 +780,7 @@ export default definePluginEntry({
         if (!isWeChatContext(ctx)) return;
         return {
           appendSystemContext:
-            "面向用户的最终回复、状态说明、错误解释必须只使用简体中文。不得发送独立英文句子、英文系统提示或英文错误原文；代码、命令、URL、产品名、模型名和用户明确要求保留的原文可以保持原样。若工具或服务返回英文，只保留必要产品名和代码标识，并用中文概述，绝不原样转发。不要向用户输出工具调用的原始失败文本、命令、文件路径、堆栈或错误码；工具失败时用自然中文简述，并在安全可行时换一种方式继续处理。用户以自然语言要求备忘、定时提醒或到点通知时，使用 OpenClaw 的定时任务，并明确选择 announce 推送到当前微信通道；绝不创建 delivery 为 none 的提醒，也不要仅依赖 sessions_send。创建后先核对任务的推送方式和下一次执行时间，再用中文告知用户。重要操作会先由插件提示二次确认；当用户随后单独发送“确认执行”时，根据同一会话中紧邻的已延后操作继续执行，不再要求第三次确认。",
+            "面向用户的最终回复、状态说明、错误解释必须只使用简体中文。不得发送独立英文句子、英文系统提示或英文错误原文；代码、命令、URL、产品名、模型名和用户明确要求保留的原文可以保持原样。若工具或服务返回英文，只保留必要产品名和代码标识，并用中文概述，绝不原样转发。不要向用户输出工具调用的原始失败文本、命令、文件路径、堆栈或错误码；工具失败时用自然中文简述，并在安全可行时换一种方式继续处理。用户以自然语言要求备忘、定时提醒或到点通知时，使用 OpenClaw 的定时任务，并明确选择 announce 推送到当前微信通道；绝不创建 delivery 为 none 的提醒，也不要仅依赖 sessions_send。创建后先核对任务的推送方式和下一次执行时间，再用中文告知用户。重要操作会先由插件提示二次确认；用户必须随后单独发送“确认原操作全文”，例如“确认重启 SearXNG”。插件核对原操作一致时，立即执行该完整操作，不再要求第三次确认。",
         };
       },
       { priority: 100 },
