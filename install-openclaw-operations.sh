@@ -434,10 +434,10 @@ EOF
 
 cat > /etc/systemd/system/openclaw-memory-index.timer <<'EOF'
 [Unit]
-Description=Refresh OpenClaw long-memory index every six hours
+Description=Refresh OpenClaw long-memory index every hour
 
 [Timer]
-OnCalendar=*-*-* 00,06,12,18:20:00
+OnCalendar=*-*-* *:20:00
 RandomizedDelaySec=10min
 Persistent=true
 Unit=openclaw-memory-index.service
