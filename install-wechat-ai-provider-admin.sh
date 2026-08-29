@@ -456,11 +456,16 @@ function needsHighRiskConfirmation(value) {
   return /(?:删除|移除|清空|清除|格式化|重置|恢复出厂|关机|重启|停止|卸载|安装|升级|覆盖|替换|开放端口|防火墙|权限|用户|密码|密钥|令牌|api\s*key|\brm\b|\bchmod\b|\bchown\b|\bcurl\b|\bwget\b|\bapt(?:-get)?\b|\bsystemctl\b|\bdocker\b|\biptables\b|\bufw\b|\bnft\b|\bcrontab\b|openclaw\s+(?:config|approvals|exec-policy)|tools\.exec)/i.test(source);
 }
 
-function requestHighRiskConfirmation(ctx, state) {
+function requestHighRiskConfirmation(ctx, state, request) {
   const actor = confirmationActor(ctx);
   if (!actor) return text("无法识别当前会话，不能执行重要操作。");
+  const originalRequest = typeof request === "string" ? request.trim() : "";
+  if (!originalRequest || originalRequest.length > 4000) {
+    return text("无法保存这条重要操作的原始请求。请把操作说明控制在 4000 个字符以内后重新发送。");
+  }
   state.pendingHighRisk = {
     actor,
+    request: originalRequest,
     expiresAt: Date.now() + 5 * 60_000,
   };
   saveState(state);
@@ -716,7 +721,7 @@ export default definePluginEntry({
 
     api.on(
       "before_agent_reply",
-      (event, ctx) => {
+      async (event, ctx) => {
         if (!isWeChatContext(ctx)) return;
         let state;
         try {
@@ -732,15 +737,36 @@ export default definePluginEntry({
             saveState(state);
             return { handled: true, reply: text("没有等待确认的重要操作，或确认已超时。请重新发送需要执行的操作。") };
           }
+          if (typeof pending.request !== "string" || !pending.request.trim() || typeof ctx.sessionKey !== "string" || !ctx.sessionKey.startsWith("agent:")) {
+            state.pendingHighRisk = null;
+            saveState(state);
+            return { handled: true, reply: text("这条待确认操作缺少可安全恢复的会话信息。请重新发送原操作后再确认。") };
+          }
+          try {
+            await api.session.workflow.enqueueNextTurnInjection({
+              sessionKey: ctx.sessionKey,
+              placement: "prepend_context",
+              ttlMs: 60_000,
+              idempotencyKey: `high-risk-confirm-${pending.expiresAt}`,
+              text: [
+                "系统安全确认已完成：用户刚刚在同一会话中确认执行以下重要操作。",
+                "立即按原请求执行；不要把“确认执行”误当成普通查询，也不要再次要求确认。",
+                "原始请求：",
+                pending.request.trim(),
+              ].join("\n"),
+            });
+          } catch {
+            return { handled: true, reply: text("确认提交失败，原操作尚未执行。请稍后再次单独发送“确认执行”。") };
+          }
           state.pendingHighRisk = null;
           saveState(state);
-          // Let the Agent receive this second confirmation in the same session.
-          // It can then act on the immediately preceding deferred request.
+          // The Agent receives the saved request as a host-managed injection.
+          // It must never infer a previous request from unrelated session history.
           return;
         }
 
         if (needsHighRiskConfirmation(event.cleanedBody)) {
-          return { handled: true, reply: requestHighRiskConfirmation(ctx, state) };
+          return { handled: true, reply: requestHighRiskConfirmation(ctx, state, event.cleanedBody) };
         }
       },
       { eligibleTriggers: ["user"], priority: 110 },
