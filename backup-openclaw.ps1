@@ -47,20 +47,21 @@ if [ '$mode' = 'consistent' ]; then
   systemctl stop openclaw-gateway.service
   stopped=1
 fi
-mkdir -p "`$backup_dir" "`$stage/root" "`$stage/opt" "`$stage/usr/local/sbin" "`$(dirname "`$transfer_path")"
+mkdir -p "`$backup_dir" "`$stage/root/.config" "`$stage/opt" "`$stage/usr/local/sbin" "`$(dirname "`$transfer_path")"
 tar -C /root \
   --exclude='.openclaw/backups' \
   --exclude='.openclaw/.backup-stage*' \
   -cf - .openclaw | tar -C "`$stage/root" -xf -
+if [ -d /root/.config/rclone ]; then
+  cp -a /root/.config/rclone "`$stage/root/.config/"
+fi
 for path in /opt/openclaw-wechat-ai-provider-admin /opt/openclaw-searxng; do
   if [ -e "`$path" ]; then cp -a "`$path" "`$stage/opt/"; fi
 done
-for path in /root/install-wechat-ai-root.sh /root/install-wechat-ai-provider-admin.sh /root/install-openclaw-searxng.sh /root/install-openclaw-long-memory.sh; do
+for path in /root/install-wechat-ai-root.sh /root/install-wechat-ai-provider-admin.sh /root/install-openclaw-searxng.sh /root/install-openclaw-long-memory.sh /root/install-openclaw-operations.sh /root/configure-openclaw-onedrive-backup.sh; do
   if [ -f "`$path" ]; then cp -a "`$path" "`$stage/root/"; fi
 done
-if [ -f /usr/local/sbin/openclaw-zh-cron-template-patch.js ]; then
-  cp -a /usr/local/sbin/openclaw-zh-cron-template-patch.js "`$stage/usr/local/sbin/"
-fi
+find /usr/local/sbin -maxdepth 1 -type f -name 'openclaw-*' -exec cp -a {} "`$stage/usr/local/sbin/" \;
 if [ -f /etc/systemd/system/openclaw-gateway.service ]; then
   mkdir -p "`$stage/etc/systemd/system"
   cp -a /etc/systemd/system/openclaw-gateway.service "`$stage/etc/systemd/system/"
