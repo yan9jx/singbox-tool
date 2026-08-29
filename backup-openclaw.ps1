@@ -47,7 +47,7 @@ if [ '$mode' = 'consistent' ]; then
   systemctl stop openclaw-gateway.service
   stopped=1
 fi
-mkdir -p "`$backup_dir" "`$stage/root" "`$stage/opt" "`$(dirname "`$transfer_path")"
+mkdir -p "`$backup_dir" "`$stage/root" "`$stage/opt" "`$stage/usr/local/sbin" "`$(dirname "`$transfer_path")"
 tar -C /root \
   --exclude='.openclaw/backups' \
   --exclude='.openclaw/.backup-stage*' \
@@ -58,11 +58,18 @@ done
 for path in /root/install-wechat-ai-root.sh /root/install-wechat-ai-provider-admin.sh /root/install-openclaw-searxng.sh /root/install-openclaw-long-memory.sh; do
   if [ -f "`$path" ]; then cp -a "`$path" "`$stage/root/"; fi
 done
+if [ -f /usr/local/sbin/openclaw-zh-cron-template-patch.js ]; then
+  cp -a /usr/local/sbin/openclaw-zh-cron-template-patch.js "`$stage/usr/local/sbin/"
+fi
 if [ -f /etc/systemd/system/openclaw-gateway.service ]; then
   mkdir -p "`$stage/etc/systemd/system"
   cp -a /etc/systemd/system/openclaw-gateway.service "`$stage/etc/systemd/system/"
 fi
-tar -C "`$stage" -czf "`$backup_dir/`$archive_name" root opt etc
+if [ -d /etc/systemd/system/openclaw-gateway.service.d ]; then
+  mkdir -p "`$stage/etc/systemd/system"
+  cp -a /etc/systemd/system/openclaw-gateway.service.d "`$stage/etc/systemd/system/"
+fi
+tar -C "`$stage" -czf "`$backup_dir/`$archive_name" root opt etc usr
 sha256sum "`$backup_dir/`$archive_name" > "`$backup_dir/`$archive_name.sha256"
 install -m 600 -o '$UserName' -g '$UserName' "`$backup_dir/`$archive_name" "`$transfer_path"
 sha256sum "`$backup_dir/`$archive_name"
