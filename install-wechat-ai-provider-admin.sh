@@ -295,6 +295,139 @@ function runOpenClaw(state, args) {
   });
 }
 
+// These status readers deliberately use a small fixed allow-list. They are
+// not a shell and never accept a command, path, API key, or argument supplied
+// by a WeChat message.
+function readFixedOutput(bin, args, timeout = 10_000) {
+  try {
+    return execFileSync(bin, args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout,
+      env: { ...process.env, HOME: "/root" },
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function readCompactionStatus() {
+  try {
+    const config = JSON.parse(fs.readFileSync("/root/.openclaw/openclaw.json", "utf8"));
+    const value = config.agents?.defaults?.compaction;
+    if (!value || typeof value !== "object") return "上下文压缩：当前未读取到可展示的参数。";
+    const shown = [];
+    const labels = [
+      ["mode", "模式"],
+      ["reserveTokens", "预留令牌"],
+      ["reserveTokensFloor", "最低预留令牌"],
+      ["keepRecentTokens", "保留最近令牌"],
+      ["recentTurnsPreserve", "保留最近轮数"],
+      ["maxHistoryShare", "最大历史占比"],
+    ];
+    for (const [key, label] of labels) {
+      if (value[key] !== undefined) {
+        const output = key === "maxHistoryShare" && typeof value[key] === "number"
+          ? `${Math.round(value[key] * 100)}%`
+          : String(value[key]);
+        shown.push(`${label}：${output}`);
+      }
+    }
+    const qualityGuard = value.qualityGuard?.enabled;
+    const precheck = value.midTurnPrecheck?.enabled;
+    if (typeof qualityGuard === "boolean") shown.push(`质量保护：${qualityGuard ? "开启" : "关闭"}`);
+    if (typeof precheck === "boolean") shown.push(`预检查：${precheck ? "开启" : "关闭"}`);
+    return shown.length ? `上下文压缩：${shown.join("；")}。` : "上下文压缩：当前未读取到可展示的参数。";
+  } catch {
+    return "上下文压缩：暂时无法读取配置。";
+  }
+}
+
+function readMemoryStatus(state) {
+  const output = readFixedOutput(state.openclawBin, ["memory", "status", "--deep", "--agent", "main"], 20_000);
+  if (!output) return "长期记忆：暂时无法读取状态。";
+  const indexed = output.match(/Indexed:\s*(\d+\/\d+\s+files\s*[·.]\s*\d+\s+chunks)/i)?.[1];
+  const ready = [];
+  if (/Embeddings:\s*ready/i.test(output)) ready.push("向量嵌入已就绪");
+  if (/Vector store:\s*ready/i.test(output)) ready.push("向量库已就绪");
+  if (/FTS:\s*ready/i.test(output)) ready.push("关键词检索已就绪");
+  const details = [];
+  if (indexed) details.push(`已索引 ${indexed.replace(/files/i, "个文件").replace(/chunks/i, "个片段")}`);
+  if (ready.length) details.push(ready.join("、"));
+  return details.length ? `长期记忆：${details.join("；")}。` : "长期记忆：已执行查询，但没有读取到完整就绪信息。";
+}
+
+function readSystemStatus() {
+  try {
+    const memory = fs.readFileSync("/proc/meminfo", "utf8");
+    const value = (name) => Number(memory.match(new RegExp(`^${name}:\\s+(\\d+)`, "m"))?.[1] ?? 0);
+    const mib = (kib) => Math.round(kib / 1024);
+    const memTotal = mib(value("MemTotal"));
+    const memAvailable = mib(value("MemAvailable"));
+    const swapTotal = mib(value("SwapTotal"));
+    const swapFree = mib(value("SwapFree"));
+    if (!memTotal) return "内存与交换分区：暂时无法读取状态。";
+    return `内存与交换分区：内存总计 ${memTotal} MiB、可用 ${memAvailable} MiB；交换分区总计 ${swapTotal} MiB、可用 ${swapFree} MiB。`;
+  } catch {
+    return "内存与交换分区：暂时无法读取状态。";
+  }
+}
+
+function readSearxStatus() {
+  const dockerBin = fs.existsSync("/usr/bin/docker") ? "/usr/bin/docker" : "/usr/local/bin/docker";
+  const output = readFixedOutput(dockerBin, ["ps", "--filter", "name=openclaw-searxng", "--format", "{{.Status}}|{{.Ports}}"]);
+  if (!output) return "SearXNG：未读取到运行中的本地容器。";
+  const [status, ports] = output.split("|", 2);
+  if (!/^Up\b/i.test(status ?? "")) return "SearXNG：容器当前未运行。";
+  const localOnly = /127\.0\.0\.1:8888/i.test(ports ?? "");
+  return `SearXNG：运行中${localOnly ? "，仅监听本机 127.0.0.1:8888" : "，端口状态已读取"}。`;
+}
+
+function readGatewayStatus(state) {
+  const service = readFixedOutput("/bin/systemctl", ["is-active", "openclaw-gateway.service"]);
+  const channels = readFixedOutput(state.openclawBin, ["channels", "status", "--probe"], 20_000);
+  const active = service === "active" ? "网关运行中" : "网关未处于运行状态";
+  const wechat = /openclaw-weixin[\s\S]{0,300}\brunning\b/i.test(channels ?? "") || /\brunning\b[\s\S]{0,300}openclaw-weixin/i.test(channels ?? "")
+    ? "微信通道运行中"
+    : "微信通道状态暂时无法确认";
+  return `微信机器人：${active}；${wechat}。`;
+}
+
+function normalizeStatusTopic(value) {
+  const source = normalizeNaturalText(value).toLowerCase();
+  if (/压缩|compaction|上下文/.test(source)) return "compaction";
+  if (/记忆|memory|索引/.test(source)) return "memory";
+  if (/searxng|搜索/.test(source)) return "searxng";
+  if (/内存|swap|交换/.test(source)) return "system";
+  if (/微信|网关|gateway/.test(source)) return "gateway";
+  return "all";
+}
+
+function statusReply(state, topic) {
+  const readers = {
+    compaction: () => readCompactionStatus(),
+    memory: () => readMemoryStatus(state),
+    system: () => readSystemStatus(),
+    searxng: () => readSearxStatus(),
+    gateway: () => readGatewayStatus(state),
+  };
+  if (topic !== "all" && readers[topic]) return readers[topic]();
+  return [readers.gateway(), readers.system(), readers.searxng(), readers.memory(), readers.compaction()].join("\n");
+}
+
+function parseNaturalStatusRequest(body) {
+  const source = normalizeNaturalText(body).toLowerCase();
+  const asks = /(?:查|查询|查看|看看|状态|多少|阈值|还剩|剩余)/.test(source);
+  if (!asks) return null;
+  if (/(?:上下文.*(?:压缩|compaction)|(?:压缩|compaction).*(?:阈值|参数|多少|状态))/.test(source)) return "compaction";
+  if (/(?:长期记忆|记忆索引|memory).*(?:状态|索引|多少|查|查询|查看)/.test(source)) return "memory";
+  if (/(?:searxng|搜索服务).*(?:状态|查|查询|查看)/.test(source)) return "searxng";
+  if (/(?:内存|swap|交换分区).*(?:状态|查|查询|查看|多少|剩余)/.test(source)) return "system";
+  if (/(?:微信机器人|微信通道|网关).*(?:状态|查|查询|查看)/.test(source)) return "gateway";
+  if (/^(?:查|查询|查看|看看)\s*(?:全部|所有)?状态/.test(source)) return "all";
+  return null;
+}
+
 function scheduleRestart(state) {
   const unit = `openclaw-ai-provider-admin-${Date.now()}`;
   const child = spawn(
@@ -434,8 +567,10 @@ function helpMessage() {
     "/aikey session 平台 模型名   （只改当前会话）",
     "/aikey fallback add 平台 模型名",
     "/aikey fallback clear",
+    "/aikey status [all|compaction|memory|system|searxng|gateway]",
     "自然语言：帮我添加 OpenAI API：你的Key，模型：gpt-4.1",
     "删除：帮我删除 Gemini 的 API 配置，然后回复 确认删除 Gemini。",
+    "状态查询：上下文压缩阈值是多少、查内存和 swap、查 SearXNG 状态、查长期记忆索引。",
     "支持平台：deepseek、siliconflow、doubao、kimi、openai、gemini、claude、grok、openrouter、qwen、zhipu。",
     "API Key 不会在回复中显示；请勿在群聊中发送。",
   ].join("\n");
@@ -480,6 +615,7 @@ export default definePluginEntry({
 
         const denied = requireOwner(ctx, state);
         if (denied) return denied;
+        if (action === "status") return text(statusReply(state, normalizeStatusTopic(parts.join(" "))));
         if (action === "platforms") {
           return text(Object.entries(PLATFORMS).map(([id, item]) => `${id}：${item.label}${item.note ? `（${item.note}）` : ""}`).join("\n"));
         }
@@ -538,6 +674,18 @@ export default definePluginEntry({
       "before_agent_reply",
       (event, ctx) => {
         if (!isWeChatContext(ctx)) return;
+        const statusTopic = parseNaturalStatusRequest(event.cleanedBody);
+        if (statusTopic) {
+          let state;
+          try {
+            state = loadState();
+          } catch {
+            return { handled: true, reply: text("状态查询插件暂时不可用。请在服务器重新运行安装脚本。") };
+          }
+          const denied = requireOwner(ctx, state);
+          if (denied) return { handled: true, reply: denied };
+          return { handled: true, reply: text(statusReply(state, statusTopic)) };
+        }
         const request = parseNaturalRequest(event.cleanedBody);
         if (!request) return;
 
@@ -625,7 +773,7 @@ export default definePluginEntry({
         if (!isWeChatContext(ctx)) return;
         return {
           appendSystemContext:
-            "默认且始终使用简体中文回复。代码、命令、URL、产品名、模型名和用户明确要求保留的原文可以保持原样；其余说明、错误解释和结论必须使用中文。不要向用户输出工具调用的原始失败文本、命令、文件路径、堆栈或错误码；工具失败时用自然中文简述，并在安全可行时换一种方式继续处理。",
+            "面向用户的最终回复、状态说明、错误解释必须只使用简体中文。不得发送独立英文句子、英文系统提示或英文错误原文；代码、命令、URL、产品名、模型名和用户明确要求保留的原文可以保持原样。若工具或服务返回英文，只保留必要产品名和代码标识，并用中文概述，绝不原样转发。不要向用户输出工具调用的原始失败文本、命令、文件路径、堆栈或错误码；工具失败时用自然中文简述，并在安全可行时换一种方式继续处理。",
         };
       },
       { priority: 100 },
