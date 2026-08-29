@@ -234,6 +234,7 @@ for item in /root/install-wechat-ai-root.sh /root/install-wechat-ai-provider-adm
 done
 [[ -f /etc/systemd/system/openclaw-gateway.service ]] && cp -a /etc/systemd/system/openclaw-gateway.service "$stage/etc/systemd/system/"
 [[ -d /etc/systemd/system/openclaw-gateway.service.d ]] && cp -a /etc/systemd/system/openclaw-gateway.service.d "$stage/etc/systemd/system/"
+find /etc/systemd/system -maxdepth 1 -type f \( -name 'openclaw-*.service' -o -name 'openclaw-*.timer' \) -exec cp -a {} "$stage/etc/systemd/system/" \;
 find /usr/local/sbin -maxdepth 1 -type f -name 'openclaw-*' -exec cp -a {} "$stage/usr/local/sbin/" \;
 tar -C "$stage" -czf "$archive" root opt etc usr
 chmod 600 "$archive"
@@ -248,6 +249,105 @@ if command -v rclone >/dev/null 2>&1 && rclone listremotes 2>/dev/null | grep -q
 fi
 BACKUP
 chmod 700 /usr/local/sbin/openclaw-server-backup.sh
+
+cat > /usr/local/sbin/openclaw-backup-recovery-check.sh <<'RECOVERYCHECK'
+#!/usr/bin/env bash
+# 只读备份演练：不解包到系统、不覆盖任何文件。
+set -Eeuo pipefail
+
+# 定时器负责在每月 1 日 05:00 运行；--force 仅用于首次只读验证。
+if [[ -n "${1:-}" && "${1:-}" != "--force" ]]; then
+  echo "未知参数：$1" >&2
+  exit 2
+fi
+
+backup_dir=/root/.openclaw/backups/automatic
+latest_archive=$(find "$backup_dir" -maxdepth 1 -type f -name 'openclaw-auto-*.tgz' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n 1 | cut -d' ' -f2- || true)
+result=()
+
+if [[ -z "$latest_archive" || ! -f "$latest_archive" ]]; then
+  result+=("本机备份未找到")
+elif tar -tzf "$latest_archive" >/dev/null 2>&1; then
+  result+=("本机备份压缩包可读取")
+else
+  result+=("本机备份压缩包无法读取")
+fi
+
+if command -v rclone >/dev/null 2>&1 && rclone listremotes 2>/dev/null | grep -qx 'onedrive-crypt:'; then
+  if rclone lsf onedrive-crypt: >/dev/null 2>&1; then
+    result+=("OneDrive 备份目录可访问")
+  else
+    result+=("OneDrive 备份目录无法访问")
+  fi
+else
+  result+=("OneDrive 备份尚未配置")
+fi
+
+openclaw_bin=$(command -v openclaw)
+admin_state=/root/.openclaw/wechat-ai-provider-admin/state.json
+session_file=/root/.openclaw/agents/main/sessions/sessions.json
+session_key=$(node - "$admin_state" "$session_file" <<'NODE'
+const fs = require('fs');
+try {
+  const admin = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')).adminSenderId;
+  const sessions = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+  const candidate = Object.entries(sessions)
+    .filter(([key, value]) => key.includes('openclaw-weixin:direct:') && value?.origin?.provider === 'openclaw-weixin' && value?.origin?.chatType === 'direct')
+    .filter(([, value]) => !admin || value?.origin?.from === admin)
+    .sort((a, b) => Number(b[1]?.updatedAt || 0) - Number(a[1]?.updatedAt || 0))[0];
+  if (candidate) process.stdout.write(candidate[0]);
+} catch {}
+NODE
+)
+
+[[ -n "$session_key" ]] || exit 0
+summary=$(IFS='；'; echo "${result[*]}")
+"$openclaw_bin" cron add \
+  --name "每月备份演练结果" \
+  --at +20s \
+  --delete-after-run \
+  --announce \
+  --session-key "$session_key" \
+  --channel openclaw-weixin \
+  --message "请用一两句自然、关切的简体中文告诉用户：本月备份只读演练完成，${summary}。这只是检查，不会恢复或覆盖 VPS；真正需要换机或故障恢复时，再按《换VPS恢复》步骤操作。不要输出英文、命令、内部路径或任务编号。" \
+  --description "每月备份只读演练结果" >/dev/null
+RECOVERYCHECK
+chmod 700 /usr/local/sbin/openclaw-backup-recovery-check.sh
+
+cat > /usr/local/sbin/openclaw-backup-failure-notice.sh <<'BACKUPFAIL'
+#!/usr/bin/env bash
+# 仅在 systemd 判定备份任务失败时执行；不读取或转发原始错误内容。
+set -Eeuo pipefail
+
+openclaw_bin=$(command -v openclaw)
+admin_state=/root/.openclaw/wechat-ai-provider-admin/state.json
+session_file=/root/.openclaw/agents/main/sessions/sessions.json
+session_key=$(node - "$admin_state" "$session_file" <<'NODE'
+const fs = require('fs');
+try {
+  const admin = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')).adminSenderId;
+  const sessions = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+  const candidate = Object.entries(sessions)
+    .filter(([key, value]) => key.includes('openclaw-weixin:direct:') && value?.origin?.provider === 'openclaw-weixin' && value?.origin?.chatType === 'direct')
+    .filter(([, value]) => !admin || value?.origin?.from === admin)
+    .sort((a, b) => Number(b[1]?.updatedAt || 0) - Number(a[1]?.updatedAt || 0))[0];
+  if (candidate) process.stdout.write(candidate[0]);
+} catch {}
+NODE
+)
+
+[[ -n "$session_key" ]] || exit 0
+"$openclaw_bin" cron add \
+  --name "备份失败通知" \
+  --at +20s \
+  --delete-after-run \
+  --announce \
+  --session-key "$session_key" \
+  --channel openclaw-weixin \
+  --message "请用一两句自然、关切的简体中文直接告诉用户：本次自动备份没有完成，不过现有备份不会被覆盖。请让我检查 OneDrive 连接和备份日志。不要输出英文、命令、内部路径、错误原文或任务编号。" \
+  --description "自动备份失败通知" >/dev/null
+BACKUPFAIL
+chmod 700 /usr/local/sbin/openclaw-backup-failure-notice.sh
 
 cat > /etc/systemd/system/openclaw-health-monitor.service <<'EOF'
 [Unit]
@@ -349,10 +449,46 @@ EOF
 cat > /etc/systemd/system/openclaw-server-backup.service <<'EOF'
 [Unit]
 Description=Create OpenClaw server backup
+OnFailure=openclaw-backup-failure-notice.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/openclaw-server-backup.sh
+EOF
+
+cat > /etc/systemd/system/openclaw-backup-failure-notice.service <<'EOF'
+[Unit]
+Description=Notify WeChat when OpenClaw automatic backup fails
+After=network-online.target openclaw-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/openclaw-backup-failure-notice.sh
+EOF
+
+cat > /etc/systemd/system/openclaw-backup-recovery-check.service <<'EOF'
+[Unit]
+Description=Run read-only OpenClaw backup recovery check
+After=network-online.target openclaw-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/openclaw-backup-recovery-check.sh
+EOF
+
+cat > /etc/systemd/system/openclaw-backup-recovery-check.timer <<'EOF'
+[Unit]
+Description=Run read-only OpenClaw backup recovery check monthly
+
+[Timer]
+OnCalendar=*-*-01 05:00:00
+Persistent=true
+Unit=openclaw-backup-recovery-check.service
+
+[Install]
+WantedBy=timers.target
 EOF
 
 cat > /etc/systemd/system/openclaw-server-backup.timer <<'EOF'
@@ -370,7 +506,7 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now openclaw-health-monitor.timer openclaw-daily-health-report.timer openclaw-memory-index.timer openclaw-server-backup.timer openclaw-space-cleanup.timer
+systemctl enable --now openclaw-health-monitor.timer openclaw-daily-health-report.timer openclaw-memory-index.timer openclaw-server-backup.timer openclaw-space-cleanup.timer openclaw-backup-recovery-check.timer
 systemctl start openclaw-health-monitor.service
 openclaw memory index --agent main
 
@@ -378,5 +514,7 @@ echo "已完成："
 echo "- VPS 监控：每 5 分钟，仅异常与恢复时微信告警；不自动重启服务。"
 echo "- 每日简报：每天 09:00 微信推送内存、磁盘、服务与备份摘要。"
 echo "- 空间清理：每周日 05:10 清理 Go/软件包缓存、过期日志、系统临时文件和 Docker 悬挂镜像。"
+echo "- 备份失败通知：自动备份一旦失败，立即微信通知；不会覆盖已有备份。"
+echo "- 备份演练：每月 1 日 05:00 只读检查本机压缩包与 OneDrive 可访问性，不执行恢复。"
 echo "- 长期记忆：每 6 小时增量索引。"
 echo "- VPS 备份：每周日凌晨执行，本机与已配置的 OneDrive 各保留最近 4 份。"
