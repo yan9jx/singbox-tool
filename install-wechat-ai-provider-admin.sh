@@ -931,6 +931,7 @@ function helpMessage() {
     "/aikey platforms",
     "/aikey add 平台 API_KEY 模型名",
     "/aikey model-add 平台 模型名   （已有 API 时新增模型，不必再发 Key）",
+    "/aikey delete 平台   （随后发送 /aikey confirm-delete 平台）",
     "/aikey add custom API_KEY 模型名 https://接口地址/v1 openai-completions",
     "/aikey list",
     "/aikey use 平台 模型名   （改默认模型）",
@@ -941,7 +942,7 @@ function helpMessage() {
     "自然语言：添加 DeepSeek，API：你的Key，模型：deepseek-chat",
     "新增模型：给 DeepSeek 添加模型：deepseek-reasoner（已有 API 时无需再发 Key）",
     "查看模型：查看已配置模型；切换默认：切换 DeepSeek，模型：deepseek-chat。",
-    "删除：帮我删除 Gemini 的 API 配置，然后回复 确认删除 Gemini。",
+    "删除 API：删除 DeepSeek API；再单独发送 确认删除 DeepSeek API。",
     "状态查询：上下文压缩阈值是多少、查内存和 swap、查 SearXNG 状态、查长期记忆索引。",
     "会话：直接发送“新开对话”即可开始新的对话。",
     "提醒：查看所有提醒；取消提醒 2；取消所有提醒后发送“确认取消所有提醒”。",
@@ -1020,6 +1021,21 @@ export default definePluginEntry({
               : `${platform}/${model} 已在模型列表中，默认模型没有改变。`);
           } catch {
             return text("新增模型失败。请确认该平台已通过 /aikey add 添加，且模型名填写正确。Key 未显示也未写入回复。");
+          }
+        }
+        if (action === "delete") {
+          const platform = (parts[0] ?? "").toLowerCase();
+          if (!state.providers[platform]) return text("该平台没有已添加的 API 配置。");
+          return text(`将删除 ${platform} 的 API 配置和模型列表。确定的话，单独发送：/aikey confirm-delete ${platform}`);
+        }
+        if (action === "confirm-delete") {
+          const platform = (parts[0] ?? "").toLowerCase();
+          try {
+            deleteProvider(state, platform);
+            scheduleRestart(state);
+            return text(`已删除 ${platform} 的 API 配置和模型列表，网关将在约两秒后重启。`);
+          } catch {
+            return text("删除失败。请确认平台名正确且此前已添加过该 API 配置。");
           }
         }
         if (action === "fallback" && parts[0] === "clear") {
@@ -1124,6 +1140,33 @@ export default definePluginEntry({
             };
           } catch {
             return { handled: true, reply: text("切换失败。请先发送“查看已配置模型”确认平台和模型名。") };
+          }
+        }
+
+        if (naturalProviderRequest?.kind === "delete-request") {
+          const denied = requireOwner(ctx, state);
+          if (denied) return { handled: true, reply: denied };
+          if (!state.providers[naturalProviderRequest.platform]) {
+            return { handled: true, reply: text("该平台没有已添加的 API 配置。") };
+          }
+          return {
+            handled: true,
+            reply: text(`将删除 ${naturalProviderRequest.platform} 的 API 配置和模型列表。确定的话，直接单独发送“确认删除 ${naturalProviderRequest.platform} API”即可。`),
+          };
+        }
+
+        if (naturalProviderRequest?.kind === "delete-confirm") {
+          const denied = requireOwner(ctx, state);
+          if (denied) return { handled: true, reply: denied };
+          try {
+            deleteProvider(state, naturalProviderRequest.platform);
+            scheduleRestart(state);
+            return {
+              handled: true,
+              reply: text(`已删除 ${naturalProviderRequest.platform} 的 API 配置和模型列表，网关将在约两秒后重启。`),
+            };
+          } catch {
+            return { handled: true, reply: text("删除失败。请确认平台名正确且此前已添加过该 API 配置。") };
           }
         }
 
