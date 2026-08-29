@@ -437,6 +437,19 @@ function isHighRiskConfirmation(value) {
   return /^(?:确认执行|确认|继续执行|同意执行|我确认)$/.test(normalizedConfirmation(value));
 }
 
+function confirmationActor(ctx) {
+  if (typeof ctx.senderId === "string" && ctx.senderId.length > 0 && ctx.senderId.length <= 512) {
+    return `sender:${ctx.senderId}`;
+  }
+  // The Tencent WeChat hook does not always expose senderId at this stage.
+  // A session key is still scoped to the same conversation, so it safely
+  // binds the two natural-language confirmation messages together.
+  if (typeof ctx.sessionKey === "string" && ctx.sessionKey.startsWith("agent:") && ctx.sessionKey.length <= 512) {
+    return `session:${ctx.sessionKey}`;
+  }
+  return null;
+}
+
 function needsHighRiskConfirmation(value) {
   const source = normalizeNaturalText(value).toLowerCase();
   if (!source || source.startsWith("/aikey")) return false;
@@ -444,9 +457,10 @@ function needsHighRiskConfirmation(value) {
 }
 
 function requestHighRiskConfirmation(ctx, state) {
-  if (!ctx.senderId) return text("无法读取当前发送者，不能执行重要操作。");
+  const actor = confirmationActor(ctx);
+  if (!actor) return text("无法识别当前会话，不能执行重要操作。");
   state.pendingHighRisk = {
-    senderId: ctx.senderId,
+    actor,
     expiresAt: Date.now() + 5 * 60_000,
   };
   saveState(state);
@@ -713,7 +727,7 @@ export default definePluginEntry({
 
         if (isHighRiskConfirmation(event.cleanedBody)) {
           const pending = state.pendingHighRisk;
-          if (!pending || pending.senderId !== ctx.senderId || pending.expiresAt < Date.now()) {
+          if (!pending || pending.actor !== confirmationActor(ctx) || pending.expiresAt < Date.now()) {
             state.pendingHighRisk = null;
             saveState(state);
             return { handled: true, reply: text("没有等待确认的重要操作，或确认已超时。请重新发送需要执行的操作。") };
@@ -819,15 +833,16 @@ systemctl daemon-reload
 
 # The owner explicitly requested natural-language host actions from WeChat
 # without per-action approval. This intentionally overrides the restrictive
-# policy from the base root installer. It is appropriate only for a private,
-# trusted WeChat bot because the gateway runs as root.
+# policy from the base root installer. On OpenClaw 2026.7 the effective policy
+# is controlled by tools.exec plus exec-approvals.json; this build has no
+# "allow-all" preset. It is appropriate only for a private, trusted WeChat
+# bot because the gateway runs as root.
 config_file=/root/.openclaw/openclaw.json
 if [[ -f "$config_file" ]]; then
   mkdir -p /root/.openclaw/backups
   cp -pf "$config_file" /root/.openclaw/backups/openclaw.before-unattended-root-exec.json
   chmod 600 /root/.openclaw/backups/openclaw.before-unattended-root-exec.json
 fi
-openclaw exec-policy preset allow-all
 openclaw config set tools.exec.host gateway
 openclaw config set tools.exec.mode full
 openclaw approvals set --stdin <<'EOF'
