@@ -470,8 +470,10 @@ function needsHighRiskConfirmation(value) {
 }
 
 function isWeChatReminderJob(event) {
-  const target = String(event?.sessionKey ?? event?.job?.sessionTarget ?? "");
-  return target.includes(":openclaw-weixin:");
+  const targets = [event?.sessionKey, event?.job?.sessionTarget]
+    .filter((value) => typeof value === "string")
+    .join(" ");
+  return targets.includes(":openclaw-weixin:");
 }
 
 async function enforceWeChatReminderDelivery(event, gatewayCtx) {
