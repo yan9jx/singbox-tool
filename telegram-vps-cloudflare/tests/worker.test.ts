@@ -1,7 +1,17 @@
 import { exports as workerExports } from "cloudflare:workers";
 import { createExecutionContext, createScheduledController, env, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import worker, { alertPolicyText, deepSeekModelIds, formatBeijingTime, normalizeBriefTimes, PANEL_KEYBOARD, nodeIssues, type Env } from "../src/index";
+import worker, {
+  alertPolicyText,
+  deepSeekModelIds,
+  formatBeijingTime,
+  nodeIsOffline,
+  normalizeBriefTimes,
+  PANEL_KEYBOARD,
+  nodeIssues,
+  parseNodeDeletionTarget,
+  type Env,
+} from "../src/index";
 
 const AGENT_SECRET = "local-agent-secret-at-least-32-characters";
 
@@ -51,6 +61,12 @@ describe("standalone Telegram VPS Worker", () => {
     expect(formatBeijingTime(Date.UTC(2026, 7, 14, 1, 0))).toBe("2026-08-14 09:00 北京时间");
     expect(normalizeBriefTimes("时间：2026-08-14 01:00 UTC\n报告生成于 2026-08-14T01:00 UTC"))
       .toBe("时间：2026-08-14 09:00 北京时间\n报告生成于 2026-08-14 09:00 北京时间");
+    expect(nodeIsOffline(1_000, 120_999)).toBe(false);
+    expect(nodeIsOffline(1_000, 121_001)).toBe(true);
+    expect(parseNodeDeletionTarget("/delete 123")).toBe("123");
+    expect(parseNodeDeletionTarget("删除节点 123")).toBe("123");
+    expect(parseNodeDeletionTarget("删除hetzner-de这台的机器人提示")).toBe("hetzner-de");
+    expect(parseNodeDeletionTarget("查看 hetzner-de 状态")).toBe("");
   });
 
   it("reports configuration readiness without exposing values", async () => {

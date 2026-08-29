@@ -135,6 +135,18 @@ const VALID_TARGETS = new Set(["auto", "node", "reverse-proxy"]);
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
 const MODEL_FALLBACK_STATUSES = new Set([400, 404, 422]);
 
+export function nodeIsOffline(lastSeen: number, now = Date.now()): boolean {
+  return now - lastSeen > NODE_STALE_MS;
+}
+
+export function parseNodeDeletionTarget(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const slash = normalized.match(/^\/delete(?:@[A-Za-z0-9_]+)?\s+([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/i);
+  if (slash?.[1]) return slash[1];
+  const chinese = normalized.match(/^删除\s*(?:节点\s*)?([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:\s|这台|的|$)/i);
+  return chinese?.[1] ?? "";
+}
+
 function log(level: "info" | "warn" | "error", event: string, data: JsonObject = {}): void {
   console.log(JSON.stringify({ level, event, at: new Date().toISOString(), ...data }));
 }
@@ -648,6 +660,7 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
   private async handleText(text: string): Promise<void> {
     const normalized = text.replace(/\s+/g, " ").trim();
     const lower = normalized.toLowerCase();
+    const deletionTarget = parseNodeDeletionTarget(normalized);
     if (["/start", "/menu", "菜单"].includes(lower)) {
       await this.sendMessage(await this.statusText(), this.panelKeyboard());
     } else if (["/status", "状态", "状态刷新", "我的vps状态", "我的 vps 状态", "vps状态"].includes(lower)) {
@@ -664,6 +677,10 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
       await this.sendMessage(await this.nodesText(), this.nodesKeyboard());
     } else if (lower.startsWith("/use ")) {
       await this.selectNode(normalized.slice(5).trim());
+    } else if (lower === "/delete" || lower === "删除节点") {
+      await this.sendMessage("删除命令：/delete 节点ID\n也可以进入 /nodes，点击离线节点旁的删除按钮。\n仅允许删除离线节点，并且需要二次确认。");
+    } else if (deletionTarget) {
+      await this.requestNodeDeletion(deletionTarget);
     } else if (["/pause10", "暂停"].includes(lower)) {
       this.setState({ ...this.state, alertsPausedUntil: Date.now() + 10 * 60_000 });
       await this.sendMessage("🟡 Cloudflare 异常告警已暂停 10 分钟。", this.panelKeyboard());
@@ -721,6 +738,8 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
     else if (data.startsWith("model_pick:")) await this.requestModelSwitch(data.slice(11));
     else if (data.startsWith("model_confirm:")) await this.confirmModelSwitch(data.slice(14));
     else if (data.startsWith("model_cancel:")) await this.cancelModelSwitch(data.slice(13));
+    else if (data.startsWith("delete_ask:")) await this.requestNodeDeletionFromToken(data.slice(11));
+    else if (data.startsWith("delete_confirm:")) await this.confirmNodeDeletion(data.slice(15));
     else if (data.startsWith("confirm:")) await this.confirmAction(data.slice(8));
     else if (data.startsWith("cancel:")) await this.cancelAction(data.slice(7));
     else await this.sendMessage(await this.statusText(), this.panelKeyboard());
@@ -791,7 +810,121 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
       lines.push(`${icon} ${row.name} (${row.node_id})${selected}`);
     }
     lines.push("\n切换命令：/use 节点ID");
+    lines.push("删除命令：/delete 节点ID（仅限离线节点，需二次确认）");
     return lines.join("\n");
+  }
+
+  private async findNode(nodeReference: string): Promise<{ node: NodeRow | null; ambiguous: NodeRow[] }> {
+    const byId = await this.sql<NodeRow>`SELECT * FROM nodes WHERE node_id = ${nodeReference} LIMIT 1`;
+    if (byId[0]) return { node: byId[0], ambiguous: [] };
+    const byName = await this.sql<NodeRow>`SELECT * FROM nodes WHERE name = ${nodeReference} ORDER BY last_seen DESC LIMIT 10`;
+    return byName.length === 1 ? { node: byName[0] ?? null, ambiguous: [] } : { node: null, ambiguous: byName };
+  }
+
+  private async createNodeDeletionToken(node: NodeRow, expiresAt: number): Promise<string> {
+    const token = crypto.randomUUID();
+    const label = `删除节点 ${node.name} (${node.node_id})`;
+    await this.sql`
+      INSERT INTO pending_confirmations (token, node_id, action, target, label, expires_at)
+      VALUES (${token}, ${node.node_id}, 'delete_node', 'auto', ${label}, ${expiresAt})
+    `;
+    return token;
+  }
+
+  private async requestNodeDeletion(nodeReference: string): Promise<void> {
+    const found = await this.findNode(nodeReference);
+    if (found.ambiguous.length > 1) {
+      const ids = found.ambiguous.map((node) => `${node.name}：${node.node_id}`).join("\n");
+      await this.sendMessage(`发现多个同名节点，请使用节点 ID 删除：\n${ids}`);
+      return;
+    }
+    const node = found.node;
+    if (!node) {
+      await this.sendMessage(`未找到节点：${nodeReference}\n发送 /nodes 查看节点 ID。`);
+      return;
+    }
+    if (!nodeIsOffline(node.last_seen)) {
+      await this.sendMessage(`拒绝删除：${node.name} (${node.node_id}) 仍在正常上报。\n请先停用该 VPS Agent，等待节点显示为离线后再删除。`);
+      return;
+    }
+    const token = await this.createNodeDeletionToken(node, Date.now() + COMMAND_TTL_MS);
+    await this.sendNodeDeletionConfirmation(node, token);
+  }
+
+  private async requestNodeDeletionFromToken(token: string): Promise<void> {
+    const rows = await this.sql<PendingRow>`SELECT * FROM pending_confirmations WHERE token = ${token} AND action = 'delete_node'`;
+    const pending = rows[0];
+    if (!pending || pending.expires_at < Date.now()) {
+      await this.sql`DELETE FROM pending_confirmations WHERE token = ${token}`;
+      await this.sendMessage("删除入口已失效，请重新打开 /nodes。");
+      return;
+    }
+    const nodes = await this.sql<NodeRow>`SELECT * FROM nodes WHERE node_id = ${pending.node_id}`;
+    const node = nodes[0];
+    if (!node) {
+      await this.sql`DELETE FROM pending_confirmations WHERE token = ${token}`;
+      await this.sendMessage("该节点记录已经不存在。", this.panelKeyboard());
+      return;
+    }
+    if (!nodeIsOffline(node.last_seen)) {
+      await this.sql`DELETE FROM pending_confirmations WHERE token = ${token}`;
+      await this.sendMessage(`拒绝删除：${node.name} (${node.node_id}) 已恢复上报。`);
+      return;
+    }
+    await this.sql`UPDATE pending_confirmations SET expires_at = ${Date.now() + COMMAND_TTL_MS} WHERE token = ${token}`;
+    await this.sendNodeDeletionConfirmation(node, token);
+  }
+
+  private async sendNodeDeletionConfirmation(node: NodeRow, token: string): Promise<void> {
+    await this.sendMessage(
+      `⚠️ 请确认删除离线节点\n目标：${node.name} (${node.node_id})\n\n将清除 Cloudflare 管家中的节点状态、告警和待执行命令；不会操作其他 VPS。确认按钮 2 分钟内有效。`,
+      {
+        inline_keyboard: [[
+          { text: "🗑 确认删除", callback_data: `delete_confirm:${token}` },
+          { text: "取消", callback_data: `cancel:${token}` },
+        ]],
+      },
+    );
+  }
+
+  private async confirmNodeDeletion(token: string): Promise<void> {
+    const rows = await this.sql<PendingRow>`SELECT * FROM pending_confirmations WHERE token = ${token} AND action = 'delete_node'`;
+    const pending = rows[0];
+    if (!pending || pending.expires_at < Date.now()) {
+      await this.sql`DELETE FROM pending_confirmations WHERE token = ${token}`;
+      await this.sendMessage("删除确认已失效，请重新发起。", this.panelKeyboard());
+      return;
+    }
+    const nodes = await this.sql<NodeRow>`SELECT * FROM nodes WHERE node_id = ${pending.node_id}`;
+    const node = nodes[0];
+    if (!node) {
+      await this.sql`DELETE FROM pending_confirmations WHERE token = ${token}`;
+      await this.sendMessage("该节点记录已经删除。", this.panelKeyboard());
+      return;
+    }
+    if (!nodeIsOffline(node.last_seen)) {
+      await this.sql`DELETE FROM pending_confirmations WHERE token = ${token}`;
+      await this.sendMessage(`拒绝删除：${node.name} (${node.node_id}) 已恢复上报。`);
+      return;
+    }
+
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("DELETE FROM commands WHERE node_id = ?", node.node_id);
+      this.ctx.storage.sql.exec("DELETE FROM alert_states WHERE node_id = ?", node.node_id);
+      this.ctx.storage.sql.exec("DELETE FROM pending_confirmations WHERE node_id = ?", node.node_id);
+      this.ctx.storage.sql.exec("DELETE FROM nodes WHERE node_id = ?", node.node_id);
+    });
+
+    if (this.state.selectedNode === node.node_id) {
+      const next = await this.sql<NodeRow>`
+        SELECT * FROM nodes
+        ORDER BY CASE WHEN last_seen >= ${Date.now() - NODE_STALE_MS} THEN 0 ELSE 1 END, last_seen DESC
+        LIMIT 1
+      `;
+      this.setState({ ...this.state, selectedNode: next[0]?.node_id ?? "" });
+    }
+    log("info", "offline_node_deleted", { nodeId: node.node_id, nodeName: node.name });
+    await this.sendMessage(`✅ 已删除离线节点记录：${node.name} (${node.node_id})\n该节点不再显示，也不会继续触发离线告警。`, this.panelKeyboard());
   }
 
   private async diagnosticsContext(): Promise<string> {
@@ -1178,7 +1311,22 @@ export class TelegramVpsAgent extends Agent<Env, ManagerState> {
 
   private async nodesKeyboard(): Promise<JsonObject> {
     const rows = await this.sql<NodeRow>`SELECT * FROM nodes ORDER BY name ASC LIMIT 12`;
-    return { inline_keyboard: rows.map((row) => [{ text: row.name, callback_data: `use:${row.node_id}` }]) };
+    const now = Date.now();
+    await this.sql`DELETE FROM pending_confirmations WHERE expires_at < ${now}`;
+    const keyboard: JsonObject[][] = [];
+    for (const row of rows) {
+      const offline = nodeIsOffline(row.last_seen, now);
+      const buttons: JsonObject[] = [{
+        text: `${offline ? "🔴" : "🟢"} ${row.name}`,
+        callback_data: `use:${row.node_id}`,
+      }];
+      if (offline) {
+        const token = await this.createNodeDeletionToken(row, now + MODEL_CHOICE_TTL_MS);
+        buttons.push({ text: "🗑 删除", callback_data: `delete_ask:${token}` });
+      }
+      keyboard.push(buttons);
+    }
+    return { inline_keyboard: keyboard };
   }
 
   private async sendMessage(text: string, replyMarkup?: JsonObject | Promise<JsonObject>): Promise<void> {
