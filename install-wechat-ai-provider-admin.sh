@@ -908,6 +908,21 @@ function addModelToProvider(state, platform, model) {
   return { ref: `${id}/${model}`, added: true };
 }
 
+function configuredModelsReply(state) {
+  const entries = Object.entries(state.providers);
+  if (entries.length === 0) return "尚未添加任何 API 配置。";
+  return `已配置的模型：\n${entries.map(([id, item]) => `${id}：${item.models.join("、")}`).join("\n")}`;
+}
+
+function setDefaultProviderModel(state, platform, model) {
+  const record = state.providers[platform];
+  if (!record || !record.models.includes(model)) throw new Error("model not managed");
+  const ref = `${providerId(platform)}/${model}`;
+  runOpenClaw(state, ["models", "set", ref]);
+  scheduleRestart(state);
+  return ref;
+}
+
 function helpMessage() {
   return [
     "AI Key 管理命令（只限认领者）：",
@@ -925,6 +940,7 @@ function helpMessage() {
     "/aikey status [all|compaction|memory|system|searxng|gateway]",
     "自然语言：添加 DeepSeek，API：你的Key，模型：deepseek-chat",
     "新增模型：给 DeepSeek 添加模型：deepseek-reasoner（已有 API 时无需再发 Key）",
+    "查看模型：查看已配置模型；切换默认：切换 DeepSeek，模型：deepseek-chat。",
     "删除：帮我删除 Gemini 的 API 配置，然后回复 确认删除 Gemini。",
     "状态查询：上下文压缩阈值是多少、查内存和 swap、查 SearXNG 状态、查长期记忆索引。",
     "会话：直接发送“新开对话”即可开始新的对话。",
@@ -979,9 +995,7 @@ export default definePluginEntry({
           return text(Object.entries(PLATFORMS).map(([id, item]) => `${id}：${item.label}${item.note ? `（${item.note}）` : ""}`).join("\n"));
         }
         if (action === "list") {
-          const entries = Object.entries(state.providers);
-          if (entries.length === 0) return text("尚未通过 /aikey 添加 Provider。");
-          return text(entries.map(([id, item]) => `${id}：${item.models.join("、")}`).join("\n"));
+          return text(configuredModelsReply(state));
         }
         if (action === "add") {
           const [platformRaw, apiKey, model, customBaseUrl, customApi] = parts;
@@ -1024,8 +1038,7 @@ export default definePluginEntry({
           const ref = `${providerId(platform)}/${model}`;
           try {
             if (action === "use") {
-              runOpenClaw(state, ["models", "set", ref]);
-              scheduleRestart(state);
+              setDefaultProviderModel(state, platform, model);
               return text(`默认模型已设为 ${ref}；Gateway 将在约 2 秒后重启。当前已固定模型的会话可发送 /model default -s 继承新默认值。`);
             }
             if (action === "session") return text(`请直接发送：/model ${ref} -s`);
@@ -1098,6 +1111,25 @@ export default definePluginEntry({
           } catch {
             return { handled: true, reply: text("添加失败。请检查平台名、模型名和密钥格式；密钥未显示也未写入回复。") };
           }
+        }
+
+        if (naturalProviderRequest?.kind === "use") {
+          const denied = requireOwner(ctx, state);
+          if (denied) return { handled: true, reply: denied };
+          try {
+            const ref = setDefaultProviderModel(state, naturalProviderRequest.platform, naturalProviderRequest.model);
+            return {
+              handled: true,
+              reply: text(`默认模型已设为 ${ref}，网关将在约两秒后重启。当前已固定模型的对话可发送 /model default -s 继承新默认值。`),
+            };
+          } catch {
+            return { handled: true, reply: text("切换失败。请先发送“查看已配置模型”确认平台和模型名。") };
+          }
+        }
+
+        if (isOneOfNaturalCommands(event.cleanedBody, ["查看已配置模型", "查看已添加模型", "查看模型列表"])) {
+          const denied = requireOwner(ctx, state);
+          return { handled: true, reply: denied ?? text(configuredModelsReply(state)) };
         }
 
         if (isOneOfNaturalCommands(event.cleanedBody, ["查看备份", "检查备份", "备份状态"])) {
