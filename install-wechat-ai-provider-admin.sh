@@ -443,8 +443,15 @@ function parseHighRiskConfirmation(value) {
   return match?.[1]?.trim() || null;
 }
 
+function confirmationOperationText(value) {
+  return normalizeNaturalText(value)
+    .trim()
+    .replace(/^(?:我要|我想|我需要|帮我|请(?:你)?|麻烦(?:你)?|能否(?:帮我)?|可以(?:帮我)?|现在(?:帮我)?)/, "")
+    .trim();
+}
+
 function normalizedOperation(value) {
-  return normalizeNaturalText(value).replace(/[\s:：，,。！!、]/g, "").toLowerCase();
+  return confirmationOperationText(value).replace(/[\s:：，,。！!、]/g, "").toLowerCase();
 }
 
 function confirmationActor(ctx) {
@@ -479,7 +486,7 @@ function requestHighRiskConfirmation(ctx, state, request) {
     expiresAt: Date.now() + 5 * 60_000,
   };
   saveState(state);
-  return text(`这是重要操作，暂未执行。请在 5 分钟内单独发送“确认${originalRequest}”进行二次确认；必须带上完整原操作，超时后自动取消。普通查询无需确认。`);
+  return text(`这是重要操作，暂未执行。请在 5 分钟内单独发送“确认${confirmationOperationText(originalRequest)}”进行二次确认；必须带上完整原操作，超时后自动取消。普通查询无需确认。`);
 }
 
 function scheduleRestart(state) {
@@ -754,10 +761,10 @@ export default definePluginEntry({
             return { handled: true, reply: text("这条待确认操作缺少原始内容。请重新发送原操作后再确认。") };
           }
           if (!confirmedRequest) {
-            return { handled: true, reply: text(`请带上完整原操作确认：确认${pending.request.trim()}`) };
+            return { handled: true, reply: text(`请带上完整原操作确认：确认${confirmationOperationText(pending.request)}`) };
           }
           if (normalizedOperation(confirmedRequest) !== normalizedOperation(pending.request)) {
-            return { handled: true, reply: text(`确认内容与待执行操作不一致。请发送：确认${pending.request.trim()}`) };
+            return { handled: true, reply: text(`确认内容与待执行操作不一致。请发送：确认${confirmationOperationText(pending.request)}`) };
           }
           state.pendingHighRisk = null;
           saveState(state);
