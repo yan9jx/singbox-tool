@@ -357,6 +357,55 @@ function providerModelEntries(definition, modelNames, metadata) {
   });
 }
 
+async function fetchAvailableProviderModels(state, platform) {
+  const managed = state.providers[platform];
+  if (!managed) throw new Error("provider not managed");
+  const config = JSON.parse(fs.readFileSync("/root/.openclaw/openclaw.json", "utf8"));
+  const provider = config.models?.providers?.[providerId(platform)];
+  if (!provider || provider.api !== "openai-completions" || typeof provider.apiKey !== "string" || !provider.apiKey) {
+    throw new Error("unsupported provider discovery");
+  }
+  const baseUrl = String(provider.baseUrl ?? "");
+  if (!baseUrl.startsWith("https://")) throw new Error("invalid provider base URL");
+  const endpoint = new URL("models", baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(endpoint, {
+      headers: { Authorization: `Bearer ${provider.apiKey}`, Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error("model list request failed");
+    const payload = await response.json();
+    const ids = Array.isArray(payload?.data)
+      ? payload.data.map((item) => String(item?.id ?? "").trim()).filter((id) => id && !/\s/.test(id))
+      : [];
+    if (ids.length === 0) throw new Error("empty model list");
+    return [...new Set(ids)].sort();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function availableModelsReply(state, platform) {
+  const available = await fetchAvailableProviderModels(state, platform);
+  const configured = new Set(state.providers[platform].models);
+  const newModels = available.filter((model) => !configured.has(model));
+  if (newModels.length === 0) return `${platform} 已配置了当前接口返回的全部 ${available.length} 个模型。`;
+  const shown = newModels.slice(0, 30);
+  const suffix = newModels.length > shown.length ? `\n其余 ${newModels.length - shown.length} 个暂未列出。` : "";
+  return `${platform} 当前可用 ${available.length} 个模型；其中 ${newModels.length} 个尚未添加：\n${shown.map((model) => `- ${model}`).join("\n")}${suffix}\n\n要添加其中一个，直接发送“给 ${platform} 添加模型：模型名”。`;
+}
+
+function naturalProviderModelDiscovery(body, state) {
+  const source = normalizeNaturalText(body).trim();
+  const platform = naturalPlatform(source);
+  if (platform && /(?:获取|查看|检查).*(?:新模型|可用模型|模型列表)/.test(source)) return platform;
+  if (!/^(?:获取|查看|检查)(?:新模型|可用模型|模型列表)$/.test(source)) return null;
+  const configured = Object.keys(state.providers);
+  return configured.length === 1 ? configured[0] : null;
+}
+
 // These status readers deliberately use a small fixed allow-list. They are
 // not a shell and never accept a command, path, API key, or argument supplied
 // by a WeChat message.
@@ -931,6 +980,7 @@ function helpMessage() {
     "/aikey platforms",
     "/aikey add 平台 API_KEY 模型名",
     "/aikey model-add 平台 模型名   （已有 API 时新增模型，不必再发 Key）",
+    "/aikey discover 平台   （列出接口当前可用、尚未添加的模型）",
     "/aikey delete 平台   （随后发送 /aikey confirm-delete 平台）",
     "/aikey add custom API_KEY 模型名 https://接口地址/v1 openai-completions",
     "/aikey list",
@@ -941,6 +991,7 @@ function helpMessage() {
     "/aikey status [all|compaction|memory|system|searxng|gateway]",
     "自然语言：添加 DeepSeek，API：你的Key，模型：deepseek-chat",
     "新增模型：给 DeepSeek 添加模型：deepseek-reasoner（已有 API 时无需再发 Key）",
+    "获取新模型：获取 DeepSeek 新模型；只列出，不自动切换。",
     "查看模型：查看已配置模型；切换默认：切换 DeepSeek，模型：deepseek-chat。",
     "删除 API：删除 DeepSeek API；再单独发送 确认删除 DeepSeek API。",
     "状态查询：上下文压缩阈值是多少、查内存和 swap、查 SearXNG 状态、查长期记忆索引。",
@@ -1023,6 +1074,14 @@ export default definePluginEntry({
             return text("新增模型失败。请确认该平台已通过 /aikey add 添加，且模型名填写正确。Key 未显示也未写入回复。");
           }
         }
+        if (action === "discover") {
+          const platform = (parts[0] ?? "").toLowerCase();
+          try {
+            return text(await availableModelsReply(state, platform));
+          } catch {
+            return text("暂时无法获取该平台的模型列表。请确认该平台已添加 API，或稍后再试。");
+          }
+        }
         if (action === "delete") {
           const platform = (parts[0] ?? "").toLowerCase();
           if (!state.providers[platform]) return text("该平台没有已添加的 API 配置。");
@@ -1077,7 +1136,7 @@ export default definePluginEntry({
 
     api.on(
       "before_agent_reply",
-      (event, ctx) => {
+      async (event, ctx) => {
         if (!isWeChatContext(ctx)) return;
         // A scheduled reminder already received its authorization when it was
         // created. Its internal prompt may mention a user or a cron id, which
@@ -1088,6 +1147,17 @@ export default definePluginEntry({
           state = loadState();
         } catch {
           return { handled: true, reply: text("重要操作确认组件暂时不可用。请在服务器重新运行安装脚本。") };
+        }
+
+        const discoveryPlatform = naturalProviderModelDiscovery(event.cleanedBody, state);
+        if (discoveryPlatform) {
+          const denied = requireOwner(ctx, state);
+          if (denied) return { handled: true, reply: denied };
+          try {
+            return { handled: true, reply: text(await availableModelsReply(state, discoveryPlatform)) };
+          } catch {
+            return { handled: true, reply: text("暂时无法获取该平台的模型列表。请确认该平台已添加 API，或稍后再试。") };
+          }
         }
 
         const naturalModelAddition = parseNaturalModelAddition(event.cleanedBody);
