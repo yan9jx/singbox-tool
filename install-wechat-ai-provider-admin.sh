@@ -851,7 +851,10 @@ function scheduleSessionReset(state, sessionKey) {
 }
 
 function isWeChatContext(ctx) {
-  return ctx.channel === "openclaw-weixin" || ctx.messageProvider === "openclaw-weixin";
+  return ctx?.channel === "openclaw-weixin"
+    || ctx?.channelId === "openclaw-weixin"
+    || ctx?.messageProvider === "openclaw-weixin"
+    || ctx?.metadata?.channel === "openclaw-weixin";
 }
 
 function isNaturalSessionResetRequest(input) {
@@ -1631,6 +1634,95 @@ cat > /etc/systemd/system/openclaw-gateway.service.d/zh-cron-templates.conf <<'E
 ExecStartPre=/usr/bin/node /usr/local/sbin/openclaw-zh-cron-template-patch.js
 EOF
 node /usr/local/sbin/openclaw-zh-cron-template-patch.js
+systemctl daemon-reload
+
+# The Gateway hook is helpful but is not the final authority: some system
+# deliveries arrive with a channelId-only context and some plugin-generated
+# error notices bypass the normal agent path. Patch the Tencent Weixin plugin's
+# actual text-send functions before every Gateway start. This is the final
+# outbound boundary immediately before the Weixin API request is built.
+cat > /usr/local/sbin/openclaw-weixin-chinese-egress-patch.js <<'NODE'
+"use strict";
+
+const fs = require("node:fs");
+const path = require("node:path");
+const childProcess = require("node:child_process");
+
+const projectsDir = "/root/.openclaw/npm/projects";
+const backupDir = "/root/.openclaw/backups/weixin-chinese-egress-patch";
+const marker = "/* OPENCLAW_WEIXIN_CHINESE_EGRESS_GUARD */";
+
+const guard = [
+  marker,
+  "function enforceChineseWeixinOutboundText(value) {",
+  "    const text = String(value ?? \"\");",
+  "    const plain = text.replace(/```[\\s\\S]*?```/g, \"\").replace(/`[^`]*`/g, \"\").replace(/https?:\\/\\/\\S+/g, \"\");",
+  "    const hasChinese = /[一-龥]/.test(plain);",
+  "    const englishWords = plain.match(/\\b[A-Za-z]{3,}\\b/g) ?? [];",
+  "    const rawSystemError = /\\b(?:cron\\s+job|error|failed|failure|timeout|timed out|exception|invalid request|permission denied|unauthorized|forbidden|not found|service unavailable|connection (?:reset|refused|failed)|exec failed|tool call failed|context is too large|auto-compaction|model did not produce a response|request aborted|rate limit|quota exceeded)\\b/i.test(plain);",
+  "    if (rawSystemError) return \"⚠️ 系统任务本次未完成，原始技术提示已拦截。其他功能仍可用，请稍后再试；如果连续出现，我会继续检查。\";",
+  "    if (!hasChinese && englishWords.length >= 3) return \"⚠️ 收到一条未转换为中文的系统提示，已拦截。请稍后再试。\";",
+  "    return text;",
+  "}",
+].join("\n");
+
+function findTargets() {
+  if (!fs.existsSync(projectsDir)) return [];
+  return fs.readdirSync(projectsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("tencent-weixin-openclaw-weixin-"))
+    .map((entry) => path.join(projectsDir, entry.name, "node_modules", "@tencent-weixin", "openclaw-weixin", "dist", "src", "messaging", "send.js"))
+    .filter((filePath) => fs.existsSync(filePath));
+}
+
+function patchTarget(filePath) {
+  const original = fs.readFileSync(filePath, "utf8");
+  if (original.includes(marker)) return "already patched";
+  const anchor = "function buildTextMessageReq(params) {";
+  const textBuilder = "    const item_list = text\n        ? [{ type: MessageItemType.TEXT, text_item: { text } }]\n        : [];";
+  const safeTextBuilder = "    const safeText = enforceChineseWeixinOutboundText(text);\n    const item_list = safeText\n        ? [{ type: MessageItemType.TEXT, text_item: { text: safeText } }]\n        : [];";
+  const itemAnchor = "    const clientId = params.clientId ?? generateClientId();\n    const req = {";
+  const safeItemAnchor = "    const clientId = params.clientId ?? generateClientId();\n    const safeItem = item?.type === MessageItemType.TEXT && typeof item?.text_item?.text === \"string\"\n        ? { ...item, text_item: { ...item.text_item, text: enforceChineseWeixinOutboundText(item.text_item.text) } }\n        : item;\n    const req = {";
+  const mediaCaption = "    if (text) {\n        items.push({ type: MessageItemType.TEXT, text_item: { text } });\n    }";
+  const safeMediaCaption = "    if (text) {\n        const safeText = enforceChineseWeixinOutboundText(text);\n        items.push({ type: MessageItemType.TEXT, text_item: { text: safeText } });\n    }";
+  if (!original.includes(anchor) || !original.includes(textBuilder) || !original.includes(itemAnchor) || !original.includes(mediaCaption)) {
+    throw new Error("未识别微信发送文件版本，未修改");
+  }
+  let updated = original.replace(anchor, `${guard}\n${anchor}`)
+    .replace(textBuilder, safeTextBuilder)
+    .replace(itemAnchor, safeItemAnchor)
+    .replace("item_list: [item],", "item_list: [safeItem],")
+    .replace(mediaCaption, safeMediaCaption);
+  if (updated === original || !updated.includes(marker)) throw new Error("补丁未写入预期标记");
+  fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+  const backupPath = path.join(backupDir, `${path.basename(path.dirname(filePath))}.before-weixin-chinese-egress.js`);
+  if (!fs.existsSync(backupPath)) fs.writeFileSync(backupPath, original, { mode: 0o600 });
+  const tempPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.weixin-chinese-tmp.js`);
+  fs.writeFileSync(tempPath, updated, { mode: 0o644 });
+  try {
+    childProcess.execFileSync(process.execPath, ["--check", tempPath], { stdio: "pipe" });
+    fs.renameSync(tempPath, filePath);
+  } catch (error) {
+    try { fs.unlinkSync(tempPath); } catch {}
+    throw error;
+  }
+  return "patched";
+}
+
+try {
+  const targets = findTargets();
+  if (targets.length === 0) throw new Error("未找到腾讯微信插件的最终发送文件");
+  for (const target of targets) console.log(`[微信中文出站拦截] ${patchTarget(target)}：${target}`);
+} catch (error) {
+  // Do not prevent the Gateway from starting if a future plugin layout changes.
+  console.warn(`[微信中文出站拦截] 未完成：${error.message}`);
+}
+NODE
+chmod 700 /usr/local/sbin/openclaw-weixin-chinese-egress-patch.js
+cat > /etc/systemd/system/openclaw-gateway.service.d/weixin-chinese-egress.conf <<'EOF'
+[Service]
+ExecStartPre=/usr/bin/node /usr/local/sbin/openclaw-weixin-chinese-egress-patch.js
+EOF
+node /usr/local/sbin/openclaw-weixin-chinese-egress-patch.js
 systemctl daemon-reload
 
 # The owner explicitly requested natural-language host actions from WeChat
