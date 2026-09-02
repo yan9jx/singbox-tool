@@ -315,7 +315,7 @@ def collect_snapshot(state):
         "listening_tcp_ports": sorted(set(listening_tcp_ports)),
         "alert_policy": {
             "ram_warn": manager_cfg.get("ram_warn", 80),
-            "swap_warn": manager_cfg.get("swap_warn", 30),
+            "swap_warn": manager_cfg.get("swap_warn", 60),
             "cpu_warn": manager_cfg.get("cpu_warn", 80),
             "disk_warn": manager_cfg.get("disk_warn", 90),
             "bandwidth_mbps": manager_cfg.get("bandwidth_mbps", 1000),

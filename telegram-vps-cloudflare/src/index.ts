@@ -209,7 +209,7 @@ export function nodeIssues(snapshot: JsonObject): { resource: string; service: s
   const cpuPct = asNumber(cpu.used_pct);
   const diskPct = asNumber(disk.used_pct);
   if (memoryPct >= (asNumber(policy.ram_warn) || 80)) resource.push(`RAM ${memoryPct}%`);
-  if (swapPct >= (asNumber(policy.swap_warn) || 30)) resource.push(`SWAP ${swapPct}%`);
+  if (swapPct >= (asNumber(policy.swap_warn) || 60)) resource.push(`SWAP ${swapPct}%`);
   if (cpuPct >= (asNumber(policy.cpu_warn) || 80)) resource.push(`CPU ${cpuPct}%`);
   if (diskPct >= (asNumber(policy.disk_warn) || 90)) resource.push(`磁盘 ${diskPct}%`);
 
@@ -253,7 +253,7 @@ export function alertPolicyText(snapshot: JsonObject, nodeName: string, version:
   const policy = isObject(diagnostics.alert_policy) ? diagnostics.alert_policy : {};
   const configured = Object.keys(policy).length > 0;
   const ram = asNumber(policy.ram_warn) || 80;
-  const swap = asNumber(policy.swap_warn) || 30;
+  const swap = asNumber(policy.swap_warn) || 60;
   const cpu = asNumber(policy.cpu_warn) || 80;
   const disk = asNumber(policy.disk_warn) || 90;
   const bandwidth = asNumber(policy.bandwidth_mbps);

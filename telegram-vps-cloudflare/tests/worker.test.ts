@@ -46,6 +46,11 @@ describe("standalone Telegram VPS Worker", () => {
         listening_tcp_ports: [443],
       },
     })).toEqual({ resource: "RAM 85%；CPU 91%", service: "xray: failed；端口未监听: 8443" });
+    expect(nodeIssues({ diagnostics: { memory: { swap_used_pct: 31.7 } } }))
+      .toEqual({ resource: "", service: "" });
+    expect(nodeIssues({ diagnostics: { memory: { swap_used_pct: 60 } } }))
+      .toEqual({ resource: "SWAP 60%", service: "" });
+    expect(alertPolicyText({ diagnostics: {} }, "Test VPS", "1.1.3")).toContain("SWAP：≥ 60%");
     expect(alertPolicyText({
       diagnostics: {
         alert_policy: { cpu_warn: 75, ram_warn: 82, swap_warn: 35, disk_warn: 88, bandwidth_mbps: 100, traffic_saturation_ratio: 80 },
