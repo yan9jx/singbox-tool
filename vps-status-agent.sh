@@ -91,13 +91,16 @@ install -d -m 700 /var/lib/ejectors-vps-agent
 
 cat > "$APP" <<'PY'
 #!/usr/bin/env python3
-import argparse, concurrent.futures, glob, json, os, platform, re, shutil, socket, statistics, subprocess, time, urllib.request
+import argparse, concurrent.futures, glob, json, math, os, platform, re, shutil, socket, statistics, subprocess, time, urllib.request
 
-VERSION = "1.2.5"
+VERSION = "1.2.6"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
 UPDATE_SERVICE = "ejectors-vps-agent-update.service"
+PING_COUNT = 10
+PING_INTERVAL_SECONDS = 0.25
+PING_TIMEOUT_SECONDS = 8
 
 def read_conf():
     data = {}
@@ -249,28 +252,37 @@ def command(args):
 
 def ping_target(target):
     if not shutil.which("ping"):
-        return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable"}
+        return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
     env = dict(os.environ, LC_ALL="C", LANG="C")
     try:
         result = subprocess.run(
-            ["ping", "-n", "-q", "-c", "4", "-W", "1", target],
-            text=True, capture_output=True, timeout=7, env=env,
+            ["ping", "-n", "-c", str(PING_COUNT), "-i", str(PING_INTERVAL_SECONDS), "-W", "1", target],
+            text=True, capture_output=True, timeout=PING_TIMEOUT_SECONDS, env=env,
         )
         output = result.stdout + "\n" + result.stderr
         loss_match = re.search(r"([\d.]+)%\s+packet loss", output)
-        latency_match = re.search(r"=\s*[\d.]+/([\d.]+)/", output)
-        if not loss_match:
-            return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable"}
+        packet_match = re.search(r"(\d+)\s+packets transmitted,\s+(\d+)\s+(?:packets )?received", output)
+        samples = [float(value) for value in re.findall(r"time[=<]([\d.]+)\s*ms", output)]
+        if not loss_match or not packet_match:
+            return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
+        sent, received = int(packet_match.group(1)), int(packet_match.group(2))
         loss = round(float(loss_match.group(1)), 1)
-        latency = round(float(latency_match.group(1)), 1) if latency_match else None
+        latency = round(float(statistics.median(samples)), 1) if samples else None
+        p95 = round(float(sorted(samples)[max(0, math.ceil(len(samples) * 0.95) - 1)]), 1) if samples else None
+        deltas = [abs(samples[index] - samples[index - 1]) for index in range(1, len(samples))]
+        jitter = round(float(statistics.fmean(deltas)), 1) if deltas else 0.0 if samples else None
         return {
             "target": target,
             "latency_ms": latency,
             "loss_pct": loss,
-            "status": "ok" if loss < 100 else "loss",
+            "jitter_ms": jitter,
+            "p95_ms": p95,
+            "packets_sent": sent,
+            "packets_received": received,
+            "status": "ok" if loss == 0 else "loss",
         }
     except Exception:
-        return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable"}
+        return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
 
 def probe_carrier(probe):
     targets = list(dict.fromkeys(str(value) for value in probe.get("targets", [])[:5] if value))
@@ -279,6 +291,10 @@ def probe_carrier(probe):
         "target": "",
         "latency_ms": None,
         "loss_pct": None,
+        "jitter_ms": None,
+        "p95_ms": None,
+        "packets_sent": 0,
+        "packets_received": 0,
         "status": "unavailable",
         "targets_tested": len(targets),
         "responsive_targets": 0,
@@ -286,19 +302,24 @@ def probe_carrier(probe):
     if not targets: return base
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
         results = list(executor.map(ping_target, targets))
-    responsive = [item for item in results if item["status"] == "ok" and item["latency_ms"] is not None]
+    responsive = [item for item in results if item["status"] in {"ok", "loss"} and item["latency_ms"] is not None]
     if not responsive: return base
-    ranked = sorted(responsive, key=lambda item: (item["latency_ms"], item["loss_pct"]))
-    selected = ranked[:min(3, len(ranked))]
-    latency = round(float(statistics.median(item["latency_ms"] for item in selected)), 1)
-    loss = round(float(statistics.median(item["loss_pct"] for item in selected)), 1)
-    representative = min(selected, key=lambda item: abs(item["latency_ms"] - latency))
+    carrier_median = float(statistics.median(item["latency_ms"] for item in responsive))
+    representative = min(responsive, key=lambda item: (
+        item["loss_pct"],
+        abs(item["latency_ms"] - carrier_median),
+        item.get("jitter_ms") if item.get("jitter_ms") is not None else float("inf"),
+    ))
     return {
         **base,
         "target": representative["target"],
-        "latency_ms": latency,
-        "loss_pct": loss,
-        "status": "ok",
+        "latency_ms": representative["latency_ms"],
+        "loss_pct": representative["loss_pct"],
+        "jitter_ms": representative.get("jitter_ms"),
+        "p95_ms": representative.get("p95_ms"),
+        "packets_sent": representative.get("packets_sent", 0),
+        "packets_received": representative.get("packets_received", 0),
+        "status": representative["status"],
         "responsive_targets": len(responsive),
     }
 

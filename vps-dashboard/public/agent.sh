@@ -4,9 +4,12 @@ set -euo pipefail
 APP="/usr/local/bin/ejectors-vps-agent"
 CONF="/etc/ejectors-vps-agent.conf"
 SERVICE="/etc/systemd/system/ejectors-vps-agent.service"
+UPDATE_APP="/usr/local/sbin/ejectors-vps-agent-update"
+UPDATE_SERVICE="/etc/systemd/system/ejectors-vps-agent-update.service"
+UPDATE_TIMER="/etc/systemd/system/ejectors-vps-agent-update.timer"
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-  echo "请使用 root 运行：sudo bash $0"
+  echo "请使用 root 权限运行：sudo bash $0"
   exit 1
 fi
 
@@ -14,19 +17,20 @@ action="${1:-install}"
 
 case "$action" in
   uninstall)
-    systemctl disable --now ejectors-vps-agent.service 2>/dev/null || true
-    rm -f "$SERVICE" "$APP" "$CONF" /var/lib/ejectors-vps-agent.json
+    systemctl disable --now ejectors-vps-agent.service ejectors-vps-agent-update.timer 2>/dev/null || true
+    rm -f "$SERVICE" "$UPDATE_SERVICE" "$UPDATE_TIMER" "$UPDATE_APP" "$APP" "$CONF" /var/lib/ejectors-vps-agent.json /var/lib/ejectors-vps-agent/update.json
     systemctl daemon-reload
-    echo "VPS 状态上报已卸载。面板会在约 150 秒后显示离线。"
+    echo "VPS 状态上报已卸载；网页会在约 150 秒后显示离线。"
     exit 0
     ;;
   status)
     systemctl status ejectors-vps-agent.service --no-pager
+    systemctl status ejectors-vps-agent-update.timer --no-pager || true
     exit $?
     ;;
-  install) ;;
+  install|update) ;;
   *)
-    echo "用法：$0 [install|uninstall|status]"
+    echo "用法：$0 [install|update|uninstall|status]"
     exit 1
     ;;
 esac
@@ -36,37 +40,43 @@ command -v python3 >/dev/null 2>&1 || {
   exit 1
 }
 
-default_url="${DASHBOARD_URL:-}"
-default_id="$(hostname | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-' | cut -c1-64)"
-
-if [[ -n "$default_url" ]]; then
-  read -rp "面板地址 [$default_url]: " input_url
-  dashboard_url="${input_url:-$default_url}"
+if [[ -f "$CONF" ]]; then
+  read_conf_value() {
+    sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$CONF" | head -n1
+  }
+  dashboard_url="$(read_conf_value DASHBOARD_URL)"
+  ingest_token="$(read_conf_value INGEST_TOKEN)"
+  node_id="$(read_conf_value NODE_ID)"
+  node_name="$(read_conf_value NODE_NAME)"
+  provider="$(read_conf_value PROVIDER)"
+  location="$(read_conf_value LOCATION)"
+  node_name="${node_name:-$(hostname)}"
+  [[ -n "$dashboard_url" && -n "$ingest_token" && -n "$node_id" ]] || { echo "现有配置不完整，请检查 $CONF。"; exit 1; }
+  echo "检测到现有配置，将保留节点 ID、上报密钥和节点信息。"
 else
-  read -rp "面板地址（例如 https://status.example.com）: " dashboard_url
-fi
-dashboard_url="${dashboard_url%/}"
-[[ "$dashboard_url" =~ ^https?://[^[:space:]]+$ ]] || { echo "面板地址格式错误。"; exit 1; }
+  [[ "$action" != "update" ]] || { echo "未找到现有配置，不能执行更新。"; exit 1; }
+  default_url="${DASHBOARD_URL:-}"
+  default_id="$(hostname | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-' | cut -c1-64)"
+  if [[ -n "$default_url" ]]; then
+    read -rp "状态面板地址 [$default_url]: " input_url
+    dashboard_url="${input_url:-$default_url}"
+  else
+    read -rp "状态面板地址（例如 https://status.example.com）: " dashboard_url
+  fi
+  dashboard_url="${dashboard_url%/}"
+  [[ "$dashboard_url" =~ ^https?://[^[:space:]]+$ ]] || { echo "状态面板地址格式错误。"; exit 1; }
+  if [[ -n "${INGEST_TOKEN:-}" ]]; then ingest_token="$INGEST_TOKEN"; else read -rsp "网页上报 Token（输入时不会显示）: " ingest_token; echo; fi
+  [[ -n "$ingest_token" ]] || { echo "网页上报 Token 不能为空。"; exit 1; }
+  read -rp "节点 ID [$default_id]: " input_id
+  node_id="${input_id:-$default_id}"
+  [[ "$node_id" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]] || { echo "节点 ID 格式错误，只能使用字母、数字、点、下划线和短横线。"; exit 1; }
+  read -rp "节点名称 [$(hostname)]: " input_name
+  node_name="${input_name:-$(hostname)}"
+  read -rp "服务商（可留空）: " provider
+  read -rp "机房位置（可留空）: " location
 
-if [[ -n "${INGEST_TOKEN:-}" ]]; then
-  ingest_token="$INGEST_TOKEN"
-else
-  read -rsp "上报密钥: " ingest_token
-  echo
-fi
-[[ -n "$ingest_token" ]] || { echo "上报密钥不能为空。"; exit 1; }
-
-read -rp "节点 ID [$default_id]: " input_id
-node_id="${input_id:-$default_id}"
-[[ "$node_id" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]] || { echo "节点 ID 格式错误。"; exit 1; }
-
-read -rp "显示名称 [$(hostname)]: " input_name
-node_name="${input_name:-$(hostname)}"
-read -rp "服务商（可留空）: " provider
-read -rp "地区（可留空）: " location
-
-install -d -m 700 /var/lib/ejectors-vps-agent
-cat > "$CONF" <<EOF
+  install -d -m 700 /var/lib/ejectors-vps-agent
+  cat > "$CONF" <<EOF
 DASHBOARD_URL='$dashboard_url'
 INGEST_TOKEN='$ingest_token'
 NODE_ID='$node_id'
@@ -74,15 +84,23 @@ NODE_NAME='$node_name'
 PROVIDER='$provider'
 LOCATION='$location'
 EOF
-chmod 600 "$CONF"
+  chmod 600 "$CONF"
+fi
+
+install -d -m 700 /var/lib/ejectors-vps-agent
 
 cat > "$APP" <<'PY'
 #!/usr/bin/env python3
-import argparse, json, os, platform, re, shutil, socket, subprocess, time, urllib.request
+import argparse, concurrent.futures, glob, json, math, os, platform, re, shutil, socket, statistics, subprocess, time, urllib.request
 
-VERSION = "1.0.0"
+VERSION = "1.2.6"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
+UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
+UPDATE_SERVICE = "ejectors-vps-agent-update.service"
+PING_COUNT = 10
+PING_INTERVAL_SECONDS = 0.25
+PING_TIMEOUT_SECONDS = 8
 
 def read_conf():
     data = {}
@@ -100,11 +118,80 @@ def read_json(path, default):
     except Exception:
         return default
 
-def write_state(data):
-    os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    tmp = STATE + ".tmp"
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f: json.dump(data, f)
-    os.replace(tmp, STATE)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+def write_state(data):
+    write_json(STATE, data)
+
+def version_parts(value):
+    if not isinstance(value, str) or not re.fullmatch(r"\d+(?:\.\d+){1,3}", value): return None
+    return tuple(int(part) for part in value.split("."))
+
+def compare_versions(left, right):
+    a, b = version_parts(left), version_parts(right)
+    if a is None or b is None: return None
+    width = max(len(a), len(b))
+    a += (0,) * (width - len(a)); b += (0,) * (width - len(b))
+    return (a > b) - (a < b)
+
+def agent_update_status():
+    data = read_json(UPDATE_STATE, {})
+    if not isinstance(data, dict): return None
+    request_id = data.get("request_id", "")
+    target_version = data.get("target_version", "")
+    status = data.get("status", "")
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id) or version_parts(target_version) is None or status not in {"accepted", "succeeded", "failed"}:
+        return None
+    if status == "accepted" and compare_versions(VERSION, target_version) >= 0:
+        data.update({"status": "succeeded", "version": VERSION, "updated_at": int(time.time()), "error": ""})
+        write_json(UPDATE_STATE, data)
+    return {
+        "request_id": request_id,
+        "target_version": target_version,
+        "version": VERSION,
+        "status": data["status"],
+        "updated_at": int(data.get("updated_at", 0)),
+        "error": str(data.get("error", ""))[:120] if data["status"] == "failed" else "",
+    }
+
+def handle_agent_action(action):
+    if not isinstance(action, dict) or action.get("type") != "agent_update": return
+    request_id = action.get("request_id", "")
+    target_version = action.get("target_version", "")
+    requested_at = action.get("requested_at")
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id) or version_parts(target_version) is None or not isinstance(requested_at, int) or requested_at <= 0:
+        return
+    current = agent_update_status()
+    if current and current["request_id"] == request_id and current["status"] in {"accepted", "succeeded", "failed"}:
+        return
+    now = int(time.time())
+    update = {
+        "request_id": request_id,
+        "target_version": target_version,
+        "version": VERSION,
+        "status": "succeeded" if compare_versions(VERSION, target_version) >= 0 else "accepted",
+        "updated_at": now,
+        "error": "",
+    }
+    write_json(UPDATE_STATE, update)
+    if update["status"] == "succeeded": return
+    try:
+        result = subprocess.run(
+            ["systemctl", "start", "--no-block", UPDATE_SERVICE],
+            text=True, capture_output=True, timeout=5,
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "systemctl 启动更新服务失败").strip()[:120]
+            update.update({"status": "failed", "updated_at": int(time.time()), "error": message})
+            write_json(UPDATE_STATE, update)
+    except Exception as exc:
+        update.update({"status": "failed", "updated_at": int(time.time()), "error": str(exc)[:120]})
+        write_json(UPDATE_STATE, update)
 
 def meminfo():
     values = {}
@@ -163,14 +250,120 @@ def command(args):
     try: return subprocess.run(args, text=True, capture_output=True, timeout=4).stdout.strip()
     except Exception: return ""
 
-def service_info(label, unit_names, process_names):
+def ping_target(target):
+    if not shutil.which("ping"):
+        return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
+    env = dict(os.environ, LC_ALL="C", LANG="C")
+    try:
+        result = subprocess.run(
+            ["ping", "-n", "-c", str(PING_COUNT), "-i", str(PING_INTERVAL_SECONDS), "-W", "1", target],
+            text=True, capture_output=True, timeout=PING_TIMEOUT_SECONDS, env=env,
+        )
+        output = result.stdout + "\n" + result.stderr
+        loss_match = re.search(r"([\d.]+)%\s+packet loss", output)
+        packet_match = re.search(r"(\d+)\s+packets transmitted,\s+(\d+)\s+(?:packets )?received", output)
+        samples = [float(value) for value in re.findall(r"time[=<]([\d.]+)\s*ms", output)]
+        if not loss_match or not packet_match:
+            return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
+        sent, received = int(packet_match.group(1)), int(packet_match.group(2))
+        loss = round(float(loss_match.group(1)), 1)
+        latency = round(float(statistics.median(samples)), 1) if samples else None
+        p95 = round(float(sorted(samples)[max(0, math.ceil(len(samples) * 0.95) - 1)]), 1) if samples else None
+        deltas = [abs(samples[index] - samples[index - 1]) for index in range(1, len(samples))]
+        jitter = round(float(statistics.fmean(deltas)), 1) if deltas else 0.0 if samples else None
+        return {
+            "target": target,
+            "latency_ms": latency,
+            "loss_pct": loss,
+            "jitter_ms": jitter,
+            "p95_ms": p95,
+            "packets_sent": sent,
+            "packets_received": received,
+            "status": "ok" if loss == 0 else "loss",
+        }
+    except Exception:
+        return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
+
+def probe_carrier(probe):
+    targets = list(dict.fromkeys(str(value) for value in probe.get("targets", [])[:5] if value))
+    base = {
+        "carrier": str(probe.get("carrier", "")),
+        "target": "",
+        "latency_ms": None,
+        "loss_pct": None,
+        "jitter_ms": None,
+        "p95_ms": None,
+        "packets_sent": 0,
+        "packets_received": 0,
+        "status": "unavailable",
+        "targets_tested": len(targets),
+        "responsive_targets": 0,
+    }
+    if not targets: return base
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
+        results = list(executor.map(ping_target, targets))
+    responsive = [item for item in results if item["status"] in {"ok", "loss"} and item["latency_ms"] is not None]
+    if not responsive: return base
+    carrier_median = float(statistics.median(item["latency_ms"] for item in responsive))
+    representative = min(responsive, key=lambda item: (
+        item["loss_pct"],
+        abs(item["latency_ms"] - carrier_median),
+        item.get("jitter_ms") if item.get("jitter_ms") is not None else float("inf"),
+    ))
+    return {
+        **base,
+        "target": representative["target"],
+        "latency_ms": representative["latency_ms"],
+        "loss_pct": representative["loss_pct"],
+        "jitter_ms": representative.get("jitter_ms"),
+        "p95_ms": representative.get("p95_ms"),
+        "packets_sent": representative.get("packets_sent", 0),
+        "packets_received": representative.get("packets_received", 0),
+        "status": representative["status"],
+        "responsive_targets": len(responsive),
+    }
+
+def network_quality(config):
+    if not config or not config.get("enabled") or not config.get("probes"):
+        return None
+    probes = list(config.get("probes", []))[:3]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as executor:
+        results = list(executor.map(probe_carrier, probes))
+    return {
+        "region": str(config.get("region", "")),
+        "measured_at": int(time.time()),
+        "probes": results,
+    }
+
+def service_snapshot():
     units = command(["systemctl", "list-unit-files", "--type=service", "--no-legend"])
-    processes = command(["ps", "-eo", "comm="]).splitlines()
+    processes = {item.strip() for item in command(["ps", "-eo", "comm="]).splitlines() if item.strip()}
+    return units, processes
+
+def service_info(label, unit_names, units):
     installed = any(re.search(rf"^{re.escape(unit)}\.service\s", units, re.M) for unit in unit_names)
-    installed = installed or any(shutil.which(name) for name in process_names) or any(p.strip() in process_names for p in processes)
-    running = any(command(["systemctl", "is-active", unit]) == "active" for unit in unit_names)
-    running = running or any(p.strip() in process_names for p in processes)
+    running = installed and any(command(["systemctl", "is-active", unit]) == "active" for unit in unit_names)
     return {"name": label, "installed": bool(installed), "running": bool(running)}
+
+def naive_service_info(units, processes):
+    marker_paths = [
+        "/etc/naiveproxy/node-info.env",
+        "/etc/systemd/system/naiveproxy.service",
+        "/etc/systemd/system/caddy-naive.service",
+    ]
+    marker_patterns = [
+        "/etc/caddy-naive/sites/naive-*.caddy",
+        "/etc/caddy-naive/routes/*/naive.caddy",
+        "/etc/caddy-naive/routes/*/naive-connect.caddy",
+    ]
+    installed = any(os.path.isfile(path) for path in marker_paths)
+    installed = installed or any(glob.glob(pattern) for pattern in marker_patterns)
+    unit_names = ["naiveproxy", "caddy-naive", "shared-caddy", "caddy"]
+    running = installed and (
+        any(command(["systemctl", "is-active", unit]) == "active" for unit in unit_names)
+        or any(name in processes for name in ["naive", "naiveproxy", "caddy-naive", "caddy"])
+    )
+    return {"name": "Naive", "installed": bool(installed), "running": bool(running)}
 
 def listening_ports():
     output = command(["ss", "-H", "-lntup"])
@@ -212,22 +405,24 @@ def os_name():
     except Exception:
         return platform.system()
 
-def collect(conf):
+def collect(conf, probe_config=None):
     memory, swap = meminfo()
     disk = shutil.disk_usage("/")
+    units, processes = service_snapshot()
     services = [
-        service_info("xray", ["xray"], ["xray"]),
-        service_info("sing-box", ["sing-box", "singbox"], ["sing-box", "singbox"]),
-        service_info("网盘", ["filebrowser"], ["filebrowser"]),
+        service_info("xray", ["xray", "xray-xhttp", "reality-xhttp"], units),
+        service_info("sing-box", ["sing-box", "singbox"], units),
+        naive_service_info(units, processes),
+        service_info("文件浏览器", ["filebrowser"], units),
     ]
     installed = [item for item in services if item["installed"]]
-    alerts = [f'{item["name"]} 已停止' for item in installed if not item["running"]]
+    alerts = [f'{item["name"]} 未运行' for item in installed if not item["running"]]
     with open("/proc/uptime") as f: uptime = int(float(f.read().split()[0]))
     boot_id = ""
     try:
         with open("/proc/sys/kernel/random/boot_id") as f: boot_id = f.read().strip()
     except Exception: pass
-    return {
+    payload = {
         "node_id": conf["NODE_ID"], "name": conf["NODE_NAME"],
         "provider": conf.get("PROVIDER", ""), "location": conf.get("LOCATION", ""),
         "hostname": socket.gethostname(), "os": os_name(), "kernel": platform.release(), "arch": platform.machine(),
@@ -239,6 +434,11 @@ def collect(conf):
         "reachability": {"outbound": "normal", "inbound_probe": "unknown"},
         "agent_version": VERSION,
     }
+    quality = network_quality(probe_config)
+    if quality: payload["network_quality"] = quality
+    update = agent_update_status()
+    if update: payload["agent_update_status"] = update
+    return payload
 
 def post(conf, endpoint, payload):
     body = json.dumps(payload, separators=(",", ":")).encode()
@@ -246,22 +446,31 @@ def post(conf, endpoint, payload):
         "Content-Type": "application/json", "Authorization": "Bearer " + conf["INGEST_TOKEN"], "User-Agent": "ejectors-vps-agent/" + VERSION,
     })
     with urllib.request.urlopen(req, timeout=15) as response:
-        return response.read().decode()
+        try: return json.loads(response.read().decode())
+        except Exception: return {}
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--shutdown", action="store_true")
+    parser.add_argument("--version", action="store_true")
     args = parser.parse_args()
+    if args.version:
+        print(VERSION)
+        return
     conf = read_conf()
     if args.shutdown:
         payload = {"node_id": conf["NODE_ID"], "name": conf["NODE_NAME"], "provider": conf.get("PROVIDER", ""), "location": conf.get("LOCATION", ""), "agent_version": VERSION}
         try: post(conf, "/api/v1/shutdown", payload)
         except Exception: pass
         return
+    probe_config = None
     while True:
         try:
-            post(conf, "/api/v1/heartbeat", collect(conf))
+            response = post(conf, "/api/v1/heartbeat", collect(conf, probe_config))
+            if isinstance(response, dict) and isinstance(response.get("probe_config"), dict):
+                probe_config = response["probe_config"]
+            if isinstance(response, dict): handle_agent_action(response.get("agent_action"))
         except Exception as exc:
             print(time.strftime("%F %T"), "report failed:", exc, flush=True)
         if not args.loop: return
@@ -270,6 +479,30 @@ def main():
 if __name__ == "__main__": main()
 PY
 chmod 755 "$APP"
+
+cat > "$UPDATE_APP" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+APP="/usr/local/bin/ejectors-vps-agent"
+URL="https://raw.githubusercontent.com/yan9jx/singbox-tool/main/vps-status-agent.sh"
+tmp="$(mktemp /tmp/ejectors-agent-update.XXXXXX.sh)"
+trap 'rm -f "$tmp"' EXIT
+python3 - "$URL?ts=$(date +%s)" "$tmp" <<'PY'
+import sys, urllib.request
+req = urllib.request.Request(sys.argv[1], headers={"User-Agent": "ejectors-vps-agent-updater"})
+with urllib.request.urlopen(req, timeout=30) as response, open(sys.argv[2], "wb") as output:
+    output.write(response.read())
+PY
+current="$("$APP" --version 2>/dev/null || echo 0)"
+remote="$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' "$tmp" | head -n1)"
+[[ -n "$remote" ]] || { echo "无法读取远程版本。"; exit 1; }
+[[ "$current" != "$remote" ]] || { echo "Agent 已是最新版本：$current"; exit 0; }
+newest="$(printf '%s\n%s\n' "$current" "$remote" | sort -V | tail -n1)"
+[[ "$newest" == "$remote" ]] || { echo "远程版本较旧，保留当前版本：$current"; exit 0; }
+echo "更新 Agent：$current -> $remote"
+bash "$tmp" update
+EOF
+chmod 755 "$UPDATE_APP"
 
 cat > "$SERVICE" <<EOF
 [Unit]
@@ -292,10 +525,37 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
+cat > "$UPDATE_SERVICE" <<EOF
+[Unit]
+Description=Ejectors VPS Agent Auto Update
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$UPDATE_APP
+EOF
+
+cat > "$UPDATE_TIMER" <<'EOF'
+[Unit]
+Description=Check Ejectors VPS Agent updates daily
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 Asia/Shanghai
+Persistent=true
+Unit=ejectors-vps-agent-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
-systemctl enable --now ejectors-vps-agent.service
+systemctl enable ejectors-vps-agent.service
+systemctl restart ejectors-vps-agent.service
+systemctl enable --now ejectors-vps-agent-update.timer
 sleep 2
 systemctl --no-pager --full status ejectors-vps-agent.service || true
 echo
-echo "安装完成。节点通常会在 10 秒内出现在面板。"
+echo "安装完成：状态数据默认每 10 秒上报一次。"
+echo "自动更新：每天北京时间 04:00 检查。"
 echo "卸载命令：sudo bash $0 uninstall"
