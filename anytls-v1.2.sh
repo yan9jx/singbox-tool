@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
-# AnyTLS 独立安装脚本，适用于 Debian/Ubuntu。
+# AnyTLS 独立安装脚本（sing-box 内核），适用于 Debian/Ubuntu。
+# 由 anytls-v1.2.sh（anytls-go 内核）改造而来：
+#   - 运行时：anytls-go 单二进制 CLi 参数  ->  sing-box + JSON 配置
+#   - 证书：  anytls-go 内建自签            ->  自签(可选) 或 Let's Encrypt 正规证书
+#   - 新增：  可自定义 padding_scheme（anytls-go 版本没用到这个参数）
 # 不会停止 Nginx、云盘/File Browser 或反代服务。
 # 如果 TCP/443 已被占用，会自动选择可用的 *443 备用端口。
 set -Eeuo pipefail
 
-SCRIPT_VERSION="v1.4"
+SCRIPT_VERSION="v2.0-singbox"
 INSTALL_DIR="/opt/anytls"
-BIN="$INSTALL_DIR/anytls-server"
+BIN="$INSTALL_DIR/sing-box"
 CONFIG_DIR="/etc/anytls"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+CERT_DIR="$CONFIG_DIR/tls"
 INFO_FILE="$CONFIG_DIR/node-info.env"
 SERVICE_FILE="/etc/systemd/system/anytls.service"
 SERVICE_NAME="anytls"
 DEFAULT_PORT=443
+MIN_MINOR=12   # sing-box >= 1.12 才有 anytls inbound
 DEFAULT_DASHBOARD_URL="${DEFAULT_DASHBOARD_URL:-}"
 DASHBOARD_AGENT_CONF="${DASHBOARD_AGENT_CONF:-/etc/ejectors-vps-agent.conf}"
 SUBSCRIPTION_INFO_FILE="$CONFIG_DIR/subscription.env"
@@ -24,13 +31,13 @@ port_is_listening() { ss -H -lnt "sport = :$1" 2>/dev/null | grep -q .; }
 
 install_deps() {
   local missing=() cmd
-  for cmd in curl unzip openssl qrencode ss; do
+  for cmd in curl tar openssl qrencode ss; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   (( ${#missing[@]} == 0 )) && return
   command -v apt-get >/dev/null 2>&1 || die "仅支持 Debian/Ubuntu（apt-get）。"
   apt-get update -y
-  DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip openssl qrencode ca-certificates iproute2 tzdata
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl tar openssl qrencode ca-certificates iproute2 tzdata
 }
 
 public_ipv4() { curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || true; }
@@ -106,28 +113,112 @@ json_escape() {
   printf '%s' "$value"
 }
 
-install_anytls() {
-  local machine asset latest tmp archive binary
+# ---------- sing-box 安装 ----------
+
+version_ok() {  # $1 形如 1.13.2
+  local major minor
+  if [[ "$1" =~ ^([0-9]+)\.([0-9]+) ]]; then
+    major=$((10#${BASH_REMATCH[1]}))
+    minor=$((10#${BASH_REMATCH[2]}))
+    (( major > 1 )) && return 0
+    (( major == 1 && minor >= MIN_MINOR )) && return 0
+    return 1
+  fi
+  return 1
+}
+
+install_singbox() {
+  local machine asset latest ver url tmp staged asset_arch
   machine="$(uname -m)"
   case "$machine" in
-    x86_64|amd64) asset="anytls_*_linux_amd64.zip" ;;
-    aarch64|arm64) asset="anytls_*_linux_arm64.zip" ;;
+    x86_64|amd64) asset_arch="amd64" ;;
+    aarch64|arm64) asset_arch="arm64" ;;
     *) die "不支持的 CPU 架构：$machine" ;;
   esac
-  latest="$(curl -fsSL https://api.github.com/repos/anytls/anytls-go/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
-  [[ -n "$latest" ]] || die "无法获取 anytls-go 最新版本。"
-  asset="${asset/\*/${latest#v}}"
+
+  latest="$(curl -fsSL --max-time 20 https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
+  [[ -n "$latest" ]] || die "无法获取 sing-box 最新版本。"
+  ver="${latest#v}"
+
+  version_ok "$ver" || die "sing-box $ver 低于 AnyTLS 所需的 1.${MIN_MINOR}。"
+
+  asset="sing-box-${ver}-linux-${asset_arch}.tar.gz"
+  url="https://github.com/SagerNet/sing-box/releases/download/${latest}/${asset}"
   tmp="$(mktemp -d)"
-  archive="$tmp/anytls.zip"
-  curl -fL "https://github.com/anytls/anytls-go/releases/download/${latest}/${asset}" -o "$archive"
-  unzip -q "$archive" -d "$tmp"
-  binary="$(find "$tmp" -type f -name anytls-server -perm -u+x -print -quit)"
-  [[ -n "$binary" ]] || die "安装包中未找到 anytls-server。"
+  echo "下载 sing-box ${ver} ..."
+  curl -fL --max-time 180 "$url" -o "$tmp/sb.tar.gz" || { rm -rf "$tmp"; die "下载失败：$url"; }
+  tar -xzf "$tmp/sb.tar.gz" -C "$tmp" || { rm -rf "$tmp"; die "解压失败。"; }
+
+  staged="$(find "$tmp" -type f -name sing-box -perm -u+x -print -quit)"
+  [[ -n "$staged" ]] || { rm -rf "$tmp"; die "压缩包中未找到 sing-box 可执行文件。"; }
+
   install -d -m 755 "$INSTALL_DIR"
-  install -m 755 "$binary" "$BIN"
+  install -m 755 "$staged" "$BIN"
   rm -rf "$tmp"
-  echo "已安装 AnyTLS：$latest"
+  echo "已安装 sing-box：$ver"
 }
+
+current_version() {
+  [[ -x "$BIN" ]] || return 0
+  "$BIN" version 2>/dev/null | head -n1 | awk '{print $3}'
+}
+
+# ---------- 证书 ----------
+
+selfsigned_cert() {  # $1 = sni
+  local sni="$1"
+  install -d -m 700 "$CERT_DIR"
+  openssl ecparam -genkey -name prime256v1 -noout -out "$CERT_DIR/privkey.pem" 2>/dev/null
+  if ! openssl req -new -x509 -days 3650 \
+      -key "$CERT_DIR/privkey.pem" \
+      -out "$CERT_DIR/fullchain.pem" \
+      -subj "/CN=${sni}" \
+      -addext "subjectAltName=DNS:${sni}" 2>/dev/null; then
+    # 老版本 openssl 不认 -addext
+    openssl req -new -x509 -days 3650 \
+      -key "$CERT_DIR/privkey.pem" \
+      -out "$CERT_DIR/fullchain.pem" \
+      -subj "/CN=${sni}" || die "自签证书生成失败。"
+  fi
+  chmod 600 "$CERT_DIR/privkey.pem"
+  chmod 644 "$CERT_DIR/fullchain.pem"
+  echo "已生成自签证书（CN=${sni}，10 年有效）。客户端需要 insecure=1。"
+}
+
+acme_cert() {  # $1 = domain, $2 = email
+  local domain="$1" email="$2" acme=/root/.acme.sh/acme.sh
+  install -d -m 700 "$CERT_DIR"
+
+  if port_is_listening 80; then
+    die "TCP/80 被占用，无法用 HTTP-01 验证。请先腾出 80，或改用自签模式。"
+  fi
+
+  command -v cron >/dev/null 2>&1 || systemctl enable --now cron 2>/dev/null || true
+
+  if [[ ! -x "$acme" ]]; then
+    echo "安装 acme.sh ..."
+    curl -fsSL https://get.acme.sh | sh -s email="${email:-admin@${domain}}" >/dev/null 2>&1 || die "acme.sh 安装失败。"
+  fi
+  [[ -x "$acme" ]] || die "找不到 $acme"
+
+  echo "为 ${domain} 申请 Let's Encrypt 证书 ..."
+  "$acme" --issue -d "$domain" --standalone -k ec-256 --force >/dev/null || die "证书申请失败（检查 DNS 是否解析到本机、80 端口是否可达）。"
+
+  if ! "$acme" --install-cert -d "$domain" --ecc \
+      --key-file "$CERT_DIR/privkey.pem" \
+      --fullchain-file "$CERT_DIR/fullchain.pem" \
+      --reloadcmd "systemctl restart $SERVICE_NAME" >/dev/null; then
+    die "证书安装失败。"
+  fi
+  chmod 600 "$CERT_DIR/privkey.pem"
+  chmod 644 "$CERT_DIR/fullchain.pem"
+  echo "正规证书已安装，acme.sh 每 60 天自动续期并重启服务。客户端不需要 insecure。"
+}
+
+cert_present() { [[ -s "$CERT_DIR/fullchain.pem" && -s "$CERT_DIR/privkey.pem" ]]; }
+
+# ---------- 端口 / 配置 / 服务 ----------
 
 choose_listen_port() {
   local candidate
@@ -145,18 +236,64 @@ choose_listen_port() {
   die "TCP/443 和常见 *443 备用端口均已被占用。"
 }
 
+write_config() {  # $1=port $2=password $3=sni
+  local port="$1" password="$2" sni="$3"
+  install -d -m 700 "$CONFIG_DIR"
+  cat >"$CONFIG_FILE" <<EOF
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "anytls",
+      "tag": "anytls-in",
+      "listen": "0.0.0.0",
+      "listen_port": ${port},
+      "users": [
+        {
+          "name": "default",
+          "password": "$(json_escape "$password")"
+        }
+      ],
+      "padding_scheme": [
+        "stop=5",
+        "0=40-60",
+        "1=180-320",
+        "2=500-900,c,700-1200,c,600-1000",
+        "3=12-24,600-1000",
+        "4=600-1000"
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "$(json_escape "$sni")",
+        "certificate_path": "${CERT_DIR}/fullchain.pem",
+        "key_path": "${CERT_DIR}/privkey.pem"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}
+EOF
+  chmod 600 "$CONFIG_FILE"
+}
+
 write_service() {
-  local port="$1" password="$2"
   cat >"$SERVICE_FILE" <<EOF
 [Unit]
-Description=AnyTLS 服务端
+Description=AnyTLS 服务端（sing-box）
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=LOG_LEVEL=warn
-ExecStart=$BIN -l 0.0.0.0:$port -p $password
+ExecStart=$BIN run -c $CONFIG_FILE
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
@@ -167,13 +304,14 @@ EOF
   chmod 644 "$SERVICE_FILE"
 }
 
-make_link() {
-  local password="$1" host="$2" port="$3" name="$4" sni="$5"
-  printf 'anytls://%s@%s:%s/?sni=%s&insecure=1#%s' "$(urlencode "$password")" "$host" "$port" "$(urlencode "$sni")" "$(urlencode "$name")"
+make_link() {  # $1=password $2=host $3=port $4=name $5=sni $6=insecure(1/0)
+  local password="$1" host="$2" port="$3" name="$4" sni="$5" insecure="$6"
+  printf 'anytls://%s@%s:%s/?sni=%s&insecure=%s#%s' \
+    "$(urlencode "$password")" "$host" "$port" "$(urlencode "$sni")" "$insecure" "$(urlencode "$name")"
 }
 
-write_info() {
-  local name="$1" host="$2" port="$3" password="$4" sni="$5" link="$6"
+write_info() {  # $1=name $2=host $3=port $4=password $5=sni $6=link $7=cert_mode
+  local name="$1" host="$2" port="$3" password="$4" sni="$5" link="$6" cert_mode="$7"
   install -d -m 700 "$CONFIG_DIR"
   cat >"$INFO_FILE" <<EOF
 NODE_NAME='$name'
@@ -182,14 +320,20 @@ PORT='$port'
 PASSWORD='$password'
 SNI='$sni'
 LINK='$link'
+CERT_MODE='$cert_mode'
 EOF
   chmod 600 "$INFO_FILE"
 }
 
 info_value() { sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$INFO_FILE"; }
+insecure_flag() { [[ "$(info_value CERT_MODE)" == "acme" ]] && printf '0' || printf '1'; }
+insecure_bool() { [[ "$(info_value CERT_MODE)" == "acme" ]] && printf 'false' || printf 'true'; }
+
 subscription_info_value() { if [[ -f "$SUBSCRIPTION_INFO_FILE" ]]; then sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$SUBSCRIPTION_INFO_FILE"; fi; return 0; }
 agent_info_value() { if [[ -f "$DASHBOARD_AGENT_CONF" ]]; then sed -n "s/^$1='\\(.*\\)'$/\\1/p" "$DASHBOARD_AGENT_CONF"; fi; return 0; }
-require_node_files() { [[ -x "$BIN" && -f "$INFO_FILE" && -f "$SERVICE_FILE" ]] || die "未找到 AnyTLS 节点，请先安装。"; }
+require_node_files() { [[ -x "$BIN" && -f "$CONFIG_FILE" && -f "$INFO_FILE" && -f "$SERVICE_FILE" ]] || die "未找到 AnyTLS 节点，请先安装。"; }
+
+# ---------- 订阅（与原脚本协议一致，未改动） ----------
 
 load_subscription_identity() {
   SUB_DASHBOARD_URL="$(agent_info_value DASHBOARD_URL)"
@@ -224,9 +368,9 @@ sync_subscription_node() {
   password="$(info_value PASSWORD)"
   sni="$(info_value SNI)"
   load_subscription_identity
-  payload="$(printf '{"node_id":"%s","name":"%s","server":"%s","port":%s,"password":"%s","sni":"%s","insecure":true}' \
+  payload="$(printf '{"node_id":"%s","name":"%s","server":"%s","port":%s,"password":"%s","sni":"%s","insecure":%s}' \
     "$(json_escape "$SUB_NODE_ID")" "$(json_escape "$name")" "$(json_escape "$host")" "$port" \
-    "$(json_escape "$password")" "$(json_escape "$sni")")"
+    "$(json_escape "$password")" "$(json_escape "$sni")" "$(insecure_bool)")"
   if ! response="$(curl -fsS --max-time 20 -X POST "${SUB_DASHBOARD_URL}/api/v1/anytls" \
     -H "Authorization: Bearer ${SUB_INGEST_TOKEN}" -H "Content-Type: application/json" --data "$payload")"; then
     echo "警告：AnyTLS 节点未能登记到聚合订阅服务。" >&2
@@ -274,20 +418,26 @@ remove_subscription_node() {
 
 generate_subscription() { sync_subscription_node "${1:-false}"; }
 
+# ---------- 启停 ----------
+
 start_service() {
+  "$BIN" check -c "$CONFIG_FILE" || die "sing-box 配置校验失败，未启动。"
   systemctl daemon-reload
   systemctl enable --now "$SERVICE_NAME"
   systemctl is-active --quiet "$SERVICE_NAME" || { journalctl -u "$SERVICE_NAME" -n 50 --no-pager >&2 || true; die "AnyTLS 未能启动。"; }
 }
 
+# ---------- 安装 ----------
+
 install_node() {
   install_deps
   configure_bbr
   configure_china_time
-  install_anytls
+  install_singbox
   systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
   local port input host name password link public_ip sni default_sni
+  local cert_mode cert_choice email link_insecure
   port="$(choose_listen_port)"
   read -r -p "监听 TCP 端口 [$port]: " input
   port="${input:-$port}"
@@ -298,26 +448,62 @@ install_node() {
   read -r -p "节点连接地址（IP 或已解析域名）[${public_ip:-请手动输入}]: " host
   host="${host:-$public_ip}"
   [[ -n "$host" && "$host" != *[[:space:]]* ]] || die "节点地址不能为空或包含空格。"
-  if [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    default_sni="www.yahoo.co.jp"
-  else
-    default_sni="$host"
-  fi
-  read -r -p "客户端 TLS SNI [$default_sni]: " sni
-  sni="${sni:-$default_sni}"
-  [[ "$sni" =~ ^[A-Za-z0-9.-]+$ ]] || die "SNI 格式不正确。"
 
-  read -r -p "节点名称 [AnyTLS-Backup]: " name
-  name="${name:-AnyTLS-Backup}"
+  # ---- 证书：有域名就允许上正规证书 ----
+  cert_mode="selfsigned"
+  if [[ ! "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo
+    echo "检测到连接地址是域名（$host）。"
+    echo "  1) 用 Let's Encrypt 签正规证书（推荐，客户端不需要 insecure）"
+    echo "  2) 继续用自签证书（客户端需要 insecure=1）"
+    read -r -p "选择 [1]: " cert_choice
+    cert_choice="${cert_choice:-1}"
+    if [[ "$cert_choice" == "1" ]]; then
+      read -r -p "证书通知邮箱（可留空）: " email
+      if [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]]; then
+        acme_cert "$host" "$email"
+        cert_mode="acme"
+      else
+        echo "域名格式异常，回退到自签。"
+      fi
+    fi
+  fi
+
+  if [[ "$cert_mode" == "acme" ]]; then
+    sni="$host"
+    echo "SNI 固定为证书域名：$sni"
+  else
+    if [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+      default_sni="www.yahoo.co.jp"
+    else
+      default_sni="$host"
+    fi
+    read -r -p "客户端 TLS SNI [$default_sni]: " sni
+    sni="${sni:-$default_sni}"
+    [[ "$sni" =~ ^[A-Za-z0-9.-]+$ ]] || die "SNI 格式不正确。"
+    selfsigned_cert "$sni"
+  fi
+
+  read -r -p "节点名称 [AnyTLS-SingBox]: " name
+  name="${name:-AnyTLS-SingBox}"
   name="${name//$'\n'/}"
+
   password="$(openssl rand -hex 24)"
-  link="$(make_link "$password" "$host" "$port" "$name" "$sni")"
-  write_service "$port" "$password"
-  write_info "$name" "$host" "$port" "$password" "$sni" "$link"
+  write_config "$port" "$password" "$sni"
+  write_service
   start_service
 
+  link_insecure="1"
+  [[ "$cert_mode" == "acme" ]] && link_insecure="0"
+  link="$(make_link "$password" "$host" "$port" "$name" "$sni" "$link_insecure")"
+  write_info "$name" "$host" "$port" "$password" "$sni" "$link" "$cert_mode"
+
   echo
-  echo "AnyTLS 节点已创建。参考实现使用自签证书，所以链接中的 insecure=1 是必需的："
+  if [[ "$cert_mode" == "acme" ]]; then
+    echo "AnyTLS 节点已创建（sing-box 内核，Let's Encrypt 正规证书）。"
+  else
+    echo "AnyTLS 节点已创建（sing-box 内核，自签证书，链接中的 insecure=1 是必需的）。"
+  fi
   print_all_formats "$name" "$host" "$port" "$password" "$sni" "$link"
   echo
   if confirm_yes "是否将这台 VPS 加入 AnyTLS 聚合订阅？"; then
@@ -325,16 +511,25 @@ install_node() {
   fi
 }
 
+# ---------- 展示 ----------
+
 show_link() {
   require_node_files
   print_all_formats "$(info_value NODE_NAME)" "$(info_value SERVER_ADDRESS)" "$(info_value PORT)" "$(info_value PASSWORD)" "$(info_value SNI)" "$(info_value LINK)"
 }
-print_link_qr() { echo "$1"; echo; qrencode -t ANSIUTF8 "$1"; }
+
 print_all_formats() {
   local name="$1" host="$2" port="$3" password="$4" sni="$5" link="$6"
+  local insecure secure_js
+  insecure="$(insecure_flag)"
+  secure_js="$(insecure_bool)"
+
   echo "$link"
   echo
-  qrencode -t ANSIUTF8 "$link"
+  if command -v qrencode >/dev/null 2>&1; then
+    qrencode -t ANSIUTF8 "$link"
+  fi
+
   cat <<EOF
 
 sing-box 出站配置：
@@ -347,7 +542,7 @@ sing-box 出站配置：
   "tls": {
     "enabled": true,
     "server_name": "$sni",
-    "insecure": true
+    "insecure": $secure_js
   }
 }
 
@@ -360,8 +555,9 @@ mihomo 节点配置：
   client-fingerprint: chrome
   udp: true
   sni: "$sni"
-  skip-cert-verify: true
+  skip-cert-verify: $secure_js
 EOF
+
   if [[ -f "$SUBSCRIPTION_INFO_FILE" ]]; then
     cat <<EOF
 
@@ -370,24 +566,34 @@ $(subscription_info_value SUBSCRIPTION_URL)
 EOF
   fi
 }
-show_status() { [[ -x "$BIN" ]] && "$BIN" -h 2>&1 | head -n1 || true; systemctl status "$SERVICE_NAME" --no-pager; }
+
+show_status() {
+  local ver
+  ver="$(current_version)"
+  [[ -n "$ver" ]] && echo "sing-box 版本：$ver"
+  systemctl status "$SERVICE_NAME" --no-pager
+}
+
 show_logs() { journalctl -u "$SERVICE_NAME" -n 100 --no-pager; }
 restart_node() { systemctl restart "$SERVICE_NAME"; systemctl is-active --quiet "$SERVICE_NAME" || die "重启失败。"; echo "已重启。"; }
+
+# ---------- 修改 ----------
 
 change_port() {
   require_node_files
   local old_port new_port password host name link sni
-  old_port="$(info_value PORT)"; password="$(info_value PASSWORD)"; host="$(info_value SERVER_ADDRESS)"; name="$(info_value NODE_NAME)"; sni="$(info_value SNI)"
+  old_port="$(info_value PORT)"; password="$(info_value PASSWORD)"; host="$(info_value SERVER_ADDRESS)"
+  name="$(info_value NODE_NAME)"; sni="$(info_value SNI)"
   read -r -p "新的监听 TCP 端口 [$old_port]: " new_port
   new_port="${new_port:-$old_port}"
   validate_port "$new_port" || die "端口必须在 1-65535 之间。"
   [[ "$new_port" == "$old_port" ]] && { echo "端口未改变。"; return; }
   port_is_listening "$new_port" && die "TCP/$new_port 已被占用。"
-  write_service "$new_port" "$password"
-  link="$(make_link "$password" "$host" "$new_port" "$name" "$sni")"
-  write_info "$name" "$host" "$new_port" "$password" "$sni" "$link"
+  write_config "$new_port" "$password" "$sni"
   systemctl daemon-reload
   restart_node
+  link="$(make_link "$password" "$host" "$new_port" "$name" "$sni" "$(insecure_flag)")"
+  write_info "$name" "$host" "$new_port" "$password" "$sni" "$link" "$(info_value CERT_MODE)"
   refresh_subscription_if_enabled
   print_all_formats "$name" "$host" "$new_port" "$password" "$sni" "$link"
 }
@@ -395,7 +601,8 @@ change_port() {
 change_link_host() {
   require_node_files
   local old_host host port password name link sni default_sni
-  old_host="$(info_value SERVER_ADDRESS)"; port="$(info_value PORT)"; password="$(info_value PASSWORD)"; name="$(info_value NODE_NAME)"; sni="$(info_value SNI)"
+  old_host="$(info_value SERVER_ADDRESS)"; port="$(info_value PORT)"; password="$(info_value PASSWORD)"
+  name="$(info_value NODE_NAME)"; sni="$(info_value SNI)"
   read -r -p "节点连接地址（IP 或已解析域名）[$old_host]: " host
   host="${host:-$old_host}"
   [[ -n "$host" && "$host" != *[[:space:]]* ]] || die "节点地址不能为空或包含空格。"
@@ -404,8 +611,8 @@ change_link_host() {
   read -r -p "客户端 TLS SNI [$default_sni]: " sni
   sni="${sni:-$default_sni}"
   [[ "$sni" =~ ^[A-Za-z0-9.-]+$ ]] || die "SNI 格式不正确。"
-  link="$(make_link "$password" "$host" "$port" "$name" "$sni")"
-  write_info "$name" "$host" "$port" "$password" "$sni" "$link"
+  link="$(make_link "$password" "$host" "$port" "$name" "$sni" "$(insecure_flag)")"
+  write_info "$name" "$host" "$port" "$password" "$sni" "$link" "$(info_value CERT_MODE)"
   refresh_subscription_if_enabled
   print_all_formats "$name" "$host" "$port" "$password" "$sni" "$link"
 }
@@ -414,33 +621,43 @@ reset_password() {
   require_node_files
   local port host name password link sni
   confirm_yes "是否更换密码？旧链接会立即失效。" || return
-  port="$(info_value PORT)"; host="$(info_value SERVER_ADDRESS)"; name="$(info_value NODE_NAME)"; sni="$(info_value SNI)"
+  port="$(info_value PORT)"; host="$(info_value SERVER_ADDRESS)"; name="$(info_value NODE_NAME)"
+  sni="$(info_value SNI)"
   password="$(openssl rand -hex 24)"
-  link="$(make_link "$password" "$host" "$port" "$name" "$sni")"
-  write_service "$port" "$password"
-  write_info "$name" "$host" "$port" "$password" "$sni" "$link"
-  systemctl daemon-reload
+  write_config "$port" "$password" "$sni"
   restart_node
+  link="$(make_link "$password" "$host" "$port" "$name" "$sni" "$(insecure_flag)")"
+  write_info "$name" "$host" "$port" "$password" "$sni" "$link" "$(info_value CERT_MODE)"
   refresh_subscription_if_enabled
   print_all_formats "$name" "$host" "$port" "$password" "$sni" "$link"
 }
 
-upgrade_anytls() { require_node_files; install_anytls; restart_node; }
+upgrade_anytls() {
+  require_node_files
+  local old new
+  old="$(current_version)"
+  install_singbox
+  new="$(current_version)"
+  restart_node
+  echo "sing-box：${old:-未知} -> ${new:-未知}"
+}
 
 uninstall_node() {
   confirm_yes "是否卸载本脚本创建的 AnyTLS 节点？" || return
   remove_subscription_node true || true
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
-  rm -f "$SERVICE_FILE" "$INFO_FILE" "$SUBSCRIPTION_INFO_FILE"
+  rm -f "$SERVICE_FILE" "$INFO_FILE" "$SUBSCRIPTION_INFO_FILE" "$CONFIG_FILE"
   rmdir "$CONFIG_DIR" 2>/dev/null || true
   systemctl daemon-reload
   echo "AnyTLS 节点已卸载；二进制保留在 $INSTALL_DIR。"
 }
 
+# ---------- 入口 ----------
+
 menu() {
   cat <<EOF
 ========================================
- AnyTLS 独立节点脚本 $SCRIPT_VERSION
+ AnyTLS 独立节点脚本（sing-box 内核）$SCRIPT_VERSION
 ========================================
 1. 安装 / 重建节点
 2. 查看节点链接和二维码
@@ -450,7 +667,7 @@ menu() {
 6. 更换监听端口
 7. 设置节点连接地址
 8. 更换密码
-9. 检查 / 更新 anytls-go
+9. 检查 / 更新 sing-box
 10. 卸载节点
 11. 加入 / 更新聚合订阅
 12. 退出聚合订阅
