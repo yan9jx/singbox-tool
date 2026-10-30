@@ -384,7 +384,6 @@ EOF
     rm -f "$route_file"
     cat >"$site_file" <<EOF
 ${domain}:443 {
-    encode gzip
     handle ${path}* {
         reverse_proxy 127.0.0.1:${port}
     }
@@ -392,6 +391,7 @@ EOF
     if [[ -n "$cover_domain" ]]; then
       cat >>"$site_file" <<EOF
     handle {
+        encode gzip
         header {
             defer
             -Via
