@@ -194,26 +194,35 @@ acme_cert() {  # $1 = domain, $2 = email
     die "TCP/80 被占用，无法用 HTTP-01 验证。请先腾出 80，或改用自签模式。"
   fi
 
-  command -v cron >/dev/null 2>&1 || systemctl enable --now cron 2>/dev/null || true
+  if ! command -v crontab >/dev/null 2>&1; then
+    echo "安装 cron，以便自动续期证书 ..."
+    command -v apt-get >/dev/null 2>&1 || die "缺少 crontab，且无法使用 apt-get 安装 cron。"
+    apt-get update || die "更新软件包列表失败，无法安装 cron。"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y cron || die "cron 安装失败。"
+  fi
+  command -v crontab >/dev/null 2>&1 || die "找不到 crontab，无法设置证书自动续期。"
+  systemctl enable --now cron || die "无法启动 cron，证书将无法自动续期。"
+  systemctl is-active --quiet cron || die "cron 未运行，证书将无法自动续期。"
 
   if [[ ! -x "$acme" ]]; then
     echo "安装 acme.sh ..."
-    curl -fsSL https://get.acme.sh | sh -s email="${email:-admin@${domain}}" >/dev/null 2>&1 || die "acme.sh 安装失败。"
+    curl -fsSL https://get.acme.sh | sh -s email="${email:-admin@${domain}}" || die "acme.sh 安装失败，请查看上方错误信息。"
   fi
   [[ -x "$acme" ]] || die "找不到 $acme"
+  "$acme" --install-cronjob || die "无法设置 acme.sh 自动续期任务。"
 
   echo "为 ${domain} 申请 Let's Encrypt 证书 ..."
-  "$acme" --issue -d "$domain" --standalone -k ec-256 --force >/dev/null || die "证书申请失败（检查 DNS 是否解析到本机、80 端口是否可达）。"
+  "$acme" --issue -d "$domain" --standalone -k ec-256 --force --server letsencrypt || die "证书申请失败（检查上方错误、DNS 是否解析到本机、80 端口是否可达）。"
 
   if ! "$acme" --install-cert -d "$domain" --ecc \
       --key-file "$CERT_DIR/privkey.pem" \
       --fullchain-file "$CERT_DIR/fullchain.pem" \
-      --reloadcmd "systemctl restart $SERVICE_NAME" >/dev/null; then
+      --reloadcmd "if systemctl is-active --quiet $SERVICE_NAME; then systemctl restart $SERVICE_NAME; fi"; then
     die "证书安装失败。"
   fi
   chmod 600 "$CERT_DIR/privkey.pem"
   chmod 644 "$CERT_DIR/fullchain.pem"
-  echo "正规证书已安装，acme.sh 每 60 天自动续期并重启服务。客户端不需要 insecure。"
+  echo "正规证书已安装，acme.sh 将定期检查并自动续期，续期后重启服务。客户端不需要 insecure。"
 }
 
 cert_present() { [[ -s "$CERT_DIR/fullchain.pem" && -s "$CERT_DIR/privkey.pem" ]]; }
