@@ -391,8 +391,14 @@ ${domain}:443 {
 EOF
     if [[ -n "$cover_domain" ]]; then
       cat >>"$site_file" <<EOF
-    reverse_proxy https://${cover_domain} {
-        header_up Host ${cover_domain}
+    handle {
+        header {
+            defer
+            -Via
+        }
+        reverse_proxy https://${cover_domain} {
+            header_up Host ${cover_domain}
+        }
     }
 EOF
     else
