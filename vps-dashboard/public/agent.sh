@@ -93,7 +93,7 @@ cat > "$APP" <<'PY'
 #!/usr/bin/env python3
 import argparse, collections, concurrent.futures, glob, ipaddress, json, math, os, platform, re, shutil, socket, statistics, subprocess, threading, time, urllib.request
 
-VERSION = "1.3.3"
+VERSION = "1.3.4"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
@@ -687,6 +687,38 @@ def listening_ports():
         found[(port, process)] = {"port": port, "process": process}
     return sorted(found.values(), key=lambda item: (item["port"], item["process"]))[:200]
 
+def node_endpoints():
+    # Read public routing metadata only. Never evaluate shell configuration or
+    # export passwords, UUIDs, private keys or subscription URLs.
+    found = {}
+    domain_pattern = r"[a-zA-Z0-9](?:[a-zA-Z0-9.-]{0,251}[a-zA-Z0-9])?"
+    for path in glob.glob("/etc/caddy-naive/sites/*.caddy") + glob.glob("/etc/caddy/sites/*.caddy"):
+        try:
+            with open(path) as handle: contents = handle.read(65536)
+            for match in re.finditer(r"^\s*(?:https://)?(" + domain_pattern + r")(?::([0-9]{1,5}))?\s*\{", contents, re.M):
+                domain, port = match[1].lower(), int(match[2] or 443)
+                if "." in domain and 1 <= port <= 65535:
+                    found[(port, domain)] = {"port": port, "sni": domain, "kind": "tls", "source": "caddy"}
+        except (OSError, ValueError): pass
+    for path in ["/etc/sing-box/config.json", "/etc/reality-xhttp/config.json", "/etc/xray/config.json", "/usr/local/etc/xray/config.json"]:
+        data = read_json(path, {})
+        for item in data.get("inbounds", []) if isinstance(data, dict) else []:
+            if not isinstance(item, dict): continue
+            try: port = int(item.get("listen_port", item.get("port", 0)))
+            except (ValueError, TypeError): continue
+            if not 1 <= port <= 65535 or item.get("listen", "") in ["127.0.0.1", "::1", "localhost"]: continue
+            stream = item.get("streamSettings") if isinstance(item.get("streamSettings"), dict) else {}
+            if item.get("type") in ["hysteria2", "tuic"] or stream.get("network") in ["kcp", "quic"]: continue
+            tls = item.get("tls") or stream.get("tlsSettings") or {}
+            if not isinstance(tls, dict): tls = {}
+            reality_options = tls.get("reality") if isinstance(tls.get("reality"), dict) else {}
+            reality = stream.get("security") == "reality" or reality_options.get("enabled")
+            domain = str(tls.get("server_name", tls.get("serverName", ""))).lower()
+            if reality or not re.fullmatch(domain_pattern, domain) or "." not in domain:
+                if not any(key[0] == port for key in found): found[(port, "")] = {"port": port, "sni": "", "kind": "tcp", "source": "inbound"}
+            else: found[(port, domain)] = {"port": port, "sni": domain, "kind": "tls", "source": "inbound"}
+    return list(found.values())[:12]
+
 def public_ip():
     state = read_json(STATE, {})
     if state.get("public_ip") and time.time() - state.get("ip_checked", 0) < 21600:
@@ -737,7 +769,7 @@ def collect(conf, probe_config=None):
         "health": "degraded" if alerts else "normal", "alerts": alerts,
         "cpu": cpuinfo(), "memory": memory, "swap": swap,
         "disk": {"total_bytes": disk.total, "used_bytes": disk.used, "free_bytes": disk.free, "usage_pct": pct(disk.used, disk.total)},
-        "network": network(), "services": installed, "ports": listening_ports(),
+        "network": network(), "services": installed, "ports": listening_ports(), "node_endpoints": node_endpoints(),
         "reachability": {"outbound": "normal", "inbound_probe": "unknown"},
         "agent_version": VERSION,
     }
