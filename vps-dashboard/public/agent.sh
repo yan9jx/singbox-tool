@@ -93,14 +93,15 @@ cat > "$APP" <<'PY'
 #!/usr/bin/env python3
 import argparse, concurrent.futures, glob, json, math, os, platform, re, shutil, socket, statistics, subprocess, time, urllib.request
 
-VERSION = "1.2.6"
+VERSION = "1.2.7"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
 UPDATE_SERVICE = "ejectors-vps-agent-update.service"
-PING_COUNT = 10
-PING_INTERVAL_SECONDS = 0.25
-PING_TIMEOUT_SECONDS = 8
+PING_COUNT = 20
+PING_INTERVAL_SECONDS = 0.5
+PING_TIMEOUT_SECONDS = 18
+PROBE_TARGET_STATE = {}
 
 def read_conf():
     data = {}
@@ -256,23 +257,27 @@ def ping_target(target):
     env = dict(os.environ, LC_ALL="C", LANG="C")
     try:
         result = subprocess.run(
-            ["ping", "-n", "-c", str(PING_COUNT), "-i", str(PING_INTERVAL_SECONDS), "-W", "1", target],
+            ["ping", "-4", "-n", "-c", str(PING_COUNT), "-i", str(PING_INTERVAL_SECONDS), "-W", "2", "-w", "16", target],
             text=True, capture_output=True, timeout=PING_TIMEOUT_SECONDS, env=env,
         )
         output = result.stdout + "\n" + result.stderr
-        loss_match = re.search(r"([\d.]+)%\s+packet loss", output)
         packet_match = re.search(r"(\d+)\s+packets transmitted,\s+(\d+)\s+(?:packets )?received", output)
         samples = [float(value) for value in re.findall(r"time[=<]([\d.]+)\s*ms", output)]
-        if not loss_match or not packet_match:
+        if not packet_match:
             return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
         sent, received = int(packet_match.group(1)), int(packet_match.group(2))
-        loss = round(float(loss_match.group(1)), 1)
+        if sent <= 0:
+            return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
+        received = min(sent, received)
+        loss = round((sent - received) * 100.0 / sent, 1)
+        address_match = re.search(r"^PING\s+\S+\s+\((\d+\.\d+\.\d+\.\d+)\)", output, re.MULTILINE)
         latency = round(float(statistics.median(samples)), 1) if samples else None
         p95 = round(float(sorted(samples)[max(0, math.ceil(len(samples) * 0.95) - 1)]), 1) if samples else None
         deltas = [abs(samples[index] - samples[index - 1]) for index in range(1, len(samples))]
         jitter = round(float(statistics.fmean(deltas)), 1) if deltas else 0.0 if samples else None
         return {
             "target": target,
+            "target_ip": address_match.group(1) if address_match else target if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", target) else "",
             "latency_ms": latency,
             "loss_pct": loss,
             "jitter_ms": jitter,
@@ -302,17 +307,28 @@ def probe_carrier(probe):
     if not targets: return base
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
         results = list(executor.map(ping_target, targets))
-    responsive = [item for item in results if item["status"] in {"ok", "loss"} and item["latency_ms"] is not None]
-    if not responsive: return base
-    carrier_median = float(statistics.median(item["latency_ms"] for item in responsive))
-    representative = min(responsive, key=lambda item: (
-        item["loss_pct"],
-        abs(item["latency_ms"] - carrier_median),
-        item.get("jitter_ms") if item.get("jitter_ms") is not None else float("inf"),
-    ))
+    responsive = [item for item in results if item.get("packets_received", 0) > 0]
+    measurable = [item for item in results if item.get("packets_sent", 0) > 0]
+    if not measurable: return base
+    key = (base["carrier"], tuple(targets))
+    state = PROBE_TARGET_STATE.setdefault(key, {"target": targets[0], "failures": 0})
+    representative = next((item for item in results if item["target"] == state["target"]), results[0])
+    if representative.get("packets_received", 0) > 0:
+        state["failures"] = 0
+    else:
+        state["failures"] += 1
+        # Keep partial loss visible; only fail over after three completely failed rounds.
+        if state["failures"] >= 3 or not representative.get("packets_sent", 0):
+            replacement = next(iter(responsive), None)
+            if replacement is not None:
+                representative = replacement
+                state.update(target=representative["target"], failures=0)
+    if not representative.get("packets_sent", 0):
+        representative = measurable[0]
     return {
         **base,
         "target": representative["target"],
+        "target_ip": representative.get("target_ip", ""),
         "latency_ms": representative["latency_ms"],
         "loss_pct": representative["loss_pct"],
         "jitter_ms": representative.get("jitter_ms"),
