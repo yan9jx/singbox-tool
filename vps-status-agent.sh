@@ -93,7 +93,7 @@ cat > "$APP" <<'PY'
 #!/usr/bin/env python3
 import argparse, collections, concurrent.futures, glob, ipaddress, json, math, os, platform, re, shutil, socket, statistics, subprocess, threading, time, urllib.request
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
@@ -330,8 +330,10 @@ def ping_target(target):
     env = dict(os.environ, LC_ALL="C", LANG="C")
     try:
         started_at = time.time()
+        started_clock = time.monotonic()
+        deadline = math.ceil((PING_COUNT - 1) * PING_INTERVAL_SECONDS + 3)
         result = subprocess.run(
-            ["ping", "-4", "-n", "-D", "-c", str(PING_COUNT), "-i", str(PING_INTERVAL_SECONDS), "-W", "2", "-w", "16", target],
+            ["ping", "-4", "-n", "-D", "-c", str(PING_COUNT), "-i", str(PING_INTERVAL_SECONDS), "-W", "2", "-w", str(deadline), target],
             text=True, capture_output=True, timeout=PING_TIMEOUT_SECONDS, env=env,
         )
         output = result.stdout + "\n" + result.stderr
@@ -374,6 +376,8 @@ def ping_target(target):
             "packets_received": received,
             "rtt_samples": samples,
             "packet_points": packet_points,
+            "_started_clock": started_clock,
+            "_ended_clock": time.monotonic(),
             "status": "ok" if loss == 0 else "loss",
         }
     except Exception:
@@ -493,6 +497,63 @@ def rolling_probe(batches, now):
     )
     return result
 
+class CarrierProbeSampler:
+    def __init__(self, probe):
+        self.carrier = str(probe.get("carrier", ""))
+        self.targets = list(dict.fromkeys(str(target) for target in probe.get("targets", [])[:5] if target))
+        self.target = self.targets[0] if self.targets else ""
+        self.failures = 0
+        self.pending = collections.deque()
+        self.backup = None
+        self.backup_index = 0
+        self.last_backup = -float("inf")
+
+    def schedule(self, executor, now):
+        # Launch on a fixed cadence even while the previous batch waits for
+        # missing replies. Bound outstanding work if ping/DNS itself stalls.
+        if self.target and len(self.pending) < 3:
+            self.pending.append((executor.submit(ping_target, self.target), self.target, now))
+        alternatives = [target for target in self.targets if target != self.target]
+        if self.failures >= 2 and alternatives and self.backup is None and now - self.last_backup >= PING_COUNT:
+            target = alternatives[self.backup_index % len(alternatives)]
+            self.backup_index += 1
+            self.last_backup = now
+            self.backup = (executor.submit(ping_target, target), self.target)
+
+    def poll(self, now):
+        batches = []
+        while self.pending and self.pending[0][0].done():
+            future, target, started = self.pending.popleft()
+            try:
+                probe = dict(future.result())
+            except Exception:
+                probe = {"target": target, "status": "unavailable", "packets_sent": 0, "packets_received": 0, "latency_ms": None, "loss_pct": None}
+            received = probe.get("packets_received", 0)
+            if target == self.target:
+                self.failures = 0 if received else self.failures + 1
+            start = probe.pop("_started_clock", started)
+            end = probe.pop("_ended_clock", now)
+            probe.update(carrier=self.carrier, targets_tested=1, responsive_targets=1 if received else 0)
+            batches.append({"start": start, "end": end, "probe": probe})
+        if self.backup and self.backup[0].done():
+            future, expected_target = self.backup
+            self.backup = None
+            try:
+                replacement = future.result()
+            except Exception:
+                replacement = {}
+            # Partial loss never causes a switch. A backup must actually reply,
+            # and the active endpoint must have failed three complete batches.
+            if self.target == expected_target and self.failures >= 3 and replacement.get("packets_received", 0) > 0:
+                self.target = replacement["target"]
+                self.failures = 0
+        return batches
+
+    def cancel(self):
+        for future, _, _ in self.pending: future.cancel()
+        if self.backup: self.backup[0].cancel()
+
+
 class NetworkProbeMonitor:
     def __init__(self):
         self.lock = threading.Lock()
@@ -519,28 +580,34 @@ class NetworkProbeMonitor:
                 self.thread.start()
 
     def run(self):
-        while True:
-            self.wake.clear()
-            with self.lock:
-                config, generation = self.config, self.generation
-            if not config or not config.get("enabled"):
-                self.wake.wait(5)
-                continue
-            started = time.monotonic()
-            try:
-                quality = measure_network_quality(config)
-                ended = time.monotonic()
-                if quality:
-                    with self.lock:
-                        if generation == self.generation:
-                            for probe in quality["probes"]:
-                                batches = self.batches.setdefault(probe["carrier"], collections.deque(maxlen=90))
-                                batches.append({"start": started, "end": ended, "probe": probe})
-                            self.measured_at = quality["measured_at"]
-            except Exception as exc:
-                print(time.strftime("%F %T"), "probe failed:", str(exc)[:120], flush=True)
-            # Sample continuously, independently of the heartbeat upload interval.
-            self.wake.wait(max(0.2, PING_COUNT * PING_INTERVAL_SECONDS - (time.monotonic() - started)))
+        samplers, active_generation, next_tick = [], -1, 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+            while True:
+                self.wake.clear()
+                with self.lock:
+                    config, generation = self.config, self.generation
+                enabled = config and config.get("enabled")
+                if generation != active_generation:
+                    for sampler in samplers: sampler.cancel()
+                    samplers = [CarrierProbeSampler(probe) for probe in list(config.get("probes", []))[:3]] if enabled else []
+                    active_generation = generation
+                    # Stay away from a wall-second boundary so process startup
+                    # jitter does not split otherwise regular sends across cells.
+                    next_tick = time.monotonic() + ((0.25 - time.time() % 1) % 1)
+                now = time.monotonic()
+                for sampler in samplers:
+                    batches = sampler.poll(now)
+                    if batches:
+                        with self.lock:
+                            if generation == self.generation:
+                                window = self.batches.setdefault(sampler.carrier, collections.deque(maxlen=90))
+                                window.extend(batches)
+                                self.measured_at = int(time.time())
+                if enabled and now >= next_tick:
+                    for sampler in samplers: sampler.schedule(executor, now)
+                    next_tick += PING_COUNT * PING_INTERVAL_SECONDS
+                    if next_tick <= now: next_tick = now + PING_COUNT * PING_INTERVAL_SECONDS
+                self.wake.wait(0.1 if enabled else 5)
 
     def snapshot(self):
         with self.lock:
