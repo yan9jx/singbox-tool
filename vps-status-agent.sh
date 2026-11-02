@@ -834,8 +834,9 @@ URL="https://raw.githubusercontent.com/yan9jx/singbox-tool/main/vps-status-agent
 tmp="$(mktemp /tmp/ejectors-agent-update.XXXXXX.sh)"
 trap 'rm -f "$tmp"' EXIT
 python3 - "$URL?ts=$(date +%s)" "$tmp" <<'PY'
-import sys, urllib.request
-req = urllib.request.Request(sys.argv[1], headers={"User-Agent": "ejectors-vps-agent-updater"})
+import sys, time, urllib.request
+url = sys.argv[1] + ("&" if "?" in sys.argv[1] else "?") + "update=" + str(time.time_ns())
+req = urllib.request.Request(url, headers={"User-Agent": "ejectors-vps-agent-updater", "Cache-Control": "no-cache"})
 with urllib.request.urlopen(req, timeout=30) as response, open(sys.argv[2], "wb") as output:
     output.write(response.read())
 PY
