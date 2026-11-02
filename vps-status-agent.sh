@@ -826,7 +826,8 @@ if __name__ == "__main__": main()
 PY
 chmod 755 "$APP"
 
-cat > "$UPDATE_APP" <<'EOF'
+UPDATE_APP_TMP="$(mktemp "${UPDATE_APP}.XXXXXX")"
+cat > "$UPDATE_APP_TMP" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 APP="/usr/local/bin/ejectors-vps-agent"
@@ -849,7 +850,8 @@ newest="$(printf '%s\n%s\n' "$current" "$remote" | sort -V | tail -n1)"
 echo "更新 Agent：$current -> $remote"
 bash "$tmp" update
 EOF
-chmod 755 "$UPDATE_APP"
+chmod 755 "$UPDATE_APP_TMP"
+mv -f "$UPDATE_APP_TMP" "$UPDATE_APP"
 
 cat > "$SERVICE" <<EOF
 [Unit]
