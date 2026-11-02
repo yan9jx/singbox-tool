@@ -93,7 +93,7 @@ cat > "$APP" <<'PY'
 #!/usr/bin/env python3
 import argparse, collections, concurrent.futures, glob, ipaddress, json, math, os, platform, re, shutil, socket, statistics, subprocess, threading, time, urllib.request
 
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
@@ -340,26 +340,28 @@ def ping_target(target):
         output = result.stdout + "\n" + result.stderr
         packet_match = re.search(r"(\d+)\s+packets transmitted,\s+(\d+)\s+(?:packets )?received", output)
         replies = {}
-        for sequence, value in re.findall(r"icmp_seq[= ](\d+)[^\n]*?time[=<]([\d.]+)\s*ms", output):
-            replies.setdefault(sequence, float(value))
-        samples = list(replies.values())
+        for sequence, comparison, value in re.findall(r"icmp_seq[= ](\d+)[^\n]*?time([=<])([\d.]+)\s*ms", output):
+            replies.setdefault(sequence, float(value) if comparison == "=" else None)
         if not packet_match:
             return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
         sent, received = int(packet_match.group(1)), int(packet_match.group(2))
-        if sent <= 0:
+        if sent <= 0 or received > sent:
             return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
-        received = min(sent, received)
+        replies = {sequence: value for sequence, value in replies.items() if 1 <= int(sequence) <= sent and (value is None or math.isfinite(value) and 0 <= value <= 60000)}
+        # Summary counts remain authoritative. Do not average a partial set
+        # of reply lines and present it as the whole batch's latency.
+        samples = [value for value in replies.values() if value is not None] if len(replies) == received and all(value is not None for value in replies.values()) else []
         # Recover each reply's send time from its receive timestamp and RTT.
         # Unanswered packets use the same fixed one-second sequence schedule.
         bases = [float(stamp) - float(rtt) / 1000 - (int(sequence) - 1) * PING_INTERVAL_SECONDS
-                 for stamp, sequence, rtt in re.findall(r"^\[([\d.]+)\][^\n]*?icmp_seq[= ](\d+)[^\n]*?time[=<]([\d.]+)\s*ms", output, re.MULTILINE)]
+                 for stamp, sequence, rtt in re.findall(r"^\[([\d.]+)\][^\n]*?icmp_seq[= ](\d+)[^\n]*?time=([\d.]+)\s*ms", output, re.MULTILINE) if sequence in replies and replies[sequence] is not None]
         first_sent_at = statistics.median(bases) if bases else started_at
         can_identify_losses = sent - len(replies) == sent - received
         packet_points = []
         for sequence in range(1, sent + 1):
             rtt = replies.get(str(sequence))
             packet_points.append([int(first_sent_at + (sequence - 1) * PING_INTERVAL_SECONDS), round(rtt, 1) if rtt is not None else None,
-                                  0 if rtt is not None else 100 if can_identify_losses else None])
+                                  0 if str(sequence) in replies else 100 if can_identify_losses else None])
         loss = round((sent - received) * 100.0 / sent, 1)
         address_match = re.search(r"^PING\s+\S+\s+\((\d+\.\d+\.\d+\.\d+)\)", output, re.MULTILINE)
         latency = round(float(statistics.median(samples)), 1) if samples else None
@@ -377,6 +379,7 @@ def ping_target(target):
             "packets_received": received,
             "rtt_samples": samples,
             "packet_points": packet_points,
+            "measured_at": int(time.time()),
             "_started_clock": started_clock,
             "_ended_clock": time.monotonic(),
             "status": "ok" if loss == 0 else "loss",
@@ -456,10 +459,17 @@ def packet_seconds(batches):
     points = {}
     for batch in batches:
         for point in batch["probe"].get("packet_points", []):
-            points[point[0]] = point
+            points.setdefault(point[0], []).append(point)
     if not points: return []
     end = max(points)
-    return [points[at] for at in sorted(points) if at >= end - 29]
+    seconds = []
+    for at in sorted(points):
+        if at < end - 29: continue
+        packets = points[at]
+        rtts = [point[1] for point in packets if point[1] is not None and point[2] == 0]
+        loss = round(sum(point[2] for point in packets) / len(packets), 2) if all(point[2] is not None for point in packets) else None
+        seconds.append([at, round(statistics.fmean(rtts), 1) if rtts else None, loss])
+    return seconds
 
 def rolling_probe(batches, now):
     latest = batches[-1] if batches else None
@@ -467,7 +477,7 @@ def rolling_probe(batches, now):
     result = {key: value for key, value in latest["probe"].items() if key not in {"rtt_samples", "packet_points"}}
     result.update(window_seconds=0, seconds=packet_seconds(batches))
     if now - latest["end"] > 30:
-        result.update(status="unavailable", latency_ms=None, loss_pct=None, p95_ms=None, jitter_ms=None, packets_sent=0, packets_received=0)
+        result.update(status="unavailable", latency_ms=None, loss_pct=None, p95_ms=None, jitter_ms=None, packets_sent=0, packets_received=0, measured_at=int(time.time()))
         return result
     if result.get("status") == "unavailable": return result
     identity = (result.get("target"), result.get("target_ip"))
@@ -475,7 +485,8 @@ def rolling_probe(batches, now):
     for batch in reversed(batches):
         probe = batch["probe"]
         if batch["start"] < now - PROBE_WINDOW_SECONDS: break
-        if probe.get("status") == "unavailable" or (probe.get("target"), probe.get("target_ip")) != identity: break
+        if probe.get("status") == "unavailable": continue
+        if (probe.get("target"), probe.get("target_ip")) != identity: break
         selected.append(batch)
     selected.reverse()
     if not selected:
@@ -530,6 +541,7 @@ class CarrierProbeSampler:
             except Exception:
                 probe = {"target": target, "status": "unavailable", "packets_sent": 0, "packets_received": 0, "latency_ms": None, "loss_pct": None}
             received = probe.get("packets_received", 0)
+            probe.setdefault("measured_at", int(time.time()))
             if target == self.target:
                 self.failures = 0 if received else self.failures + 1
             start = probe.pop("_started_clock", started)
