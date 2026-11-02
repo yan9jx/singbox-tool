@@ -91,17 +91,20 @@ install -d -m 700 /var/lib/ejectors-vps-agent
 
 cat > "$APP" <<'PY'
 #!/usr/bin/env python3
-import argparse, concurrent.futures, glob, ipaddress, json, math, os, platform, re, shutil, socket, statistics, subprocess, time, urllib.request
+import argparse, collections, concurrent.futures, glob, ipaddress, json, math, os, platform, re, shutil, socket, statistics, subprocess, threading, time, urllib.request
 
-VERSION = "1.2.8"
+VERSION = "1.2.9"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
 UPDATE_SERVICE = "ejectors-vps-agent-update.service"
-PING_COUNT = 20
-PING_INTERVAL_SECONDS = 0.5
+PING_COUNT = 10
+PING_INTERVAL_SECONDS = 1
 PING_TIMEOUT_SECONDS = 18
 PROBE_TARGET_STATE = {}
+PROBE_WINDOW_SECONDS = 300
+REPORT_INTERVAL_SECONDS = 15
+PROBE_MONITOR = None
 
 def read_conf():
     data = {}
@@ -332,7 +335,10 @@ def ping_target(target):
         )
         output = result.stdout + "\n" + result.stderr
         packet_match = re.search(r"(\d+)\s+packets transmitted,\s+(\d+)\s+(?:packets )?received", output)
-        samples = [float(value) for value in re.findall(r"time[=<]([\d.]+)\s*ms", output)]
+        replies = {}
+        for sequence, value in re.findall(r"icmp_seq[= ](\d+)[^\n]*?time[=<]([\d.]+)\s*ms", output):
+            replies.setdefault(sequence, float(value))
+        samples = list(replies.values())
         if not packet_match:
             return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
         sent, received = int(packet_match.group(1)), int(packet_match.group(2))
@@ -354,6 +360,7 @@ def ping_target(target):
             "p95_ms": p95,
             "packets_sent": sent,
             "packets_received": received,
+            "rtt_samples": samples,
             "status": "ok" if loss == 0 else "loss",
         }
     except Exception:
@@ -375,13 +382,17 @@ def probe_carrier(probe):
         "responsive_targets": 0,
     }
     if not targets: return base
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
-        results = list(executor.map(ping_target, targets))
+    key = (base["carrier"], tuple(targets))
+    state = PROBE_TARGET_STATE.setdefault(key, {"target": targets[0], "failures": 0})
+    # Only continuously ping the active endpoint. Test backups on the third
+    # failed round instead of generating constant traffic to every fallback.
+    measured_targets = [state["target"]] if probe.get("continuous") and state["failures"] < 2 else targets
+    base["targets_tested"] = len(measured_targets)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(measured_targets)) as executor:
+        results = list(executor.map(ping_target, measured_targets))
     responsive = [item for item in results if item.get("packets_received", 0) > 0]
     measurable = [item for item in results if item.get("packets_sent", 0) > 0]
     if not measurable: return base
-    key = (base["carrier"], tuple(targets))
-    state = PROBE_TARGET_STATE.setdefault(key, {"target": targets[0], "failures": 0})
     representative = next((item for item in results if item["target"] == state["target"]), results[0])
     if representative.get("packets_received", 0) > 0:
         state["failures"] = 0
@@ -407,19 +418,126 @@ def probe_carrier(probe):
         "packets_received": representative.get("packets_received", 0),
         "status": representative["status"],
         "responsive_targets": len(responsive),
+        "rtt_samples": representative.get("rtt_samples", []),
     }
 
-def network_quality(config):
+def measure_network_quality(config):
     if not config or not config.get("enabled") or not config.get("probes"):
         return None
     probes = list(config.get("probes", []))[:3]
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as executor:
-        results = list(executor.map(probe_carrier, probes))
+        results = list(executor.map(lambda probe: probe_carrier({**probe, "continuous": True}), probes))
     return {
         "region": str(config.get("region", "")),
         "measured_at": int(time.time()),
         "probes": results,
     }
+
+def rolling_probe(batches, now):
+    latest = batches[-1] if batches else None
+    if not latest: return None
+    result = {key: value for key, value in latest["probe"].items() if key != "rtt_samples"}
+    result.update(window_seconds=0)
+    if now - latest["end"] > 30:
+        result.update(status="unavailable", latency_ms=None, loss_pct=None, p95_ms=None, jitter_ms=None, packets_sent=0, packets_received=0)
+        return result
+    if result.get("status") == "unavailable": return result
+    identity = (result.get("target"), result.get("target_ip"))
+    selected = []
+    for batch in reversed(batches):
+        probe = batch["probe"]
+        if batch["start"] < now - PROBE_WINDOW_SECONDS: break
+        if probe.get("status") == "unavailable" or (probe.get("target"), probe.get("target_ip")) != identity: break
+        selected.append(batch)
+    selected.reverse()
+    if not selected:
+        result.update(status="unavailable", latency_ms=None, loss_pct=None, packets_sent=0, packets_received=0)
+        return result
+    sent = sum(batch["probe"].get("packets_sent", 0) for batch in selected)
+    received = sum(batch["probe"].get("packets_received", 0) for batch in selected)
+    samples = [value for batch in selected for value in batch["probe"].get("rtt_samples", [])]
+    loss = round((sent - received) * 100.0 / sent, 2) if sent else None
+    deltas = [abs(right - left) for left, right in zip(samples, samples[1:])]
+    result.update(
+        packets_sent=sent, packets_received=received, loss_pct=loss,
+        # Show the recent batch's mean RTT so short-term changes remain visible.
+        # Packet loss uses the larger rolling window for finer resolution.
+        latency_ms=round(statistics.fmean(latest["probe"].get("rtt_samples", [])), 1) if latest["probe"].get("rtt_samples") else None,
+        p95_ms=round(sorted(samples)[math.ceil(len(samples) * .95) - 1], 1) if samples else None,
+        jitter_ms=round(statistics.fmean(deltas), 1) if deltas else 0.0 if samples else None,
+        status="ok" if loss == 0 else "loss" if loss is not None else "unavailable",
+        window_seconds=round(selected[-1]["end"] - selected[0]["start"], 1),
+    )
+    return result
+
+class NetworkProbeMonitor:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.config = None
+        self.config_key = ""
+        self.generation = 0
+        self.batches = {}
+        self.measured_at = 0
+        self.thread = None
+
+    def configure(self, config):
+        config_key = json.dumps(config, sort_keys=True)
+        with self.lock:
+            if config_key != self.config_key:
+                self.config = config
+                self.config_key = config_key
+                self.generation += 1
+                self.batches = {}
+                self.measured_at = 0
+                self.wake.set()
+            if self.thread is None and config and config.get("enabled"):
+                self.thread = threading.Thread(target=self.run, daemon=True, name="network-probe")
+                self.thread.start()
+
+    def run(self):
+        while True:
+            self.wake.clear()
+            with self.lock:
+                config, generation = self.config, self.generation
+            if not config or not config.get("enabled"):
+                self.wake.wait(5)
+                continue
+            started = time.monotonic()
+            try:
+                quality = measure_network_quality(config)
+                ended = time.monotonic()
+                if quality:
+                    with self.lock:
+                        if generation == self.generation:
+                            for probe in quality["probes"]:
+                                batches = self.batches.setdefault(probe["carrier"], collections.deque(maxlen=90))
+                                batches.append({"start": started, "end": ended, "probe": probe})
+                            self.measured_at = quality["measured_at"]
+            except Exception as exc:
+                print(time.strftime("%F %T"), "probe failed:", str(exc)[:120], flush=True)
+            # Sample continuously, independently of the heartbeat's 60-second sleep.
+            self.wake.wait(max(0.2, PING_COUNT * PING_INTERVAL_SECONDS - (time.monotonic() - started)))
+
+    def snapshot(self):
+        with self.lock:
+            if not self.config or not self.config.get("enabled") or not self.batches: return None
+            now = time.monotonic()
+            probes = [rolling_probe(list(batches), now) for batches in self.batches.values()]
+            return {"region": self.config.get("region", ""), "measured_at": self.measured_at,
+                    "probes": [probe for probe in probes if probe is not None]}
+
+def configure_network_quality(config):
+    global PROBE_MONITOR
+    if PROBE_MONITOR is None: PROBE_MONITOR = NetworkProbeMonitor()
+    PROBE_MONITOR.configure(config)
+
+def network_quality(config):
+    if not config or not config.get("enabled"):
+        if PROBE_MONITOR is not None: PROBE_MONITOR.configure(config)
+        return None
+    configure_network_quality(config)
+    return PROBE_MONITOR.snapshot()
 
 def service_snapshot():
     units = command(["systemctl", "list-unit-files", "--type=service", "--no-legend"])
@@ -552,15 +670,17 @@ def main():
         return
     probe_config = None
     while True:
+        report_started = time.monotonic()
         try:
             response = post(conf, "/api/v1/heartbeat", collect(conf, probe_config))
             if isinstance(response, dict) and isinstance(response.get("probe_config"), dict):
                 probe_config = response["probe_config"]
+                configure_network_quality(probe_config)
             if isinstance(response, dict): handle_agent_action(response.get("agent_action"))
         except Exception as exc:
             print(time.strftime("%F %T"), "report failed:", exc, flush=True)
         if not args.loop: return
-        time.sleep(60)
+        time.sleep(max(1, REPORT_INTERVAL_SECONDS - (time.monotonic() - report_started)))
 
 if __name__ == "__main__": main()
 PY
@@ -642,6 +762,6 @@ systemctl enable --now ejectors-vps-agent-update.timer
 sleep 2
 systemctl --no-pager --full status ejectors-vps-agent.service || true
 echo
-echo "安装完成：状态数据默认每 10 秒上报一次。"
+echo "安装完成：状态数据每 15 秒上报一次。"
 echo "自动更新：每天北京时间 04:00 检查。"
 echo "卸载命令：sudo bash $0 uninstall"
