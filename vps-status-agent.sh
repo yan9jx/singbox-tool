@@ -91,9 +91,9 @@ install -d -m 700 /var/lib/ejectors-vps-agent
 
 cat > "$APP" <<'PY'
 #!/usr/bin/env python3
-import argparse, concurrent.futures, glob, json, math, os, platform, re, shutil, socket, statistics, subprocess, time, urllib.request
+import argparse, concurrent.futures, glob, ipaddress, json, math, os, platform, re, shutil, socket, statistics, subprocess, time, urllib.request
 
-VERSION = "1.2.7"
+VERSION = "1.2.8"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
@@ -244,8 +244,78 @@ def network():
         "rx_bps": max(0, round((rx - old.get("rx_bytes", rx)) / elapsed)),
         "tx_bps": max(0, round((tx - old.get("tx_bytes", tx)) / elapsed)),
     }
-    write_state({"timestamp": now, "rx_bytes": rx, "tx_bytes": tx, "public_ip": old.get("public_ip", ""), "ip_checked": old.get("ip_checked", 0)})
+    tcp = tcp_snapshot()
+    result["tcp_quality"] = tcp_window(old.get("tcp_snapshot"), tcp)
+    result["tcp_quality"].update(tcp_connection_rtt(command(["ss", "-tineHO", "state", "established"])))
+    write_state({"timestamp": now, "rx_bytes": rx, "tx_bytes": tx, "public_ip": old.get("public_ip", ""), "ip_checked": old.get("ip_checked", 0), "tcp_snapshot": tcp})
     return result
+
+def parse_proc_counters(text, group):
+    lines = text.splitlines()
+    for index in range(len(lines) - 1):
+        keys, values = lines[index].split(), lines[index + 1].split()
+        if keys and values and keys[0] == values[0] == group + ":" and len(keys) == len(values):
+            return {key: int(value) for key, value in zip(keys[1:], values[1:])}
+    return {}
+
+def tcp_snapshot():
+    try:
+        with open("/proc/net/snmp") as f: counters = parse_proc_counters(f.read(), "Tcp")
+        if not {"OutSegs", "RetransSegs"}.issubset(counters): return None
+        try:
+            with open("/proc/net/netstat") as f: extra = parse_proc_counters(f.read(), "TcpExt")
+        except (OSError, ValueError): extra = {}
+        with open("/proc/sys/kernel/random/boot_id") as f: boot = f.read().strip()
+        return {"at": time.time(), "clock": time.monotonic(), "boot_id": boot,
+                "out": counters["OutSegs"], "retrans": counters["RetransSegs"],
+                "original_data": extra.get("TCPOrigDataSent"), "syn_retrans": extra.get("TCPSynRetrans")}
+    except (OSError, ValueError): return None
+
+def tcp_window(previous, current):
+    result = {"status": "unavailable", "retrans_pct": None, "window_seconds": 0,
+              "original_segments": 0, "retrans_segments": 0, "syn_retrans_segments": None, "basis": "original_data"}
+    if not current: return result
+    basis = "original_data" if current.get("original_data") is not None else "out"
+    result.update(status="warming", basis=basis)
+    if not isinstance(previous, dict) or previous.get("boot_id") != current.get("boot_id"): return result
+    elapsed = current["clock"] - previous.get("clock", current["clock"])
+    if not 1 <= elapsed <= 600: return result
+    for key in ("out", "retrans", basis):
+        if previous.get(key) is None or current[key] < previous[key]: return result
+    sent = current[basis] - previous[basis]
+    retrans = current["retrans"] - previous["retrans"]
+    result.update(window_seconds=round(elapsed, 1), original_segments=sent, retrans_segments=retrans)
+    if current.get("syn_retrans") is not None and previous.get("syn_retrans") is not None and current["syn_retrans"] >= previous["syn_retrans"]:
+        result["syn_retrans_segments"] = current["syn_retrans"] - previous["syn_retrans"]
+    if sent == 0:
+        result["status"] = "retransmitting" if retrans else "idle"
+        return result
+    # This is a retransmission/original-segment ratio, not an end-to-end packet-loss probability.
+    # Repeated retransmissions can legitimately make the ratio exceed 100%.
+    result.update(status="measured" if sent >= 100 else "low_sample", retrans_pct=round(retrans * 100.0 / sent, 2))
+    return result
+
+def tcp_connection_rtt(output):
+    samples = []
+    for line in output.splitlines():
+        fields = line.split()
+        if fields and fields[0] in {"ESTAB", "ESTABLISHED"}: fields = fields[1:]
+        if len(fields) < 4: continue
+        try:
+            peer = ipaddress.ip_address(fields[3].rsplit(":", 1)[0].strip("[]"))
+            if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped: peer = peer.ipv4_mapped
+            if not peer.is_global: continue
+        except ValueError: continue
+        rtt = re.search(r"\brtt:([\d.]+)/", line)
+        # Ignore stale socket RTTs; do not manufacture a zero when there are no active sockets.
+        activity = [int(value) for value in re.findall(r"\b(?:lastsnd|lastrcv|lastack):(\d+)", line)]
+        if not rtt or not activity or min(activity) > 120000: continue
+        value = float(rtt.group(1))
+        if not math.isfinite(value) or not 0 < value <= 60000: continue
+        samples.append(value)
+    return {"rtt_ms": round(statistics.median(samples), 2) if samples else None,
+            "rtt_p95_ms": round(sorted(samples)[math.ceil(len(samples) * .95) - 1], 2) if samples else None,
+            "rtt_connections": len(samples)}
 
 def command(args):
     try: return subprocess.run(args, text=True, capture_output=True, timeout=4).stdout.strip()
