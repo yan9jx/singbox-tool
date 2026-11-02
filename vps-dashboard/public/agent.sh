@@ -93,12 +93,12 @@ cat > "$APP" <<'PY'
 #!/usr/bin/env python3
 import argparse, collections, concurrent.futures, glob, ipaddress, json, math, os, platform, re, shutil, socket, statistics, subprocess, threading, time, urllib.request
 
-VERSION = "1.2.9"
+VERSION = "1.3.0"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
 UPDATE_SERVICE = "ejectors-vps-agent-update.service"
-PING_COUNT = 10
+PING_COUNT = 5
 PING_INTERVAL_SECONDS = 1
 PING_TIMEOUT_SECONDS = 18
 PROBE_TARGET_STATE = {}
@@ -329,8 +329,9 @@ def ping_target(target):
         return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
     env = dict(os.environ, LC_ALL="C", LANG="C")
     try:
+        started_at = time.time()
         result = subprocess.run(
-            ["ping", "-4", "-n", "-c", str(PING_COUNT), "-i", str(PING_INTERVAL_SECONDS), "-W", "2", "-w", "16", target],
+            ["ping", "-4", "-n", "-D", "-c", str(PING_COUNT), "-i", str(PING_INTERVAL_SECONDS), "-W", "2", "-w", "16", target],
             text=True, capture_output=True, timeout=PING_TIMEOUT_SECONDS, env=env,
         )
         output = result.stdout + "\n" + result.stderr
@@ -345,6 +346,17 @@ def ping_target(target):
         if sent <= 0:
             return {"target": target, "latency_ms": None, "loss_pct": None, "status": "unavailable", "packets_sent": 0, "packets_received": 0}
         received = min(sent, received)
+        # Recover each reply's send time from its receive timestamp and RTT.
+        # Unanswered packets use the same fixed one-second sequence schedule.
+        bases = [float(stamp) - float(rtt) / 1000 - (int(sequence) - 1) * PING_INTERVAL_SECONDS
+                 for stamp, sequence, rtt in re.findall(r"^\[([\d.]+)\][^\n]*?icmp_seq[= ](\d+)[^\n]*?time[=<]([\d.]+)\s*ms", output, re.MULTILINE)]
+        first_sent_at = statistics.median(bases) if bases else started_at
+        can_identify_losses = sent - len(replies) == sent - received
+        packet_points = []
+        for sequence in range(1, sent + 1):
+            rtt = replies.get(str(sequence))
+            packet_points.append([int(first_sent_at + (sequence - 1) * PING_INTERVAL_SECONDS), round(rtt, 1) if rtt is not None else None,
+                                  0 if rtt is not None else 100 if can_identify_losses else None])
         loss = round((sent - received) * 100.0 / sent, 1)
         address_match = re.search(r"^PING\s+\S+\s+\((\d+\.\d+\.\d+\.\d+)\)", output, re.MULTILINE)
         latency = round(float(statistics.median(samples)), 1) if samples else None
@@ -361,6 +373,7 @@ def ping_target(target):
             "packets_sent": sent,
             "packets_received": received,
             "rtt_samples": samples,
+            "packet_points": packet_points,
             "status": "ok" if loss == 0 else "loss",
         }
     except Exception:
@@ -419,6 +432,7 @@ def probe_carrier(probe):
         "status": representative["status"],
         "responsive_targets": len(responsive),
         "rtt_samples": representative.get("rtt_samples", []),
+        "packet_points": representative.get("packet_points", []),
     }
 
 def measure_network_quality(config):
@@ -433,11 +447,20 @@ def measure_network_quality(config):
         "probes": results,
     }
 
+def packet_seconds(batches):
+    points = {}
+    for batch in batches:
+        for point in batch["probe"].get("packet_points", []):
+            points[point[0]] = point
+    if not points: return []
+    end = max(points)
+    return [points[at] for at in sorted(points) if at >= end - 29]
+
 def rolling_probe(batches, now):
     latest = batches[-1] if batches else None
     if not latest: return None
-    result = {key: value for key, value in latest["probe"].items() if key != "rtt_samples"}
-    result.update(window_seconds=0)
+    result = {key: value for key, value in latest["probe"].items() if key not in {"rtt_samples", "packet_points"}}
+    result.update(window_seconds=0, seconds=packet_seconds(batches))
     if now - latest["end"] > 30:
         result.update(status="unavailable", latency_ms=None, loss_pct=None, p95_ms=None, jitter_ms=None, packets_sent=0, packets_received=0)
         return result
@@ -516,7 +539,7 @@ class NetworkProbeMonitor:
                             self.measured_at = quality["measured_at"]
             except Exception as exc:
                 print(time.strftime("%F %T"), "probe failed:", str(exc)[:120], flush=True)
-            # Sample continuously, independently of the heartbeat's 60-second sleep.
+            # Sample continuously, independently of the heartbeat upload interval.
             self.wake.wait(max(0.2, PING_COUNT * PING_INTERVAL_SECONDS - (time.monotonic() - started)))
 
     def snapshot(self):
@@ -669,6 +692,7 @@ def main():
         except Exception: pass
         return
     probe_config = None
+    report_interval = REPORT_INTERVAL_SECONDS
     while True:
         report_started = time.monotonic()
         try:
@@ -676,11 +700,15 @@ def main():
             if isinstance(response, dict) and isinstance(response.get("probe_config"), dict):
                 probe_config = response["probe_config"]
                 configure_network_quality(probe_config)
-            if isinstance(response, dict): handle_agent_action(response.get("agent_action"))
+            if isinstance(response, dict):
+                interval = response.get("report_interval_seconds")
+                if isinstance(interval, (int, float)) and not isinstance(interval, bool) and math.isfinite(interval):
+                    report_interval = max(5, min(120, int(interval)))
+                handle_agent_action(response.get("agent_action"))
         except Exception as exc:
             print(time.strftime("%F %T"), "report failed:", exc, flush=True)
         if not args.loop: return
-        time.sleep(max(1, REPORT_INTERVAL_SECONDS - (time.monotonic() - report_started)))
+        time.sleep(max(1, report_interval - (time.monotonic() - report_started)))
 
 if __name__ == "__main__": main()
 PY
@@ -762,6 +790,6 @@ systemctl enable --now ejectors-vps-agent-update.timer
 sleep 2
 systemctl --no-pager --full status ejectors-vps-agent.service || true
 echo
-echo "安装完成：状态数据每 15 秒上报一次。"
+echo "安装完成：上报间隔由面板按节点数量自动调整。"
 echo "自动更新：每天北京时间 04:00 检查。"
 echo "卸载命令：sudo bash $0 uninstall"
