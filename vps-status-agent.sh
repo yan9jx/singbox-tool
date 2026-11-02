@@ -93,7 +93,7 @@ cat > "$APP" <<'PY'
 #!/usr/bin/env python3
 import argparse, collections, concurrent.futures, glob, ipaddress, json, math, os, platform, re, shutil, socket, statistics, subprocess, threading, time, urllib.request
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
@@ -331,9 +331,10 @@ def ping_target(target):
     try:
         started_at = time.time()
         started_clock = time.monotonic()
-        deadline = math.ceil((PING_COUNT - 1) * PING_INTERVAL_SECONDS + 3)
+        # Do not combine -c with -w: iputils may then send extra packets
+        # until the reply count/deadline is reached. Strictly cap sends at -c.
         result = subprocess.run(
-            ["ping", "-4", "-n", "-D", "-c", str(PING_COUNT), "-i", str(PING_INTERVAL_SECONDS), "-W", "2", "-w", str(deadline), target],
+            ["ping", "-4", "-n", "-D", "-c", str(PING_COUNT), "-i", str(PING_INTERVAL_SECONDS), "-W", "2", target],
             text=True, capture_output=True, timeout=PING_TIMEOUT_SECONDS, env=env,
         )
         output = result.stdout + "\n" + result.stderr
