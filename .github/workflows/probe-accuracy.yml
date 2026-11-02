@@ -1,0 +1,23 @@
+name: Probe accuracy audit
+on:
+  push:
+    branches: ['codex/probe-accuracy-*']
+permissions:
+  contents: read
+jobs:
+  linux-network:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up disposable network namespaces
+        run: sudo bash tests/probe-network.sh
+      - name: Verify actual ping accuracy
+        run: sudo ip netns exec codex-probe-client python3 tests/probe-accuracy.py
+      - name: Clean up network namespaces
+        if: always()
+        run: |
+          sudo ip netns del codex-probe-client || true
+          sudo ip netns del codex-probe-server || true
