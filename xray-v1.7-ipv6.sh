@@ -394,15 +394,21 @@ EOF
     rm -f "$route_file"
     cat >"$site_file" <<EOF
 ${domain}:443 {
-    encode gzip
     handle ${path}* {
         reverse_proxy 127.0.0.1:${port}
     }
 EOF
     if [[ -n "$cover_domain" ]]; then
       cat >>"$site_file" <<EOF
-    reverse_proxy https://${cover_domain} {
-        header_up Host ${cover_domain}
+    handle {
+        encode gzip
+        header {
+            defer
+            -Via
+        }
+        reverse_proxy https://${cover_domain} {
+            header_up Host ${cover_domain}
+        }
     }
 EOF
     else
@@ -468,7 +474,7 @@ install_node() {
     "port": $port,
     "protocol": "vless",
     "settings": { "clients": [{ "id": "$uuid", "email": "xhttp" }], "decryption": "$(json_escape "$vless_decryption")" },
-    "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "$path", "mode": "auto" } }
+    "streamSettings": { "network": "xhttp", "sockopt": { "trustedXForwardedFor": ["127.0.0.1/32", "::1/128"] }, "xhttpSettings": { "path": "$path", "mode": "auto" } }
   }],
   "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
 }
