@@ -464,7 +464,7 @@ install_node() {
     "port": $port,
     "protocol": "vless",
     "settings": { "clients": [{ "id": "$uuid", "email": "xhttp" }], "decryption": "$(json_escape "$vless_decryption")" },
-    "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "$path", "mode": "auto" } }
+    "streamSettings": { "network": "xhttp", "sockopt": { "trustedXForwardedFor": ["127.0.0.1/32", "::1/128"] }, "xhttpSettings": { "path": "$path", "mode": "auto" } }
   }],
   "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
 }
