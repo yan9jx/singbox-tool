@@ -851,7 +851,7 @@ def collect(conf, probe_config=None):
     if quality: payload["network_quality"] = quality
     update = agent_update_status()
     if update: payload["agent_update_status"] = update
-    payload["sampled_at"] = int(time.time())
+    payload["sampled_at"] = time.time()
     return payload
 
 def post(conf, endpoint, payload):
@@ -878,7 +878,7 @@ def main():
         try:
             with open("/proc/uptime") as f: payload["uptime_seconds"] = int(float(f.read().split()[0]))
             with open("/proc/sys/kernel/random/boot_id") as f: payload["boot_id"] = f.read().strip()
-            payload["sampled_at"] = int(time.time())
+            payload["sampled_at"] = time.time()
         except OSError: pass
         try: post(conf, "/api/v1/shutdown", payload)
         except Exception: pass
