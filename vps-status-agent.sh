@@ -91,9 +91,9 @@ install -d -m 700 /var/lib/ejectors-vps-agent
 
 cat > "$APP" <<'PY'
 #!/usr/bin/env python3
-import argparse, collections, concurrent.futures, glob, ipaddress, json, math, os, platform, re, shutil, socket, statistics, subprocess, threading, time, urllib.request
+import argparse, collections, concurrent.futures, glob, ipaddress, json, math, os, platform, re, shutil, socket, statistics, subprocess, threading, time, urllib.request, uuid
 
-VERSION = "1.3.4"
+VERSION = "1.3.5"
 CONF = "/etc/ejectors-vps-agent.conf"
 STATE = "/var/lib/ejectors-vps-agent/state.json"
 UPDATE_STATE = "/var/lib/ejectors-vps-agent/update.json"
@@ -230,27 +230,101 @@ def cpuinfo():
 def pct(used, total):
     return round(used * 100 / total, 1) if total else 0
 
-def network():
-    rx = tx = 0
+def network_interfaces(counters, configured=""):
+    if configured.strip():
+        return sorted({name.strip() for name in configured.split(",") if name.strip() in counters})
+    physical = sorted(name for name in counters if os.path.exists("/sys/class/net/" + name + "/device"))
+    if physical: return physical
+    defaults = set()
+    for family in ["-4", "-6"]:
+        try:
+            for route in json.loads(command(["ip", "-j", family, "route", "show", "default"]) or "[]"):
+                if route.get("dev") in counters: defaults.add(route["dev"])
+        except (ValueError, TypeError): pass
+    virtual = re.compile(r"^(?:lo$|docker|veth|br-|virbr|tun|tap|wg|warp|tailscale|zt)")
+    return sorted(name for name in (defaults or counters) if not virtual.match(name))
+
+def traffic_month(at):
+    return time.strftime("%Y-%m", time.gmtime(at + 8 * 3600))
+
+def traffic_ledger(old, counters, boot_id, now, source, uptime=None):
+    prior = old.get("traffic_ledger", {})
+    ledger = {"id": prior.get("id") or uuid.uuid4().hex,
+              "totals": dict(prior.get("totals", {})), "estimated_months": list(prior.get("estimated_months", []))}
+    month = traffic_month(now)
+    ledger["totals"].setdefault(month, 0)
+    previous = old.get("interface_counters")
+    delta = 0
+    if isinstance(previous, dict) and old.get("counter_source") == source:
+        same_boot = old.get("boot_id") == boot_id
+        for name, values in counters.items():
+            before = previous.get(name)
+            if before is None: continue
+            for key in ["rx", "tx"]:
+                delta += values[key] - before[key] if same_boot and values[key] >= before[key] else values[key]
+    before_at = old.get("timestamp", now)
+    if old.get("boot_id") != boot_id:
+        before_at = max(before_at, now - max(0, uptime or 0))
+    if delta and traffic_month(before_at) != month and now > before_at:
+        # A sample straddling midnight cannot be split exactly without packet timestamps.
+        cursor = before_at
+        remaining = delta
+        while cursor < now:
+            tm = time.gmtime(cursor + 8 * 3600)
+            year, next_month = (tm.tm_year + 1, 1) if tm.tm_mon == 12 else (tm.tm_year, tm.tm_mon + 1)
+            boundary = __import__("calendar").timegm((year, next_month, 1, 0, 0, 0)) - 8 * 3600
+            end = min(now, boundary)
+            part = remaining if end == now else round(delta * (end - cursor) / (now - before_at))
+            key = traffic_month(cursor)
+            ledger["totals"][key] = ledger["totals"].get(key, 0) + part
+            if key not in ledger["estimated_months"]: ledger["estimated_months"].append(key)
+            remaining -= part
+            cursor = end
+    else:
+        ledger["totals"][month] += delta
+    months = sorted(ledger["totals"])[-3:]
+    ledger["totals"] = {key: ledger["totals"][key] for key in months}
+    ledger["estimated_months"] = [key for key in months if key in ledger["estimated_months"]]
+    return ledger, delta
+
+def network(conf=None):
+    counters = {}
     with open("/proc/net/dev") as f:
         for line in f:
             if ":" not in line: continue
             iface, values = line.split(":", 1)
-            if iface.strip() == "lo": continue
+            iface = iface.strip()
+            if iface == "lo": continue
             fields = values.split()
-            rx += int(fields[0]); tx += int(fields[8])
+            counters[iface] = {"rx": int(fields[0]), "tx": int(fields[8])}
+    selected = network_interfaces(counters, (conf or {}).get("NETWORK_INTERFACES", ""))
+    counters = {name: counters[name] for name in selected}
+    rx = sum(value["rx"] for value in counters.values())
+    tx = sum(value["tx"] for value in counters.values())
+    source = "interfaces:" + ",".join(selected)
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as f: boot_id = f.read().strip()
+    except OSError: boot_id = ""
+    try:
+        with open("/proc/uptime") as f: uptime = float(f.read().split()[0])
+    except (OSError, ValueError): uptime = 0
     old = read_json(STATE, {})
     now = time.time()
     elapsed = max(1, now - old.get("timestamp", now))
+    ledger, _ = traffic_ledger(old, counters, boot_id, now, source, uptime)
+    same = old.get("boot_id") == boot_id and old.get("counter_source") == source
     result = {
         "rx_bytes": rx, "tx_bytes": tx,
-        "rx_bps": max(0, round((rx - old.get("rx_bytes", rx)) / elapsed)),
-        "tx_bps": max(0, round((tx - old.get("tx_bytes", tx)) / elapsed)),
+        "rx_bps": max(0, round((rx - old.get("rx_bytes", rx)) / elapsed)) if same else 0,
+        "tx_bps": max(0, round((tx - old.get("tx_bytes", tx)) / elapsed)) if same else 0,
+        "counter_source": source, "interfaces": selected, "monthly_ledger": ledger,
     }
     tcp = tcp_snapshot()
     result["tcp_quality"] = tcp_window(old.get("tcp_snapshot"), tcp)
     result["tcp_quality"].update(tcp_connection_rtt(command(["ss", "-tineHO", "state", "established"])))
-    write_state({"timestamp": now, "rx_bytes": rx, "tx_bytes": tx, "public_ip": old.get("public_ip", ""), "ip_checked": old.get("ip_checked", 0), "tcp_snapshot": tcp})
+    write_state({"timestamp": now, "rx_bytes": rx, "tx_bytes": tx, "boot_id": boot_id,
+                 "counter_source": source, "interface_counters": counters, "traffic_ledger": ledger,
+                 "public_ip": old.get("public_ip", ""), "ip_checked": old.get("ip_checked", 0), "tcp_snapshot": tcp})
     return result
 
 def parse_proc_counters(text, group):
@@ -769,7 +843,7 @@ def collect(conf, probe_config=None):
         "health": "degraded" if alerts else "normal", "alerts": alerts,
         "cpu": cpuinfo(), "memory": memory, "swap": swap,
         "disk": {"total_bytes": disk.total, "used_bytes": disk.used, "free_bytes": disk.free, "usage_pct": pct(disk.used, disk.total)},
-        "network": network(), "services": installed, "ports": listening_ports(), "node_endpoints": node_endpoints(),
+        "network": network(conf), "services": installed, "ports": listening_ports(), "node_endpoints": node_endpoints(),
         "reachability": {"outbound": "normal", "inbound_probe": "unknown"},
         "agent_version": VERSION,
     }
@@ -777,6 +851,7 @@ def collect(conf, probe_config=None):
     if quality: payload["network_quality"] = quality
     update = agent_update_status()
     if update: payload["agent_update_status"] = update
+    payload["sampled_at"] = int(time.time())
     return payload
 
 def post(conf, endpoint, payload):
@@ -800,6 +875,11 @@ def main():
     conf = read_conf()
     if args.shutdown:
         payload = {"node_id": conf["NODE_ID"], "name": conf["NODE_NAME"], "provider": conf.get("PROVIDER", ""), "location": conf.get("LOCATION", ""), "agent_version": VERSION}
+        try:
+            with open("/proc/uptime") as f: payload["uptime_seconds"] = int(float(f.read().split()[0]))
+            with open("/proc/sys/kernel/random/boot_id") as f: payload["boot_id"] = f.read().strip()
+            payload["sampled_at"] = int(time.time())
+        except OSError: pass
         try: post(conf, "/api/v1/shutdown", payload)
         except Exception: pass
         return
